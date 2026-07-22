@@ -276,3 +276,94 @@ func main() int {
 		t.Errorf("main() = %d, want 23", got)
 	}
 }
+
+// TestImports_NewCrossPackageConstructorCall covers `new pkg.Point(...)` -
+// heap-allocating a struct via its constructor, both declared in an imported
+// package - proving auto-deref (`p.X`, no explicit `(*p).X` needed) and
+// export gating still compose correctly with `new` once a package boundary
+// is involved, not just the same-package case pointer_test.go's
+// TestNewConstructorCallHeapAllocates already covers.
+func TestImports_NewCrossPackageConstructorCall(t *testing.T) {
+	jm := compileProgramAndJIT(t, []programPackage{
+		{
+			key: "shapes",
+			files: []packageFile{
+				{"shapes/point.llx", `
+struct Point {
+	X int
+	Y int
+
+	constructor(x int, y int) {
+		this.X = x
+		this.Y = y
+	}
+}
+`},
+			},
+		},
+		{
+			key: "app",
+			files: []packageFile{
+				{"app/main.llx", `
+import "./shapes"
+
+func main() int {
+	p := new shapes.Point(3, 4)
+	p.X = p.X + 100
+	return p.X + p.Y
+}
+`},
+			},
+			imports: map[int][]sema.FileImport{
+				0: {{LocalName: "shapes", TargetKey: "shapes"}},
+			},
+		},
+	})
+	if got := jm.runInt32(t, "main"); got != 107 {
+		t.Errorf("main() = %d, want 107 (103 + 4)", got)
+	}
+}
+
+// TestImports_ClosureReturnedAcrossPackageBoundary covers a lambda created
+// inside an imported package's own exported function, returned across the
+// package boundary, and called from the importing package - proving the
+// closure's capture-context machinery (the arena-backed relay codegen.md
+// documents) doesn't need any package-boundary-specific handling: the
+// returned func(int) int value is just an ordinary fat pointer either way,
+// same as TestImports_CrossPackageFunctionCall already proves for a plain
+// (non-closure) function value.
+func TestImports_ClosureReturnedAcrossPackageBoundary(t *testing.T) {
+	jm := compileProgramAndJIT(t, []programPackage{
+		{
+			key: "counters",
+			files: []packageFile{
+				{"counters/counter.llx", `
+func MakeAdder(base int) func(int) int {
+	return func(x int) int {
+		return base + x
+	}
+}
+`},
+			},
+		},
+		{
+			key: "app",
+			files: []packageFile{
+				{"app/main.llx", `
+import "./counters"
+
+func main() int {
+	add10 := counters.MakeAdder(10)
+	return add10(5)
+}
+`},
+			},
+			imports: map[int][]sema.FileImport{
+				0: {{LocalName: "counters", TargetKey: "counters"}},
+			},
+		},
+	})
+	if got := jm.runInt32(t, "main"); got != 15 {
+		t.Errorf("main() = %d, want 15", got)
+	}
+}

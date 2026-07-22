@@ -60,6 +60,38 @@ func TestDereferenceNonPointerIsError(t *testing.T) {
 	expectCheckErrors(t, "func f() int {\n\tx := 5\n\treturn *x\n}\n", 1)
 }
 
+// TestAddressOfStructFieldAndArrayElement covers checkAddressable's
+// MemberExpr/IndexExpr branch - both a struct field and an array element are
+// valid `&` operands, same as a plain variable.
+func TestAddressOfStructFieldAndArrayElement(t *testing.T) {
+	checkSrc(t, pointStructSrc+"func f() int {\n\tp := Point{1, 2}\n\tq := &p.x\n\treturn *q\n}\n")
+	checkSrc(t, "func f() int {\n\ta := [3]int{1, 2, 3}\n\tq := &a[0]\n\treturn *q\n}\n")
+}
+
+// TestAddressOfDereferenceIsAddressable covers checkAddressable's own
+// UnaryExpr("*") branch - `&*p` (address-of a dereference) is a valid
+// operand, distinct from `*p` used as a plain value or lvalue elsewhere.
+func TestAddressOfDereferenceIsAddressable(t *testing.T) {
+	checkSrc(t, "func f() int {\n\tx := 5\n\tp := &x\n\tq := &*p\n\treturn *q\n}\n")
+}
+
+// TestAddressOfOtherUnaryExpressionIsError covers checkAddressable rejecting
+// a UnaryExpr whose operator isn't `*` (the only unary shape that's ever
+// addressable) - `&-x` (address-of a unary-minus expression) has no address
+// to take at all.
+func TestAddressOfOtherUnaryExpressionIsError(t *testing.T) {
+	expectCheckErrors(t, "func f() int {\n\tx := 5\n\tp := &-x\n\treturn *p\n}\n", 1)
+}
+
+// TestAssignToAddressOfExpressionIsError covers checkLValue rejecting a
+// UnaryExpr lvalue whose operator isn't `*` - `&x = 5` parses as exactly the
+// same node shape as `*p = 5` (parser.checkAssignTarget accepts any
+// UnaryExpr as a syntactically plausible lvalue - see its own doc comment),
+// so sema's checkLValue is what actually has to reject this one.
+func TestAssignToAddressOfExpressionIsError(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\tx := 5\n\t&x = 5\n}\n", 1)
+}
+
 // TestDereferenceAsLValue covers `*p = v` type-checking as a legal
 // assignment target, and `*p` reading back the pointee's own type.
 func TestDereferenceAsLValue(t *testing.T) {
@@ -100,6 +132,16 @@ func TestNewCompositeLitProducesPointer(t *testing.T) {
 // function call, in this case.
 func TestNewWrappingOrdinaryCallIsError(t *testing.T) {
 	expectCheckErrors(t, "func g() int {\n\treturn 1\n}\nfunc f() int {\n\tp := new g()\n\treturn 1\n}\n", 1)
+}
+
+// TestNewWrappingBareExpressionIsError covers checkNewExpr's own "default"
+// case - `new` wrapping something that isn't even a CallExpr or
+// CompositeLit at all (a bare literal), distinct from
+// TestNewWrappingOrdinaryCallIsError/TestNewWrappingConversionCallIsError,
+// which both wrap a CallExpr shape that just resolves to the wrong kind of
+// callee.
+func TestNewWrappingBareExpressionIsError(t *testing.T) {
+	expectCheckErrors(t, "func f() int {\n\tp := new 5\n\treturn 1\n}\n", 1)
 }
 
 // TestNewWrappingConversionCallIsError covers rejecting `new i64(5)` - a

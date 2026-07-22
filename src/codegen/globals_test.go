@@ -46,6 +46,90 @@ func main() int {
 	}
 }
 
+// TestGlobalStructAndArrayCompositeLitConstantFolding covers constCompositeLit
+// (constfold.go) - a struct-typed and a fixed-size-array-typed global var,
+// each initialized from a composite literal built entirely from constant
+// elements, folded directly into a real LLVM ConstNamedStruct/ConstArray
+// initializer rather than routed through the synthesized init function -
+// distinct from TestGlobalConstantFolding above, which only ever covers
+// plain numeric/bool constant folding, never a struct/array shape. Also
+// covers a keyed struct literal leaving a field unmentioned (zero-filled),
+// and a nested struct-of-structs literal, both still fully constant.
+func TestGlobalStructAndArrayCompositeLitConstantFolding(t *testing.T) {
+	jm := compileAndJIT(t, `
+struct Point {
+	x int
+	y int
+}
+
+struct Line {
+	start Point
+	end Point
+}
+
+var p Point = Point{3, 4}
+var nums [4]int = [4]int{10, 20, 30, 40}
+var keyed Point = Point{x: 9}
+var line Line = Line{Point{1, 2}, Point{3, 4}}
+
+func main() int {
+	return p.x + p.y + nums[0] + nums[3] + keyed.x + keyed.y + line.start.x + line.end.y
+}
+`)
+	// p: 3+4=7, nums[0]+nums[3]: 10+40=50, keyed: 9+0=9, line.start.x=1, line.end.y=4
+	if got := jm.runInt32(t, "main"); got != 71 {
+		t.Errorf("main() = %d, want 71", got)
+	}
+}
+
+// TestGlobalFloatConstantFolding covers constFloatBinaryExpr - a float-typed
+// global initializer folded entirely at compile time (arithmetic and
+// comparison), never previously exercised by any existing global test (only
+// TestGlobalConstantFolding's int/bool arithmetic was).
+func TestGlobalFloatConstantFolding(t *testing.T) {
+	jm := compileAndJIT(t, `
+var x f64 = 1.5 + 2.5*2.0
+var y bool = 3.5 > 2.0
+
+func main() int {
+	r := i32(x)
+	if y {
+		r = r + 100
+	}
+	return r
+}
+`)
+	// x = 1.5 + 5.0 = 6.5, i32(6.5) truncates to 6; y = true -> +100
+	if got := jm.runInt32(t, "main"); got != 106 {
+		t.Errorf("main() = %d, want 106", got)
+	}
+}
+
+// TestGlobalFloatDivisionByZeroConstantIsError covers constFloatBinaryExpr's
+// own division-by-zero diagnostic - the float-kind counterpart to
+// TestGlobalNonConstantInitializerCodegenStillErrorsOnGenuineConstantError
+// below, which only ever covers the integer-division branch.
+func TestGlobalFloatDivisionByZeroConstantIsError(t *testing.T) {
+	gdiags := compileSrcExpectCodegenError(t, `
+var x f64 = 1.0 / 0.0
+
+func main() {
+}
+`)
+	if gdiags.ErrorCount() != 1 {
+		t.Fatalf("ErrorCount = %d, want 1: %v", gdiags.ErrorCount(), gdiags.All())
+	}
+	found := false
+	for _, d := range gdiags.All() {
+		if d.Msg == "division by zero in constant expression" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a diagnostic \"division by zero in constant expression\", got: %v", gdiags.All())
+	}
+}
+
 // TestGlobalNonConstantInitializerFromFunctionCall covers the feature
 // documented in LANGUAGE.md/CODEGEN.md's "Global var initializers" sections:
 // a top-level var's initializer can now be an arbitrary expression, not just

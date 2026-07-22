@@ -145,6 +145,56 @@ func f() int {
 `)
 }
 
+// TestBareReturnInVoidFunction covers genReturnStmt's own bare-`return`
+// branch (no value) - every other test in this package that reaches
+// genReturnStmt does so via `return <expr>`; a plain `return` with nothing
+// after it, ending a void function early, has never actually been
+// JIT-executed here before. Distinct from TestMainWithoutReturnGetsExitCodeZero
+// (globals_test.go), which covers falling off main's end without ANY return
+// statement at all, not an explicit bare one.
+func TestBareReturnInVoidFunction(t *testing.T) {
+	jm := compileAndJIT(t, `
+var reached int = 0
+
+func setIfPositive(x int) {
+	if x <= 0 {
+		return
+	}
+	reached = 1
+}
+
+func run(x int) int {
+	setIfPositive(x)
+	return reached
+}
+`)
+	if got := jm.runInt32(t, "run", 0); got != 0 {
+		t.Errorf("run(0) = %d, want 0 (bare return should skip the rest of the function)", got)
+	}
+	if got := jm.runInt32(t, "run", 5); got != 1 {
+		t.Errorf("run(5) = %d, want 1", got)
+	}
+}
+
+// TestBareReturnInMain covers genReturnStmt's main-specific bare-return
+// branch: main declares no return type here (a bare `return` is only legal
+// at all in a function declaring none - see sema's
+// TestBareReturnRequiresNoDeclaredReturnType), but main is still special:
+// it must produce the real `ret i32 0` exit code every main needs, not
+// `ret void` like any other bare-return void function (see
+// TestBareReturnInVoidFunction above, which exercises that `ret void`
+// branch for a genuinely non-main function).
+func TestBareReturnInMain(t *testing.T) {
+	jm := compileAndJIT(t, `
+func main() {
+	return
+}
+`)
+	if got := jm.runInt32(t, "main"); got != 0 {
+		t.Errorf("main() = %d, want 0", got)
+	}
+}
+
 // TestShortCircuitSkipsRightOperand proves `&&`/`||` really short-circuit
 // (genShortCircuit's basic-block branching), not an eager bitwise AND/OR:
 // sideEffect's visible side effect (incrementing a global) must not happen

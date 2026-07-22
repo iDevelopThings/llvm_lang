@@ -557,6 +557,15 @@ func TestLenOnUnsupportedType(t *testing.T) {
 	expectCheckErrors(t, "func f() {\n\tvar n int = len(5)\n}\n", 1)
 }
 
+// TestLenWrongArgCountIsError covers checkLenCall's own argument-count gate
+// (distinct from TestLenOnUnsupportedType's "wrong type" branch) - both too
+// few and too many arguments must report exactly one error each, still
+// type-checking whatever arguments were actually given.
+func TestLenWrongArgCountIsError(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\tvar n int = len()\n}\n", 1)
+	expectCheckErrors(t, "func f() {\n\tvar a int = 1\n\tvar b int = 2\n\tvar n int = len(a, b)\n}\n", 1)
+}
+
 func TestSliceCompositeLitOk(t *testing.T) {
 	checkSrc(t, "func f() {\n\tvar a []int = []int{1, 2, 3}\n}\n")
 }
@@ -574,6 +583,16 @@ func TestArraySizeMustBePositive(t *testing.T) {
 	expectCheckErrors(t, "var a [0]int\n", 1)
 }
 
+// TestArraySizeRejectsFloatLiteral covers constArraySize's own
+// float-vs-int-literal gate: `[3.5]int` is still a bare NumberLit shape (so
+// it doesn't hit the "must be a constant literal" branch
+// TestArraySizeMustBeConstantLiteral covers), but its kind is
+// TypeUntypedFloat, not TypeUntypedInt - a distinct rejection from either of
+// the two above.
+func TestArraySizeRejectsFloatLiteral(t *testing.T) {
+	expectCheckErrors(t, "var a [3.5]int\n", 1)
+}
+
 func TestArrayCompositeLitCountMismatch(t *testing.T) {
 	expectCheckErrors(t, "var a [3]int = [3]int{1, 2}\n", 1)
 }
@@ -588,6 +607,16 @@ func TestArrayCompositeLitOk(t *testing.T) {
 
 func TestArrayCompositeLitKeyedElementsRejected(t *testing.T) {
 	expectCheckErrors(t, "var a [2]int = [2]int{0: 1, 1: 2}\n", 2)
+}
+
+// TestCompositeLitOnNonAggregateTypeIsError covers checkCompositeLit's own
+// outer dispatch - a composite literal whose type resolves cleanly (no
+// resolve-time error at all - `bool` is a perfectly good builtin type
+// symbol) but isn't a struct or array, the one shape neither
+// checkStructCompositeLit nor checkArrayCompositeLit ever gets a chance to
+// reject themselves.
+func TestCompositeLitOnNonAggregateTypeIsError(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\ta := bool{true}\n}\n", 1)
 }
 
 // --- structs, composite literals, member access, methods ---

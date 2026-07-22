@@ -92,6 +92,33 @@ func arrayAssign() int {
 	}
 }
 
+// TestLenOnFixedArrayAndString covers genLenCall's other two branches
+// (runtime.go): a fixed-size array's length folds directly to a compile-time
+// constant (the same value its own bounds check already uses), and a
+// string's length reads its runtime {ptr,len} field - both previously
+// exercised only at the sema level (see sema's TestLenOnFixedArray/
+// TestLenOnString), never actually JIT-executed and asserted on here, unlike
+// the dynamic-array case (TestMakeIndexAndLen, dynamic_array_test.go).
+func TestLenOnFixedArrayAndString(t *testing.T) {
+	jm := compileAndJIT(t, `
+func fixedArrayLen() int {
+	a := [5]int{1, 2, 3, 4, 5}
+	return len(a)
+}
+
+func stringLen() int {
+	s := "hello"
+	return len(s)
+}
+`)
+	if got := jm.runInt32(t, "fixedArrayLen"); got != 5 {
+		t.Errorf("fixedArrayLen() = %d, want 5", got)
+	}
+	if got := jm.runInt32(t, "stringLen"); got != 5 {
+		t.Errorf("stringLen() = %d, want 5", got)
+	}
+}
+
 // TestStructWithArrayField covers a struct whose field is itself a fixed-
 // size array, exercising a GEP chain through both a struct field and an
 // array index in the same expression.

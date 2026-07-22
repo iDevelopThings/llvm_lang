@@ -99,3 +99,39 @@ func main() {
 		t.Fatalf("print output = %q, want %q", out, want)
 	}
 }
+
+// TestPrintStructWithEveryFieldKindRendersBareValuesCorrectly covers
+// genPrintValueBare/genPrintStringValueBare - the "no trailing newline"
+// counterparts genPrintStructValue/genPrintArrayValue use per field/element
+// - for every field kind besides plain i32/struct/array (already covered by
+// TestPrintStructAndArray, string_test.go): string, bool, i8, i16, i64, f32,
+// and f64 struct fields. Those bare branches only ever execute when a
+// struct/array value with one of these field kinds is actually printed - a
+// top-level `print(x)` on the same kinds instead goes through genPrintCall's
+// own (already well-covered) non-bare branches, so nesting one inside a
+// struct is the only way to reach them at all.
+func TestPrintStructWithEveryFieldKindRendersBareValuesCorrectly(t *testing.T) {
+	jm := compileAndJIT(t, `
+struct Mixed {
+	s string
+	b bool
+	a i8
+	c i16
+	d i64
+	e f32
+	f f64
+}
+
+func main() {
+	m := Mixed{"hi", true, -12, -1234, 4000000000, 2.5, 3.5}
+	print(m)
+}
+`)
+	out := captureStdout(t, func() {
+		jm.runInt32(t, "main")
+	})
+	want := "{hi true -12 -1234 4000000000 2.500000 3.500000}\n"
+	if out != want {
+		t.Fatalf("print(m) captured stdout = %q, want %q", out, want)
+	}
+}

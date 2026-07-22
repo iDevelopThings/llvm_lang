@@ -186,6 +186,82 @@ func notEq() bool {
 	}
 }
 
+// TestIntComparisons covers `< <= > >=` on plain integers (genIntOrder) -
+// TestFloatComparisons above already covers all four operators for f64, but
+// none of the four have ever actually been JIT-executed and asserted for an
+// integer operand: every other test in this package that uses `<=`/`>`/`>=`
+// on an int does so only incidentally inside a loop condition or bounds
+// check, never as the directly-asserted result of the comparison itself.
+func TestIntComparisons(t *testing.T) {
+	jm := compileAndJIT(t, `
+func lt() bool {
+	var a int = 1
+	var b int = 2
+	return a < b
+}
+
+func notLt() bool {
+	var a int = 2
+	var b int = 1
+	return a < b
+}
+
+func le() bool {
+	var a int = 2
+	var b int = 2
+	return a <= b
+}
+
+func notLe() bool {
+	var a int = 3
+	var b int = 2
+	return a <= b
+}
+
+func gt() bool {
+	var a int = 3
+	var b int = 2
+	return a > b
+}
+
+func notGt() bool {
+	var a int = 2
+	var b int = 2
+	return a > b
+}
+
+func ge() bool {
+	var a int = 2
+	var b int = 2
+	return a >= b
+}
+
+func notGe() bool {
+	var a int = 1
+	var b int = 2
+	return a >= b
+}
+`)
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{"lt", true},
+		{"notLt", false},
+		{"le", true},
+		{"notLe", false},
+		{"gt", true},
+		{"notGt", false},
+		{"ge", true},
+		{"notGe", false},
+	}
+	for _, tc := range tests {
+		if got := jm.runBool(t, tc.name); got != tc.want {
+			t.Errorf("%s() = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 // TestIntWidthIncDecAndCompoundAssign covers ++/--/+=/-=/*=//= generalized
 // beyond plain i32 - a narrower width (i16) and a float (f64), both of which
 // used to be impossible (the old codegen hard-coded i32 for ++/-- and never

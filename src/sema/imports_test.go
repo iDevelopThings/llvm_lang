@@ -400,3 +400,42 @@ func TestImports_FileScopedNotPackageScoped(t *testing.T) {
 
 	requireDiagContaining(t, resolveAndCheckProgram(t, units), "undefined: mathutils")
 }
+
+// TestImports_PackageQualifiedUndefinedTypeIsError covers
+// resolveTypeMemberExpr's own "undefined member" branch (type position,
+// distinct from an ordinary undefined value-level member access) - a
+// package-qualified type reference naming something the target package
+// never declared at all.
+func TestImports_PackageQualifiedUndefinedTypeIsError(t *testing.T) {
+	shapesTree := mustParseFile(t, "shapes/point.llx", "struct Point {\n\tX int\n}\n")
+	mainTree := mustParseFile(t, "app/main.llx", "import \"./shapes\"\n\nvar p shapes.NotAType\n")
+
+	units := []*PackageUnit{
+		{Key: "shapes", Name: "shapes", Trees: []*ast.Tree{shapesTree}},
+		{
+			Key:   "app",
+			Name:  "app",
+			Trees: []*ast.Tree{mainTree},
+			FileImports: map[*ast.Tree][]FileImport{
+				mainTree: {{LocalName: "shapes", TargetKey: "shapes"}},
+			},
+		},
+	}
+
+	requireDiagContaining(t, resolveAndCheckProgram(t, units), "undefined: shapes.NotAType")
+}
+
+// TestImports_QualifierNotAPackageInTypePositionIsError covers
+// resolveTypeMemberExpr rejecting a `x.Y` type reference whose qualifier
+// resolves to a real symbol that just isn't a package (here, an ordinary
+// top-level var shadowing what would otherwise look like a package name) -
+// distinct from the qualifier being entirely undefined.
+func TestImports_QualifierNotAPackageInTypePositionIsError(t *testing.T) {
+	mainTree := mustParseFile(t, "app/main.llx", "var shapes int = 1\nvar p shapes.Point\n")
+
+	units := []*PackageUnit{
+		{Key: "app", Name: "app", Trees: []*ast.Tree{mainTree}},
+	}
+
+	requireDiagContaining(t, resolveAndCheckProgram(t, units), "is not a package")
+}
