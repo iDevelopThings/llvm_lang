@@ -428,7 +428,24 @@ func (g *Generator) genIfStmt(n ast.NodeIndex) bool {
 	}
 
 	g.builder.SetInsertPointAtEnd(mergeBB)
-	return hasElse && thenTerm && elseTerm
+	terminates := hasElse && thenTerm && elseTerm
+	if terminates {
+		// Both branches terminated, so neither one ever emitted a CreateBr
+		// into mergeBB (each only does that in its own `if !thenTerm`/
+		// `if !elseTerm` guard above) - mergeBB is a genuinely unreachable
+		// block with zero predecessors, and genBlock's caller will never
+		// generate anything past this statement to reach it either (see
+		// genBlock's own doc comment: it stops calling genStmt the moment
+		// one reports termination). Give it a real terminator before
+		// returning rather than leaving an empty, terminator-less block
+		// behind for LLVM's verifier to reject - the same `unreachable`
+		// convention this package's own AGENTS.md "Terminator safety"
+		// section already uses for exactly this "structurally impossible to
+		// reach, but LLVM still requires a valid terminator" situation (see
+		// emitFallbackTerminator, func.go).
+		g.builder.CreateUnreachable()
+	}
+	return terminates
 }
 
 // genForStmt lowers all three Go-style for-loop forms uniformly - bare

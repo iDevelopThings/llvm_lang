@@ -195,6 +195,140 @@ func main() {
 	}
 }
 
+// TestIfElseBothBranchesTerminateAsFunctionBody is the exact minimal repro
+// for the regression this test guards against: a function whose *entire
+// body* is an if/else where both branches return used to fail LLVM's module
+// verifier ("Basic Block in function ... does not have terminator!
+// label %if.merge").
+//
+// Root cause: genIfStmt (stmt.go) always creates an "if.merge" block and
+// unconditionally leaves the builder positioned there before returning -
+// but when both branches terminate, neither one ever branches into merge
+// (each only does that in its own "didn't terminate" case), so merge was
+// left as a genuinely unreachable block with zero predecessors and zero
+// instructions. finishBody's own fallback (func.go) never noticed either,
+// since genBlock correctly reports the if/else itself as terminating -
+// exactly the condition finishBody uses to decide the fallback isn't
+// needed. Fixed by having genIfStmt itself give merge a real
+// CreateUnreachable() terminator whenever both branches terminate, the same
+// "structurally impossible to reach" convention emitFallbackTerminator
+// already uses.
+func TestIfElseBothBranchesTerminateAsFunctionBody(t *testing.T) {
+	jm := compileAndJIT(t, `
+func branchTrue(useTrue bool) int {
+	if useTrue {
+		return 111
+	} else {
+		return 999
+	}
+}
+
+func main() int {
+	return branchTrue(true)
+}
+`)
+
+	if got := jm.runInt32(t, "branchTrue", 1); got != 111 {
+		t.Errorf("branchTrue(true) = %d, want 111", got)
+	}
+	if got := jm.runInt32(t, "branchTrue", 0); got != 999 {
+		t.Errorf("branchTrue(false) = %d, want 999", got)
+	}
+	if got := jm.runInt32(t, "main"); got != 111 {
+		t.Errorf("main() = %d, want 111", got)
+	}
+}
+
+// TestIfElseTerminatorShapes is table-driven coverage of every shape
+// genIfStmt's "if.merge" handling needs to get right, pinning down the fix
+// above against every sibling case it must not regress:
+//
+//   - both branches terminate, as the function's only statement (the exact
+//     regression repro, duplicated here for table-driven symmetry).
+//   - both branches terminate, followed by more code in the same block -
+//     legal but genuinely dead: isTerminatingStmt (sema/typecheck.go) only
+//     ever inspects a block's own *last* statement, so nothing about a
+//     terminating if/else followed by another statement is rejected by
+//     sema; and genBlock (stmt.go) stops calling genStmt entirely the
+//     moment one call reports termination, so that trailing statement is
+//     never even generated. This is exercised by giving f2/f3 an
+//     if/else-both-terminate followed by another return, and asserting the
+//     if/else's own branch result wins - proof the dead trailing return was
+//     never reached at runtime, not just never generated.
+//   - no else at all - merge is always genuinely reachable (falling through
+//     the condition, or off the end of then) - must produce the fallthrough
+//     value, unaffected by the fix (only the hasElse&&thenTerm&&elseTerm
+//     branch changed).
+//   - else present but only one branch terminates - merge is still
+//     genuinely reachable from whichever branch fell through - likewise
+//     unaffected.
+func TestIfElseTerminatorShapes(t *testing.T) {
+	jm := compileAndJIT(t, `
+func bothTerminateOnly(useTrue bool) int {
+	if useTrue {
+		return 1
+	} else {
+		return 2
+	}
+}
+
+func bothTerminateThenDeadCode(useTrue bool) int {
+	if useTrue {
+		return 10
+	} else {
+		return 20
+	}
+	return 999
+}
+
+func noElse(useTrue bool) int {
+	x := 0
+	if useTrue {
+		x = 5
+	}
+	return x + 1
+}
+
+func onlyThenTerminates(useTrue bool) int {
+	if useTrue {
+		return 7
+	} else {
+		x := 3
+		x += 1
+	}
+	return 100
+}
+`)
+
+	if got := jm.runInt32(t, "bothTerminateOnly", 1); got != 1 {
+		t.Errorf("bothTerminateOnly(true) = %d, want 1", got)
+	}
+	if got := jm.runInt32(t, "bothTerminateOnly", 0); got != 2 {
+		t.Errorf("bothTerminateOnly(false) = %d, want 2", got)
+	}
+
+	if got := jm.runInt32(t, "bothTerminateThenDeadCode", 1); got != 10 {
+		t.Errorf("bothTerminateThenDeadCode(true) = %d, want 10 (the trailing dead return 999 must never run)", got)
+	}
+	if got := jm.runInt32(t, "bothTerminateThenDeadCode", 0); got != 20 {
+		t.Errorf("bothTerminateThenDeadCode(false) = %d, want 20 (the trailing dead return 999 must never run)", got)
+	}
+
+	if got := jm.runInt32(t, "noElse", 1); got != 6 {
+		t.Errorf("noElse(true) = %d, want 6", got)
+	}
+	if got := jm.runInt32(t, "noElse", 0); got != 1 {
+		t.Errorf("noElse(false) = %d, want 1", got)
+	}
+
+	if got := jm.runInt32(t, "onlyThenTerminates", 1); got != 7 {
+		t.Errorf("onlyThenTerminates(true) = %d, want 7", got)
+	}
+	if got := jm.runInt32(t, "onlyThenTerminates", 0); got != 100 {
+		t.Errorf("onlyThenTerminates(false) = %d, want 100", got)
+	}
+}
+
 // TestShortCircuitSkipsRightOperand proves `&&`/`||` really short-circuit
 // (genShortCircuit's basic-block branching), not an eager bitwise AND/OR:
 // sideEffect's visible side effect (incrementing a global) must not happen
