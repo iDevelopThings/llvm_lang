@@ -18,10 +18,18 @@ work isn't blocked on an answer.
 
 ---
 
-(No open questions as of this cleanup - every prior entry here was either
-a resolved engineering note already captured as a code comment, or a
-design fork the user has now directly answered in conversation: numeric
-type widths and `int`'s meaning, explicit conversion syntax, first-class
-function scope, multi-file export policy, implicit global-var
-initialization, and dynamic array construction/growth. See AGENTS.md for
-the actual resulting rules once each round of work lands.)
+## Real memory-management strategy
+
+The arena allocator (`CODEGEN.md`'s "The arena allocator" section) is a
+real, intentional, permanent leak - one process-lifetime bump allocator,
+no `free`, no refcounting, no GC. It was built as groundwork/a centralized
+allocation point, not as an answer to whether this language needs a real
+memory strategy eventually (scoped stack-frame frees when a value provably
+can't escape, refcounting, or a tracing GC are all still on the table, each
+with very different implications for the language's semantics and runtime
+complexity). Not inferable from established patterns - this is a genuine
+design fork only the user can make the call on. **Current default while
+open:** keep leaking via the arena; every new heap-needing feature (e.g.
+dynamic arrays) routes through the same `arena_alloc` primitive rather than
+inventing its own allocation path, so there's still only one call site to
+change once this is answered.
