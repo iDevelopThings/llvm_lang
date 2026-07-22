@@ -33,26 +33,3 @@ open:** keep leaking via the arena; every new heap-needing feature (e.g.
 dynamic arrays) routes through the same `arena_alloc` primitive rather than
 inventing its own allocation path, so there's still only one call site to
 change once this is answered.
-
----
-
-## Cross-package struct literal construction with an unexported field
-
-Go's own spec is stricter than a plain "unexported names aren't accessible"
-rule: constructing a struct value with a *positional* composite literal
-(`Point{1, 2}`) from another package is itself rejected if the struct has
-*any* unexported field, even one the literal never mentions by name and
-even if every field the literal actually supplies is exported - not just an
-error at the point an unexported field is later read. Whether this
-language should match that exact rule, or something looser/different, isn't
-inferable from `AGENTS.md`/`LANGUAGE.md`'s existing patterns - it's a real
-design fork over how strict "construction" itself should be, independent of
-member-access enforcement (which is unambiguous and already fully
-implemented). **Current default while open:** construction is unrestricted
-regardless of unexported fields (`mathutils.Point{1, 2}` from another
-package is accepted even though `Point` has an unexported field) - only
-actual member *access* (`p.secret`) is enforced. This is the most permissive
-option, and doesn't block anything: tightening it later only ever adds a
-new diagnostic at a specific site (`sema.checkStructCompositeLit`,
-`src/sema/typecheck.go`), never removes one, so nothing shipped under the
-current default needs to change shape if this is answered stricter later.

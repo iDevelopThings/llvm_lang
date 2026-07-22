@@ -146,7 +146,7 @@ func (p *Parser) parseExpr(minPrec precedence) ast.NodeIndex {
 	prefix, ok := prefixFns[p.tok.Lexeme]
 	if !ok {
 		tok := p.tok
-		p.errorAt(tok.Start, "expected expression, found %s", p.describe(tok))
+		p.errorAtSpan(tok.Start, tok.End, "expected expression, found %s", p.describe(tok))
 		p.advance()
 		return p.badNode(tok)
 	}
@@ -182,7 +182,7 @@ func parseIdentExpr(p *Parser) ast.NodeIndex {
 		}
 		return ident
 	default:
-		p.errorAt(tok.Start, "unexpected keyword %s in expression", p.describe(tok))
+		p.errorAtSpan(tok.Start, tok.End, "unexpected keyword %s in expression", p.describe(tok))
 		p.advance()
 		return p.badNode(tok)
 	}
@@ -307,7 +307,8 @@ func parseMemberExpr(p *Parser, object ast.NodeIndex) ast.NodeIndex {
 func parseArrayTypeLit(p *Parser) ast.NodeIndex {
 	typ := p.parseTypeExpr()
 	if !p.at(enums.Lexemes.LeftBrace) {
-		p.errorAt(p.tree.SpanOf(typ).Start, "expected a composite literal (Type{...}) after array type")
+		span := p.tree.SpanOf(typ)
+		p.errorAtSpan(span.Start, span.End, "expected a composite literal (Type{...}) after array type")
 		return typ
 	}
 	return p.finishCompositeLit(typ)

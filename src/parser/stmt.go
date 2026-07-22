@@ -228,7 +228,8 @@ func (p *Parser) finishShortVarDecl(name ast.NodeIndex) ast.NodeIndex {
 	// identifier" on top would just be a second, redundant diagnostic for
 	// the same root cause.
 	if kind := p.tree.Nodes[name].Kind; kind != enums.NodeKinds.Ident && kind != enums.NodeKinds.Bad {
-		p.errorAt(p.tree.SpanOf(name).Start, "left side of := must be an identifier")
+		span := p.tree.SpanOf(name)
+		p.errorAtSpan(span.Start, span.End, "left side of := must be an identifier")
 	}
 	opTok := p.expect(enums.Lexemes.ColonEqual)
 	value := p.parseExpr(precLowest)
@@ -270,7 +271,8 @@ func (p *Parser) checkAssignTarget(target ast.NodeIndex) {
 	switch p.tree.Nodes[target].Kind {
 	case enums.NodeKinds.Ident, enums.NodeKinds.MemberExpr, enums.NodeKinds.IndexExpr, enums.NodeKinds.Bad:
 	default:
-		p.errorAt(p.tree.SpanOf(target).Start, "cannot assign to this expression")
+		span := p.tree.SpanOf(target)
+		p.errorAtSpan(span.Start, span.End, "cannot assign to this expression")
 	}
 }
 
@@ -352,7 +354,8 @@ func (p *Parser) parseForStmt() ast.NodeIndex {
 	if p.tree.Nodes[first].Kind == enums.NodeKinds.ExprStmt {
 		cond = p.tree.Child(first, 0)
 	} else {
-		p.errorAt(p.tree.SpanOf(first).Start, "for loop condition must be a boolean expression")
+		span := p.tree.SpanOf(first)
+		p.errorAtSpan(span.Start, span.End, "for loop condition must be a boolean expression")
 	}
 	body := p.parseBlock()
 	span := ast.Span{

@@ -347,7 +347,8 @@ func (g *Generator) genPackage(trees []*ast.Tree) {
 // panic (non-constant global initializers, unsupported print argument
 // types) versus what's assumed impossible on a validated tree.
 func (g *Generator) errorAt(n ast.NodeIndex, format string, a ...any) {
-	g.diags.Errorf(g.tree.SpanOf(n).Start, format, a...)
+	span := g.tree.SpanOf(n)
+	g.diags.ErrorfSpan(span.Start, span.End, format, a...)
 }
 
 // declareStructType creates decl's named (but still empty/opaque) LLVM

@@ -196,6 +196,100 @@ func main() int {
 	requireDiagContaining(t, resolveAndCheckProgram(t, units), "not exported")
 }
 
+// TestImports_PositionalLiteralRejectedForUnexportedField covers Go's own
+// stricter construction rule (see AGENTS.md's "Types" section on cross-
+// package struct literal construction): a *positional* composite literal
+// constructing a struct from another package is rejected the moment that
+// struct has ANY unexported field - even one this literal never mentions by
+// name, and even though every value actually supplied here (X and Y) is
+// itself fine. There's no way to positionally "skip" a field, so allowing
+// this would silently let outside code set a private field's value.
+func TestImports_PositionalLiteralRejectedForUnexportedField(t *testing.T) {
+	shapesTree := mustParseFile(t, "shapes/point.llx", "struct Point {\n\tX int\n\tsecret int\n}\n")
+	mainTree := mustParseFile(t, "app/main.llx", `import "./shapes"
+
+func main() int {
+	p := shapes.Point{1, 2}
+	return p.X
+}
+`)
+
+	units := []*PackageUnit{
+		{Key: "shapes", Name: "shapes", Trees: []*ast.Tree{shapesTree}},
+		{
+			Key:   "app",
+			Name:  "app",
+			Trees: []*ast.Tree{mainTree},
+			FileImports: map[*ast.Tree][]FileImport{
+				mainTree: {{LocalName: "shapes", TargetKey: "shapes"}},
+			},
+		},
+	}
+
+	requireDiagContaining(t, resolveAndCheckProgram(t, units), "positional literal")
+}
+
+// TestImports_KeyedLiteralAllowedDespiteUnexportedField covers the other half
+// of the same rule: a *keyed* literal from another package is fine as long
+// as it doesn't explicitly name the unexported field - simply omitting it
+// (as here) leaves it untouched, unlike a positional literal, which has no
+// way to skip it.
+func TestImports_KeyedLiteralAllowedDespiteUnexportedField(t *testing.T) {
+	shapesTree := mustParseFile(t, "shapes/point.llx", "struct Point {\n\tX int\n\tsecret int\n}\n")
+	mainTree := mustParseFile(t, "app/main.llx", `import "./shapes"
+
+func main() int {
+	p := shapes.Point{X: 1}
+	return p.X
+}
+`)
+
+	units := []*PackageUnit{
+		{Key: "shapes", Name: "shapes", Trees: []*ast.Tree{shapesTree}},
+		{
+			Key:   "app",
+			Name:  "app",
+			Trees: []*ast.Tree{mainTree},
+			FileImports: map[*ast.Tree][]FileImport{
+				mainTree: {{LocalName: "shapes", TargetKey: "shapes"}},
+			},
+		},
+	}
+
+	requireNoDiags(t, resolveAndCheckProgram(t, units))
+}
+
+// TestImports_KeyedLiteralExplicitUnexportedFieldIsError covers explicitly
+// naming the unexported field itself in a keyed literal - ordinary
+// unexported-access, the same restriction reading p.secret would hit, now
+// enforced by checkKeyedStructElem too (previously it resolved a keyed
+// field name against the struct's field catalog without ever checking
+// export visibility at all).
+func TestImports_KeyedLiteralExplicitUnexportedFieldIsError(t *testing.T) {
+	shapesTree := mustParseFile(t, "shapes/point.llx", "struct Point {\n\tX int\n\tsecret int\n}\n")
+	mainTree := mustParseFile(t, "app/main.llx", `import "./shapes"
+
+func main() int {
+	p := shapes.Point{X: 1, secret: 2}
+	return p.X
+}
+`)
+
+	units := []*PackageUnit{
+		{Key: "shapes", Name: "shapes", Trees: []*ast.Tree{shapesTree}},
+		{
+			Key:   "app",
+			Name:  "app",
+			Trees: []*ast.Tree{mainTree},
+			FileImports: map[*ast.Tree][]FileImport{
+				mainTree: {{LocalName: "shapes", TargetKey: "shapes"}},
+			},
+		},
+	}
+
+	requireDiagContaining(t, resolveAndCheckProgram(t, units), "not exported")
+}
+
 // TestImports_SamePackageCaseInsensitivityStillHolds is a regression check:
 // within one package (even when checked via the new ResolveProgram/
 // CheckProgram multi-package path, not just plain ResolvePackage/

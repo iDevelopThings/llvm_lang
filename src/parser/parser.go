@@ -101,10 +101,24 @@ func (p *Parser) syncLexErrors() {
 	p.lexSeen = len(errs)
 }
 
-// errorAt records a diagnostic at pos and bails out of the parse once too
-// many have piled up.
+// errorAt records a diagnostic at the single point pos and bails out of the
+// parse once too many have piled up.
 func (p *Parser) errorAt(pos lexer.Pos, format string, a ...any) {
 	p.diags.Errorf(pos, format, a...)
+	p.bailoutIfTooMany()
+}
+
+// errorAtSpan is errorAt, but underlining [start, end) instead of a single
+// point - the parser's counterpart to the other packages' errorAt(n
+// ast.NodeIndex, ...) helpers, except the parser frequently has only a raw
+// token or an already-computed ast.Span in hand rather than a NodeIndex (a
+// syntax error is often detected before any node for it exists at all).
+func (p *Parser) errorAtSpan(start, end lexer.Pos, format string, a ...any) {
+	p.diags.ErrorfSpan(start, end, format, a...)
+	p.bailoutIfTooMany()
+}
+
+func (p *Parser) bailoutIfTooMany() {
 	if p.diags.ErrorCount() >= maxErrors {
 		panic(bailout{})
 	}
@@ -138,7 +152,7 @@ func (p *Parser) accept(lex enums.Lexeme) (lexer.Token, bool) {
 // sync to a recovery point.
 func (p *Parser) expect(lex enums.Lexeme) lexer.Token {
 	if p.tok.Lexeme != lex {
-		p.errorAt(p.tok.Start, "expected %s, found %s", lex, p.describe(p.tok))
+		p.errorAtSpan(p.tok.Start, p.tok.End, "expected %s, found %s", lex, p.describe(p.tok))
 		return p.tok
 	}
 	tok := p.tok
@@ -161,7 +175,7 @@ func (p *Parser) expect(lex enums.Lexeme) lexer.Token {
 func (p *Parser) expectIdent() lexer.Token {
 	tok := p.tok
 	if tok.Lexeme != enums.Lexemes.Identifier || tok.Keyword != "" {
-		p.errorAt(tok.Start, "expected identifier, found %s", p.describe(tok))
+		p.errorAtSpan(tok.Start, tok.End, "expected identifier, found %s", p.describe(tok))
 	}
 	p.advance()
 	return tok
@@ -189,7 +203,7 @@ func (p *Parser) acceptKeyword(kw enums.Keyword) (lexer.Token, bool) {
 // unconsumed, the keyword-aware counterpart to expect.
 func (p *Parser) expectKeyword(kw enums.Keyword) lexer.Token {
 	if !p.atKeyword(kw) {
-		p.errorAt(p.tok.Start, "expected %q, found %s", kw.Info().String, p.describe(p.tok))
+		p.errorAtSpan(p.tok.Start, p.tok.End, "expected %q, found %s", kw.Info().String, p.describe(p.tok))
 		return p.tok
 	}
 	tok := p.tok

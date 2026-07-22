@@ -25,7 +25,7 @@ func (p *Parser) parseTopLevelItem() ast.NodeIndex {
 		return p.parseStructDecl()
 	default:
 		tok := p.tok
-		p.errorAt(tok.Start, "expected a top-level declaration (import, var, func, or struct), found %s", p.describe(tok))
+		p.errorAtSpan(tok.Start, tok.End, "expected a top-level declaration (import, var, func, or struct), found %s", p.describe(tok))
 		p.sync(enums.Lexemes.Semicolon)
 		return p.badNode(tok)
 	}
@@ -64,7 +64,7 @@ func (p *Parser) parseFile() ast.NodeIndex {
 	sawNonImport := false
 	for !p.at(enums.Lexemes.EOF) {
 		if p.atKeyword(enums.Keywords.Import) && sawNonImport {
-			p.errorAt(p.tok.Start, "import declarations must come before all other top-level declarations")
+			p.errorAtSpan(p.tok.Start, p.tok.End, "import declarations must come before all other top-level declarations")
 		}
 		if !p.atKeyword(enums.Keywords.Import) {
 			sawNonImport = true

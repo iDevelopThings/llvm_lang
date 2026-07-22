@@ -547,17 +547,31 @@ func main() int {
     mathutils.Add(1, 2)      // fine
     mathutils.double(1)      // error: mathutils.double is not exported
 
-    p := mathutils.Point{1, 2}
+    p := mathutils.Point{X: 1}      // fine - a keyed literal may simply omit
+                                     // a field it doesn't name
+    q := mathutils.Point{1, 2}      // error: cannot use a positional literal
+                                     // to construct Point from another
+                                     // package: field secret is unexported
+    r := mathutils.Point{X: 1, secret: 2} // error: secret is not exported
+
     _ = p.X                  // fine
     _ = p.secret             // error: secret is not exported
 }
 ```
 
-Constructing a struct value with an unexported field (`mathutils.Point{1,
-2}` above) is deliberately still allowed even though `Point` has an
-unexported field - only actual member *access* is enforced, not
-construction (a most-permissive default; see `BLOCKERS.md` if this is ever
-tightened to match Go's own stricter same-literal rule).
+Constructing a struct value from another package follows Go's own rule
+exactly, not just member *access*: a **positional** composite literal
+(`mathutils.Point{1, 2}` above) is rejected outright the moment the struct
+has *any* unexported field - even one the literal never mentions by name and
+even though every value it does supply is itself fine - because a positional
+literal has no way to "skip" a field, so allowing it would silently let
+outside code set a private field's value. A **keyed** literal
+(`mathutils.Point{X: 1}`) has no such problem and remains fine as long as it
+doesn't explicitly name the unexported field itself (`secret: 2` above is
+ordinary unexported-access, rejected the same way `p.secret` is).
+Same-package construction is completely unaffected either way - export never
+matters within one package, regardless of whether the literal is positional
+or keyed.
 
 A package-qualified name can also appear in **type position**
 (`var p mathutils.Point`, a composite literal's type `mathutils.Point{...}`)

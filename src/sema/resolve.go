@@ -181,7 +181,18 @@ func resolveOnePackage(name string, trees []*ast.Tree, fileImports map[*ast.Tree
 }
 
 func (r *resolver) errorAt(n ast.NodeIndex, format string, a ...any) {
-	r.bag.Errorf(r.tree.SpanOf(n).Start, format, a...)
+	span := r.tree.SpanOf(n)
+	r.bag.ErrorfSpan(span.Start, span.End, format, a...)
+}
+
+// errorAtLabel is errorAt, plus a short trailing hint (see
+// diag.Bag.ErrorfLabel) pointing at n's own "main" token (Node.Tok) rather
+// than n's whole span - used where a sub-token is the more precise thing to
+// underline (e.g. just the member name in `pkg.member`, not the whole
+// qualified expression).
+func (r *resolver) errorAtLabel(n ast.NodeIndex, label, format string, a ...any) {
+	tok := r.tree.Nodes[n].Tok
+	r.bag.ErrorfLabel(tok.Start, tok.End, label, format, a...)
 }
 
 // resolvePackage processes every file in trees in four passes, so
@@ -527,7 +538,7 @@ func (r *resolver) resolveType(scope *Scope, n ast.NodeIndex) {
 		name := r.tree.Text(n)
 		sym, ok := scope.Lookup(name)
 		if !ok {
-			r.errorAt(n, "undefined: %s", name)
+			r.errorAtLabel(n, "not found", "undefined: %s", name)
 			return
 		}
 		if !sym.Kind.IsType() {
@@ -570,7 +581,7 @@ func (r *resolver) resolveTypeMemberExpr(scope *Scope, n ast.NodeIndex) {
 	objName := r.tree.Text(object)
 	objSym, ok := scope.Lookup(objName)
 	if !ok {
-		r.errorAt(object, "undefined: %s", objName)
+		r.errorAtLabel(object, "not found", "undefined: %s", objName)
 		return
 	}
 	r.info.Refs[object] = objSym
@@ -582,7 +593,7 @@ func (r *resolver) resolveTypeMemberExpr(scope *Scope, n ast.NodeIndex) {
 	name := r.tree.Text(n)
 	sym, ok := objSym.Package.Scope.LookupLocal(name)
 	if !ok {
-		r.errorAt(n, "undefined: %s.%s", objName, name)
+		r.errorAtLabel(n, "not found", "undefined: %s.%s", objName, name)
 		return
 	}
 	if !sym.Kind.IsType() {
@@ -590,7 +601,7 @@ func (r *resolver) resolveTypeMemberExpr(scope *Scope, n ast.NodeIndex) {
 		return
 	}
 	if !sym.Exported {
-		r.errorAt(n, "%s.%s is not exported", objName, name)
+		r.errorAtLabel(n, "unexported symbol", "%s.%s is not exported", objName, name)
 		return
 	}
 	r.info.Refs[n] = sym
@@ -609,7 +620,7 @@ func (r *resolver) resolveExpr(scope *Scope, n ast.NodeIndex) {
 		name := r.tree.Text(n)
 		sym, ok := scope.Lookup(name)
 		if !ok {
-			r.errorAt(n, "undefined: %s", name)
+			r.errorAtLabel(n, "not found", "undefined: %s", name)
 			return
 		}
 		r.info.Refs[n] = sym
@@ -668,11 +679,11 @@ func (r *resolver) resolvePackageMemberExpr(n ast.NodeIndex, pkgSym *Symbol) {
 	name := r.tree.Text(n)
 	sym, ok := pkgSym.Package.Scope.LookupLocal(name)
 	if !ok {
-		r.errorAt(n, "undefined: %s.%s", pkgSym.Name, name)
+		r.errorAtLabel(n, "not found", "undefined: %s.%s", pkgSym.Name, name)
 		return
 	}
 	if !sym.Exported {
-		r.errorAt(n, "%s.%s is not exported", pkgSym.Name, name)
+		r.errorAtLabel(n, "unexported symbol", "%s.%s is not exported", pkgSym.Name, name)
 		return
 	}
 	r.info.Refs[n] = sym

@@ -245,7 +245,32 @@ func CheckProgram(trees []*ast.Tree, infos map[*ast.Tree]*Info, treePackage map[
 }
 
 func (c *checker) errorAt(n ast.NodeIndex, format string, a ...any) {
-	c.diags.Errorf(c.tree.SpanOf(n).Start, format, a...)
+	span := c.tree.SpanOf(n)
+	c.diags.ErrorfSpan(span.Start, span.End, format, a...)
+}
+
+// errorAtLabel is errorAt, plus a short trailing hint (see
+// diag.Bag.ErrorfLabel) pointing at n's own "main" token (Node.Tok) rather
+// than n's whole span - e.g. just the field/method name in a struct-value
+// access, not the whole `p.field` expression.
+func (c *checker) errorAtLabel(n ast.NodeIndex, label, format string, a ...any) {
+	tok := c.tree.Nodes[n].Tok
+	c.diags.ErrorfLabel(tok.Start, tok.End, label, format, a...)
+}
+
+// errorAtNodes reports an error spanning from the start of nodes' first
+// element to the end of its last - used to underline a specific contiguous
+// sub-range (an argument list, a composite literal's elements) narrower than
+// some enclosing node's own full span. Falls back to fallback (typically the
+// enclosing node itself) when nodes is empty, since there's nothing to span.
+func (c *checker) errorAtNodes(nodes []ast.NodeIndex, fallback ast.NodeIndex, format string, a ...any) {
+	if len(nodes) == 0 {
+		c.errorAt(fallback, format, a...)
+		return
+	}
+	start := c.tree.SpanOf(nodes[0]).Start
+	end := c.tree.SpanOf(nodes[len(nodes)-1]).End
+	c.diags.ErrorfSpan(start, end, format, a...)
 }
 
 // checkPackage mirrors resolvePackage's shape one level up (struct field
@@ -1404,8 +1429,36 @@ func (c *checker) checkExportedAccess(n ast.NodeIndex, sym *Symbol) bool {
 	if packageScopeOf(sym.Scope) == c.curPkgScope {
 		return true
 	}
-	c.errorAt(n, "%s is not exported", sym.Name)
+	c.errorAtLabel(n, "unexported symbol", "%s is not exported", sym.Name)
 	return false
+}
+
+// crossPackageStructConstruction reports whether constructing a value of
+// info's struct type (a composite literal naming it) is happening from
+// outside info's own declaring package - the same "does this cross a
+// package boundary" question checkExportedAccess answers for a member
+// access, asked instead of the struct type itself: construction has no
+// single occurrence's own Exported flag to check (the struct type name is
+// always visible - LANGUAGE.md's export rule is about member names, not
+// type names) - see checkStructCompositeLit, the only caller, for what this
+// gates. nil c.curPkgScope (the plain single-package Check/CheckPackage
+// case, same as checkExportedAccess) never counts as cross-package.
+func (c *checker) crossPackageStructConstruction(info *StructInfo) bool {
+	return c.curPkgScope != nil && packageScopeOf(info.Symbol.Scope) != c.curPkgScope
+}
+
+// firstUnexportedField returns the name of the first (in declaration order)
+// unexported field among fields - Field nodes belonging to tree, which may
+// differ from whichever tree is currently active in the checker (see
+// checkStructCompositeLit) - and whether one was found at all.
+func firstUnexportedField(tree *ast.Tree, fields []ast.NodeIndex) (string, bool) {
+	for _, f := range fields {
+		name := tree.Text(tree.Child(f, 0))
+		if !isExportedName(name) {
+			return name, true
+		}
+	}
+	return "", false
 }
 
 // checkCallExpr type-checks a call: builtin print (special-cased - see
@@ -1436,7 +1489,7 @@ func (c *checker) checkCallExpr(n ast.NodeIndex) Type {
 	}
 
 	if len(args) != len(sig.Params) {
-		c.errorAt(n, "wrong number of arguments in call: got %d, want %d", len(args), len(sig.Params))
+		c.errorAtNodes(args, n, "wrong number of arguments in call: got %d, want %d", len(args), len(sig.Params))
 		for _, a := range args {
 			c.checkValueExpr(a)
 		}
@@ -1472,7 +1525,7 @@ func (c *checker) isPrintCall(callee ast.NodeIndex) bool {
 // codegen's genPrintCall).
 func (c *checker) checkPrintCall(n ast.NodeIndex, args []ast.NodeIndex) Type {
 	if len(args) != 1 {
-		c.errorAt(n, "print takes exactly 1 argument, got %d", len(args))
+		c.errorAtNodes(args, n, "print takes exactly 1 argument, got %d", len(args))
 	}
 	for _, a := range args {
 		c.defaultIfUntyped(a, c.checkValueExpr(a))
@@ -1516,7 +1569,7 @@ func (c *checker) checkConversionCall(n, callee ast.NodeIndex, args []ast.NodeIn
 
 	target := c.typeFromNode(callee)
 	if len(args) != 1 {
-		c.errorAt(n, "conversion to %s requires exactly one argument, got %d", target, len(args))
+		c.errorAtNodes(args, n, "conversion to %s requires exactly one argument, got %d", target, len(args))
 		for _, a := range args {
 			c.checkValueExpr(a)
 		}
@@ -1689,6 +1742,25 @@ func (c *checker) checkStructCompositeLit(n ast.NodeIndex, target Type, elems []
 	fields := c.tree.Children(info.Symbol.Decl)[1:] // Field nodes, declaration order
 	restore()
 	keyed := len(elems) > 0 && c.tree.Nodes[elems[0]].Kind == enums.NodeKinds.KeyValueExpr
+
+	// Go's own stricter rule for a *positional* literal constructing a
+	// struct from another package: reject it if the struct has ANY
+	// unexported field, even one this literal never mentions by name and
+	// even if every value actually supplied is itself exported - there's no
+	// way to positionally "skip" a field, so allowing this would silently
+	// let outside code set a private field's value. A keyed literal has no
+	// such problem - checkKeyedStructElem's own export check already
+	// rejects explicitly naming an unexported field, and simply omitting one
+	// leaves it untouched - so only the positional form is restricted here.
+	// Same-package construction is never restricted either way (export only
+	// ever matters across a package boundary - see
+	// crossPackageStructConstruction).
+	if !keyed && c.crossPackageStructConstruction(info) {
+		if name, ok := firstUnexportedField(info.Symbol.Tree, fields); ok {
+			c.errorAt(n, "cannot use a positional literal to construct %s from another package: field %s is unexported", info.Symbol.Name, name)
+		}
+	}
+
 	seen := make(map[string]bool)
 
 	for i, elem := range elems {
@@ -1706,7 +1778,7 @@ func (c *checker) checkStructCompositeLit(n ast.NodeIndex, target Type, elems []
 	}
 
 	if !keyed && len(elems) != len(fields) {
-		c.errorAt(n, "%s composite literal has %d fields, want %d", info.Symbol.Name, len(elems), len(fields))
+		c.errorAtNodes(elems, n, "%s composite literal has %d fields, want %d", info.Symbol.Name, len(elems), len(fields))
 	}
 }
 
@@ -1743,6 +1815,15 @@ func (c *checker) checkKeyedStructElem(elem ast.NodeIndex, info *StructInfo, see
 		return
 	}
 	c.info.Refs[key] = fieldSym
+	// A keyed literal explicitly naming an unexported field is ordinary
+	// unexported-access, from another package - the same restriction any
+	// other struct-value field access enforces (checkExportedAccess). This
+	// is what keeps a keyed literal safe without checkStructCompositeLit's
+	// stricter positional-literal rule: simply omitting a field is fine
+	// (nothing is implicitly set), but naming one explicitly is not.
+	if !c.checkExportedAccess(key, fieldSym) {
+		return
+	}
 	if seen[name] {
 		c.errorAt(key, "field %s specified twice", name)
 	}
