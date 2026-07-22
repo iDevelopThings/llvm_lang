@@ -1,0 +1,45 @@
+// first_class_functions.llx - demonstrates first-class function values (see
+// LANGUAGE.md's "First-class functions" section): a free function referenced
+// without being called, stored in a variable and called indirectly through
+// it, passed as an ordinary argument and called from inside the callee, and
+// returned as a value from a function and then called.
+//
+// Run with:
+//   .\llvmc.exe examples\first_class_functions.llx
+//   echo $LASTEXITCODE   # (PowerShell) -> 42
+
+func inc(x int) int {
+	return x + 1
+}
+
+func double(x int) int {
+	return x * 2
+}
+
+// apply calls fn indirectly - the callee is a function-typed parameter, not
+// a statically-known function name, so this compiles to an indirect call
+// through the fat-pointer representation rather than a plain direct call.
+func apply(fn func(int) int, x int) int {
+	return fn(x)
+}
+
+// pick returns one of two free functions as a value, depending on useInc.
+func pick(useInc bool) func(int) int {
+	if useInc {
+		return inc
+	}
+	return double
+}
+
+func main() int {
+	fn := inc
+	print(fn(5)) // 6 - stored in a var, called indirectly
+
+	print(apply(double, 5)) // 10 - passed as an argument, called inside apply
+
+	got := pick(true)
+	print(got(10)) // 11 - returned from a function, then called
+
+	result := apply(inc, 41)
+	return result // 42
+}

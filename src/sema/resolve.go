@@ -322,9 +322,10 @@ func (r *resolver) resolveForStmt(parent *Scope, n ast.NodeIndex) {
 }
 
 // resolveType resolves n as a type reference (an Ident naming a builtin or
-// struct type, or an ArrayType). Distinct from resolveExpr because the
-// *role* differs even where the node shape doesn't: an Ident in type
-// position must resolve to something IsType(), not a variable.
+// struct type, an ArrayType, or a FuncType - see LANGUAGE.md's "First-class
+// functions" section). Distinct from resolveExpr because the *role* differs
+// even where the node shape doesn't: an Ident in type position must resolve
+// to something IsType(), not a variable.
 func (r *resolver) resolveType(scope *Scope, n ast.NodeIndex) {
 	switch r.tree.Nodes[n].Kind {
 	case enums.NodeKinds.Ident:
@@ -343,6 +344,14 @@ func (r *resolver) resolveType(scope *Scope, n ast.NodeIndex) {
 			r.resolveExpr(scope, size)
 		}
 		r.resolveType(scope, r.tree.Child(n, 1))
+	case enums.NodeKinds.FuncType:
+		paramList := r.tree.Child(n, 0)
+		for _, param := range r.tree.Children(paramList) {
+			r.resolveType(scope, param)
+		}
+		if ret := r.tree.Child(n, 1); ret != ast.InvalidNode {
+			r.resolveType(scope, ret)
+		}
 	}
 }
 

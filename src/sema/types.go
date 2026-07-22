@@ -1,6 +1,9 @@
 package sema
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // TypeKind classifies a Type. Two kinds exist purely for error recovery and
 // void-call bookkeeping, not because the language has values of them:
@@ -21,6 +24,13 @@ import "fmt"
 // Types section). There is no separate TypeInt constant - see TypeInt's own
 // doc comment below for why "int" is a synonym for TypeI32, not a second
 // TypeKind value that merely happens to compare equal to it.
+//
+// TypeFunc is a first-class function value's type - a free function
+// referenced without being called (`add`, not `add(...)`), or a variable/
+// parameter declared with a function-type annotation (`func(int) int`).
+// See Type's own Params/Return fields and LANGUAGE.md's "First-class
+// functions" section for the representation and what's (and isn't) covered
+// this round - bound method values are explicitly out of scope for now.
 //
 // TypeUntypedInt/TypeUntypedFloat are Go's own "untyped constant" model,
 // narrowed to numeric literals only - bool/string literals always have
@@ -51,6 +61,7 @@ const (
 	TypeBool
 	TypeStruct
 	TypeArray
+	TypeFunc
 
 	TypeUntypedInt
 	TypeUntypedFloat
@@ -74,9 +85,10 @@ const TypeInt = TypeI32
 // string compare and can't distinguish shadowed/duplicate declarations were
 // this language ever to grow multiple files or packages.
 //
-// Array is the only recursive case (an array of arrays is legal, same as
-// Go), hence Elem is a *Type rather than Type - a value Type containing
-// itself by value can't compile.
+// Array and Func are both recursive cases (an array of arrays, or a
+// function returning a function, are both legal), hence Elem/Return are
+// *Type rather than Type - a value Type containing itself by value can't
+// compile.
 type Type struct {
 	Kind TypeKind
 
@@ -91,6 +103,16 @@ type Type struct {
 	Elem    *Type
 	Size    int64
 	Dynamic bool
+
+	// Params and Return are set when Kind == TypeFunc: a function value's
+	// parameter types and return type (TypeVoid for a function type that
+	// declares none, e.g. `func(int)` - see LANGUAGE.md's "First-class
+	// functions" section). Params is a plain []Type - a slice header is
+	// already an indirection, so no self-containment problem there, unlike
+	// Return - a function type may itself return another function type, so
+	// Return needs the same *Type indirection Elem uses above.
+	Params []Type
+	Return *Type
 }
 
 var (
@@ -203,6 +225,16 @@ func (t Type) Equal(u Type) bool {
 			return false
 		}
 		return t.Elem.Equal(*u.Elem)
+	case TypeFunc:
+		if len(t.Params) != len(u.Params) {
+			return false
+		}
+		for i := range t.Params {
+			if !t.Params[i].Equal(u.Params[i]) {
+				return false
+			}
+		}
+		return t.Return.Equal(*u.Return)
 	default:
 		return true
 	}
@@ -246,6 +278,16 @@ func (t Type) String() string {
 			return "[]" + t.Elem.String()
 		}
 		return fmt.Sprintf("[%d]%s", t.Size, t.Elem.String())
+	case TypeFunc:
+		parts := make([]string, len(t.Params))
+		for i, p := range t.Params {
+			parts[i] = p.String()
+		}
+		s := "func(" + strings.Join(parts, ", ") + ")"
+		if t.Return != nil && t.Return.Kind != TypeVoid {
+			s += " " + t.Return.String()
+		}
+		return s
 	case TypeUntypedInt:
 		return "untyped int"
 	case TypeUntypedFloat:

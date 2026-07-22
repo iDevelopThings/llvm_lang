@@ -13,109 +13,115 @@ import (
 type NodeKind int
 
 const (
-	NodeKindFile         NodeKind = 0
-	NodeKindBad          NodeKind = 1
-	NodeKindVarDecl      NodeKind = 2
-	NodeKindShortVarDecl NodeKind = 3
-	NodeKindFuncDecl     NodeKind = 4
-	NodeKindParamList    NodeKind = 5
-	NodeKindParam        NodeKind = 6
-	NodeKindStructDecl   NodeKind = 7
-	NodeKindField        NodeKind = 8
-	NodeKindBlock        NodeKind = 9
-	NodeKindExprStmt     NodeKind = 10
-	NodeKindReturnStmt   NodeKind = 11
-	NodeKindBreakStmt    NodeKind = 12
-	NodeKindContinueStmt NodeKind = 13
-	NodeKindIfStmt       NodeKind = 14
-	NodeKindForStmt      NodeKind = 15
-	NodeKindAssignStmt   NodeKind = 16
-	NodeKindIncDecStmt   NodeKind = 17
-	NodeKindIdent        NodeKind = 18
-	NodeKindNumberLit    NodeKind = 19
-	NodeKindStringLit    NodeKind = 20
-	NodeKindBoolLit      NodeKind = 21
-	NodeKindBinaryExpr   NodeKind = 22
-	NodeKindUnaryExpr    NodeKind = 23
-	NodeKindCallExpr     NodeKind = 24
-	NodeKindParenExpr    NodeKind = 25
-	NodeKindIndexExpr    NodeKind = 26
-	NodeKindMemberExpr   NodeKind = 27
-	NodeKindArrayType    NodeKind = 28
-	NodeKindCompositeLit NodeKind = 29
-	NodeKindKeyValueExpr NodeKind = 30
-	NodeKindThisExpr     NodeKind = 31
+	NodeKindFile          NodeKind = 0
+	NodeKindBad           NodeKind = 1
+	NodeKindVarDecl       NodeKind = 2
+	NodeKindShortVarDecl  NodeKind = 3
+	NodeKindFuncDecl      NodeKind = 4
+	NodeKindParamList     NodeKind = 5
+	NodeKindParam         NodeKind = 6
+	NodeKindStructDecl    NodeKind = 7
+	NodeKindField         NodeKind = 8
+	NodeKindBlock         NodeKind = 9
+	NodeKindExprStmt      NodeKind = 10
+	NodeKindReturnStmt    NodeKind = 11
+	NodeKindBreakStmt     NodeKind = 12
+	NodeKindContinueStmt  NodeKind = 13
+	NodeKindIfStmt        NodeKind = 14
+	NodeKindForStmt       NodeKind = 15
+	NodeKindAssignStmt    NodeKind = 16
+	NodeKindIncDecStmt    NodeKind = 17
+	NodeKindIdent         NodeKind = 18
+	NodeKindNumberLit     NodeKind = 19
+	NodeKindStringLit     NodeKind = 20
+	NodeKindBoolLit       NodeKind = 21
+	NodeKindBinaryExpr    NodeKind = 22
+	NodeKindUnaryExpr     NodeKind = 23
+	NodeKindCallExpr      NodeKind = 24
+	NodeKindParenExpr     NodeKind = 25
+	NodeKindIndexExpr     NodeKind = 26
+	NodeKindMemberExpr    NodeKind = 27
+	NodeKindArrayType     NodeKind = 28
+	NodeKindCompositeLit  NodeKind = 29
+	NodeKindKeyValueExpr  NodeKind = 30
+	NodeKindThisExpr      NodeKind = 31
+	NodeKindFuncType      NodeKind = 32
+	NodeKindParamTypeList NodeKind = 33
 )
 
 type NodeKindContainer struct {
-	File         NodeKind
-	Bad          NodeKind
-	VarDecl      NodeKind
-	ShortVarDecl NodeKind
-	FuncDecl     NodeKind
-	ParamList    NodeKind
-	Param        NodeKind
-	StructDecl   NodeKind
-	Field        NodeKind
-	Block        NodeKind
-	ExprStmt     NodeKind
-	ReturnStmt   NodeKind
-	BreakStmt    NodeKind
-	ContinueStmt NodeKind
-	IfStmt       NodeKind
-	ForStmt      NodeKind
-	AssignStmt   NodeKind
-	IncDecStmt   NodeKind
-	Ident        NodeKind
-	NumberLit    NodeKind
-	StringLit    NodeKind
-	BoolLit      NodeKind
-	BinaryExpr   NodeKind
-	UnaryExpr    NodeKind
-	CallExpr     NodeKind
-	ParenExpr    NodeKind
-	IndexExpr    NodeKind
-	MemberExpr   NodeKind
-	ArrayType    NodeKind
-	CompositeLit NodeKind
-	KeyValueExpr NodeKind
-	ThisExpr     NodeKind
+	File          NodeKind
+	Bad           NodeKind
+	VarDecl       NodeKind
+	ShortVarDecl  NodeKind
+	FuncDecl      NodeKind
+	ParamList     NodeKind
+	Param         NodeKind
+	StructDecl    NodeKind
+	Field         NodeKind
+	Block         NodeKind
+	ExprStmt      NodeKind
+	ReturnStmt    NodeKind
+	BreakStmt     NodeKind
+	ContinueStmt  NodeKind
+	IfStmt        NodeKind
+	ForStmt       NodeKind
+	AssignStmt    NodeKind
+	IncDecStmt    NodeKind
+	Ident         NodeKind
+	NumberLit     NodeKind
+	StringLit     NodeKind
+	BoolLit       NodeKind
+	BinaryExpr    NodeKind
+	UnaryExpr     NodeKind
+	CallExpr      NodeKind
+	ParenExpr     NodeKind
+	IndexExpr     NodeKind
+	MemberExpr    NodeKind
+	ArrayType     NodeKind
+	CompositeLit  NodeKind
+	KeyValueExpr  NodeKind
+	ThisExpr      NodeKind
+	FuncType      NodeKind
+	ParamTypeList NodeKind
 }
 
 // NodeKinds is the entry point for the NodeKind enum.
 var NodeKinds = NodeKindContainer{
-	File:         NodeKindFile,
-	Bad:          NodeKindBad,
-	VarDecl:      NodeKindVarDecl,
-	ShortVarDecl: NodeKindShortVarDecl,
-	FuncDecl:     NodeKindFuncDecl,
-	ParamList:    NodeKindParamList,
-	Param:        NodeKindParam,
-	StructDecl:   NodeKindStructDecl,
-	Field:        NodeKindField,
-	Block:        NodeKindBlock,
-	ExprStmt:     NodeKindExprStmt,
-	ReturnStmt:   NodeKindReturnStmt,
-	BreakStmt:    NodeKindBreakStmt,
-	ContinueStmt: NodeKindContinueStmt,
-	IfStmt:       NodeKindIfStmt,
-	ForStmt:      NodeKindForStmt,
-	AssignStmt:   NodeKindAssignStmt,
-	IncDecStmt:   NodeKindIncDecStmt,
-	Ident:        NodeKindIdent,
-	NumberLit:    NodeKindNumberLit,
-	StringLit:    NodeKindStringLit,
-	BoolLit:      NodeKindBoolLit,
-	BinaryExpr:   NodeKindBinaryExpr,
-	UnaryExpr:    NodeKindUnaryExpr,
-	CallExpr:     NodeKindCallExpr,
-	ParenExpr:    NodeKindParenExpr,
-	IndexExpr:    NodeKindIndexExpr,
-	MemberExpr:   NodeKindMemberExpr,
-	ArrayType:    NodeKindArrayType,
-	CompositeLit: NodeKindCompositeLit,
-	KeyValueExpr: NodeKindKeyValueExpr,
-	ThisExpr:     NodeKindThisExpr,
+	File:          NodeKindFile,
+	Bad:           NodeKindBad,
+	VarDecl:       NodeKindVarDecl,
+	ShortVarDecl:  NodeKindShortVarDecl,
+	FuncDecl:      NodeKindFuncDecl,
+	ParamList:     NodeKindParamList,
+	Param:         NodeKindParam,
+	StructDecl:    NodeKindStructDecl,
+	Field:         NodeKindField,
+	Block:         NodeKindBlock,
+	ExprStmt:      NodeKindExprStmt,
+	ReturnStmt:    NodeKindReturnStmt,
+	BreakStmt:     NodeKindBreakStmt,
+	ContinueStmt:  NodeKindContinueStmt,
+	IfStmt:        NodeKindIfStmt,
+	ForStmt:       NodeKindForStmt,
+	AssignStmt:    NodeKindAssignStmt,
+	IncDecStmt:    NodeKindIncDecStmt,
+	Ident:         NodeKindIdent,
+	NumberLit:     NodeKindNumberLit,
+	StringLit:     NodeKindStringLit,
+	BoolLit:       NodeKindBoolLit,
+	BinaryExpr:    NodeKindBinaryExpr,
+	UnaryExpr:     NodeKindUnaryExpr,
+	CallExpr:      NodeKindCallExpr,
+	ParenExpr:     NodeKindParenExpr,
+	IndexExpr:     NodeKindIndexExpr,
+	MemberExpr:    NodeKindMemberExpr,
+	ArrayType:     NodeKindArrayType,
+	CompositeLit:  NodeKindCompositeLit,
+	KeyValueExpr:  NodeKindKeyValueExpr,
+	ThisExpr:      NodeKindThisExpr,
+	FuncType:      NodeKindFuncType,
+	ParamTypeList: NodeKindParamTypeList,
 }
 
 // NodeKindInfo is the static metadata attached to a NodeKind.
@@ -253,6 +259,14 @@ var nodeKindInfos = map[NodeKind]NodeKindInfo{
 		NodeKind: NodeKindThisExpr,
 		Name:     "ThisExpr",
 	},
+	NodeKindFuncType: {
+		NodeKind: NodeKindFuncType,
+		Name:     "FuncType",
+	},
+	NodeKindParamTypeList: {
+		NodeKind: NodeKindParamTypeList,
+		Name:     "ParamTypeList",
+	},
 }
 
 var nodeKindValues = []NodeKind{
@@ -288,41 +302,45 @@ var nodeKindValues = []NodeKind{
 	NodeKindCompositeLit,
 	NodeKindKeyValueExpr,
 	NodeKindThisExpr,
+	NodeKindFuncType,
+	NodeKindParamTypeList,
 }
 
 var nodeKindByName = map[string]NodeKind{
-	"file":         NodeKindFile,
-	"bad":          NodeKindBad,
-	"vardecl":      NodeKindVarDecl,
-	"shortvardecl": NodeKindShortVarDecl,
-	"funcdecl":     NodeKindFuncDecl,
-	"paramlist":    NodeKindParamList,
-	"param":        NodeKindParam,
-	"structdecl":   NodeKindStructDecl,
-	"field":        NodeKindField,
-	"block":        NodeKindBlock,
-	"exprstmt":     NodeKindExprStmt,
-	"returnstmt":   NodeKindReturnStmt,
-	"breakstmt":    NodeKindBreakStmt,
-	"continuestmt": NodeKindContinueStmt,
-	"ifstmt":       NodeKindIfStmt,
-	"forstmt":      NodeKindForStmt,
-	"assignstmt":   NodeKindAssignStmt,
-	"incdecstmt":   NodeKindIncDecStmt,
-	"ident":        NodeKindIdent,
-	"numberlit":    NodeKindNumberLit,
-	"stringlit":    NodeKindStringLit,
-	"boollit":      NodeKindBoolLit,
-	"binaryexpr":   NodeKindBinaryExpr,
-	"unaryexpr":    NodeKindUnaryExpr,
-	"callexpr":     NodeKindCallExpr,
-	"parenexpr":    NodeKindParenExpr,
-	"indexexpr":    NodeKindIndexExpr,
-	"memberexpr":   NodeKindMemberExpr,
-	"arraytype":    NodeKindArrayType,
-	"compositelit": NodeKindCompositeLit,
-	"keyvalueexpr": NodeKindKeyValueExpr,
-	"thisexpr":     NodeKindThisExpr,
+	"file":          NodeKindFile,
+	"bad":           NodeKindBad,
+	"vardecl":       NodeKindVarDecl,
+	"shortvardecl":  NodeKindShortVarDecl,
+	"funcdecl":      NodeKindFuncDecl,
+	"paramlist":     NodeKindParamList,
+	"param":         NodeKindParam,
+	"structdecl":    NodeKindStructDecl,
+	"field":         NodeKindField,
+	"block":         NodeKindBlock,
+	"exprstmt":      NodeKindExprStmt,
+	"returnstmt":    NodeKindReturnStmt,
+	"breakstmt":     NodeKindBreakStmt,
+	"continuestmt":  NodeKindContinueStmt,
+	"ifstmt":        NodeKindIfStmt,
+	"forstmt":       NodeKindForStmt,
+	"assignstmt":    NodeKindAssignStmt,
+	"incdecstmt":    NodeKindIncDecStmt,
+	"ident":         NodeKindIdent,
+	"numberlit":     NodeKindNumberLit,
+	"stringlit":     NodeKindStringLit,
+	"boollit":       NodeKindBoolLit,
+	"binaryexpr":    NodeKindBinaryExpr,
+	"unaryexpr":     NodeKindUnaryExpr,
+	"callexpr":      NodeKindCallExpr,
+	"parenexpr":     NodeKindParenExpr,
+	"indexexpr":     NodeKindIndexExpr,
+	"memberexpr":    NodeKindMemberExpr,
+	"arraytype":     NodeKindArrayType,
+	"compositelit":  NodeKindCompositeLit,
+	"keyvalueexpr":  NodeKindKeyValueExpr,
+	"thisexpr":      NodeKindThisExpr,
+	"functype":      NodeKindFuncType,
+	"paramtypelist": NodeKindParamTypeList,
 }
 
 // Values returns every declared value in declaration order.

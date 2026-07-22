@@ -71,9 +71,11 @@ func (p *Parser) parseBlock() ast.NodeIndex {
 }
 
 // parseTypeExpr parses a type reference: a bare identifier (int, string,
-// bool, or a struct name), or an array type `[N]T` (fixed-size) / `[]T`
+// bool, or a struct name), an array type `[N]T` (fixed-size) / `[]T`
 // (dynamic - parsed now, rejected later at a semantic stage once one
-// exists, so the grammar doesn't need to change when dynamic arrays land).
+// exists, so the grammar doesn't need to change when dynamic arrays land),
+// or a function type `func(T1, T2) R` (see parseFuncType) - first-class
+// function values (LANGUAGE.md's "First-class functions" section).
 func (p *Parser) parseTypeExpr() ast.NodeIndex {
 	if openTok, ok := p.accept(enums.Lexemes.LeftBracket); ok {
 		p.exprLev++
@@ -90,8 +92,73 @@ func (p *Parser) parseTypeExpr() ast.NodeIndex {
 		}
 		return p.tree.NewNode(enums.NodeKinds.ArrayType, lexer.Token{}, span, size, elem)
 	}
+	if p.atKeyword(enums.Keywords.Func) {
+		return p.parseFuncType()
+	}
 	nameTok := p.expectIdent()
 	return p.tree.NewNode(enums.NodeKinds.Ident, nameTok, tokenSpan(nameTok))
+}
+
+// parseFuncType parses a function-type expression: `func(T1, T2) R` (a
+// comma-separated parameter *type* list - no parameter names, unlike
+// FuncDecl's own param list - plus a return type), or `func(T1, T2)` with no
+// return type at all (an implicitly void function type, mirroring
+// FuncDecl's own optional return type). The parameter types are wrapped in
+// their own ParamTypeList node for the same reason FuncDecl wraps its params
+// in a ParamList: FuncType has a variable-arity part (the parameter types)
+// followed by a further fixed slot (the return type), so the variable part
+// needs its own node to keep FuncType itself fixed-arity.
+func (p *Parser) parseFuncType() ast.NodeIndex {
+	kwTok := p.expectKeyword(enums.Keywords.Func)
+
+	openTok := p.expect(enums.Lexemes.LeftParen)
+	var paramTypes []ast.NodeIndex
+	if !p.at(enums.Lexemes.RightParen) {
+		paramTypes = append(paramTypes, p.parseTypeExpr())
+		for {
+			if _, ok := p.accept(enums.Lexemes.Comma); !ok {
+				break
+			}
+			paramTypes = append(paramTypes, p.parseTypeExpr())
+		}
+	}
+	closeTok := p.expect(enums.Lexemes.RightParen)
+	listSpan := ast.Span{
+		Start: openTok.Start,
+		End:   closeTok.End,
+	}
+	paramList := p.tree.NewNode(enums.NodeKinds.ParamTypeList, lexer.Token{}, listSpan, paramTypes...)
+
+	returnType := ast.InvalidNode
+	end := closeTok.End
+	if p.atTypeStart() {
+		returnType = p.parseTypeExpr()
+		end = p.tree.SpanOf(returnType).End
+	}
+
+	span := ast.Span{
+		Start: kwTok.Start,
+		End:   end,
+	}
+	return p.tree.NewNode(enums.NodeKinds.FuncType, kwTok, span, paramList, returnType)
+}
+
+// atTypeStart reports whether the current token could begin a type
+// expression (parseTypeExpr): a `[` (array type), the `func` keyword
+// (function type), or a plain identifier naming a builtin/struct type.
+// Unlike parseFuncDecl's own return-type check (unambiguous there - a
+// FuncDecl's return type is always followed by `{`), a FuncType's optional
+// return type can be followed by all sorts of things depending on context
+// (`,` inside an outer param list, `)`, `=`, `;`, EOF, ...), so this decides
+// positively whether a type could start here, rather than negatively
+// checking for one specific terminator. A keyword other than `func` (`if`,
+// `true`, `this`, ...) also lexes as Lexeme.Identifier (see Token.Keyword)
+// but can never start a type, hence the explicit Keyword == "" check.
+func (p *Parser) atTypeStart() bool {
+	if p.at(enums.Lexemes.LeftBracket) || p.atKeyword(enums.Keywords.Func) {
+		return true
+	}
+	return p.at(enums.Lexemes.Identifier) && p.tok.Keyword == ""
 }
 
 // parseVarDecl parses `var name Type`, `var name = Expr`, or

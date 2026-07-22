@@ -110,6 +110,12 @@ type Generator struct {
 	stringTy llvm.Type
 	voidTy   llvm.Type
 
+	// funcValTy is the fat-pointer LLVM representation of a first-class
+	// function value: the literal struct {ptr, ptr} = {fnPtr, ctxPtr} - see
+	// CODEGEN.md's "First-class functions" section and genFuncValue
+	// (expr.go), the one site that actually constructs one.
+	funcValTy llvm.Type
+
 	structLayouts map[*sema.StructInfo]*structLayout
 	globals       map[*sema.Symbol]llvm.Value
 	funcs         map[ast.NodeIndex]funcEntry

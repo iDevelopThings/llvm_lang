@@ -73,6 +73,40 @@ func (g *Generator) genAddr(n ast.NodeIndex) llvm.Value {
 	}
 }
 
+// genLoad computes n's address (genAddr) and loads its value - the common
+// path shared by every lvalue-shaped expression kind used as an rvalue
+// (Ident naming a var/param, MemberExpr, IndexExpr, ThisExpr). Ident's own
+// genExpr case doesn't always go through this - a bare reference to a
+// declared *function* has no address to load from at all (see genExpr's
+// Ident case, and genFuncValue).
+func (g *Generator) genLoad(n ast.NodeIndex) llvm.Value {
+	addr := g.genAddr(n)
+	return g.builder.CreateLoad(g.llvmType(g.info.Types[n]), addr, "")
+}
+
+// genFuncValue builds the fat-pointer value {fnPtr, ctxPtr} for a bare,
+// uncalled reference to a free function (`add`, not `add(...)`) - see
+// CODEGEN.md's "First-class functions" section for the representation this
+// implements.
+//
+// ctxPtr is always a null pointer constant here: every function value this
+// round is a free-function reference, so there is no receiver to close
+// over. This is the exact extension point a future bound-method value
+// (`p.move` referenced without a call) will fill in instead - constructing
+// this same two-field struct but with the receiver's own address as ctxPtr
+// rather than null - so the representation and calling convention need no
+// redesign when that lands.
+func (g *Generator) genFuncValue(sym *sema.Symbol) llvm.Value {
+	entry := g.funcs[sym.Decl]
+	ctxPtr := llvm.ConstNull(g.ptrTy)
+	// Must go through g.ctx (not the package-level llvm.ConstStruct), same
+	// reasoning as constStringValue: otherwise the result's type is a
+	// structurally-identical but distinct anonymous struct type from
+	// g.funcValTy, and LLVM's verifier rejects assigning it to anything
+	// actually typed g.funcValTy (a local's alloca, a param, a return slot).
+	return g.ctx.ConstStruct([]llvm.Value{entry.fn, ctxPtr}, false)
+}
+
 // genBoundsCheck emits a real runtime check that idx (an i32) satisfies
 // `0 <= idx < size` for a fixed-size array of that size, trapping
 // immediately (llvm.trap followed by unreachable - see setupRuntime,
@@ -108,9 +142,18 @@ func (g *Generator) genBoundsCheck(idx llvm.Value, size int64) {
 // genExpr lowers n to its rvalue.
 func (g *Generator) genExpr(n ast.NodeIndex) llvm.Value {
 	switch g.tree.Nodes[n].Kind {
-	case enums.NodeKinds.Ident, enums.NodeKinds.MemberExpr, enums.NodeKinds.IndexExpr, enums.NodeKinds.ThisExpr:
-		addr := g.genAddr(n)
-		return g.builder.CreateLoad(g.llvmType(g.info.Types[n]), addr, "")
+	case enums.NodeKinds.Ident:
+		// A bare, uncalled reference to a declared free function (`add`,
+		// not `add(...)`) has no storage location to load from - genAddr
+		// would panic on it (see its own Ident case) - so it's built
+		// directly as a fat-pointer value instead. Every other Ident (a
+		// var/param) still goes through the ordinary addr+load path.
+		if sym := g.info.Refs[n]; sym.Kind == sema.SymFunc {
+			return g.genFuncValue(sym)
+		}
+		return g.genLoad(n)
+	case enums.NodeKinds.MemberExpr, enums.NodeKinds.IndexExpr, enums.NodeKinds.ThisExpr:
+		return g.genLoad(n)
 	case enums.NodeKinds.NumberLit:
 		return g.genNumberLit(n)
 	case enums.NodeKinds.StringLit:
@@ -424,9 +467,10 @@ func (g *Generator) genShortCircuit(op string, lNode, rNode ast.NodeIndex) llvm.
 
 // genCallExpr lowers a call: the predeclared print builtin (see
 // isPrintCall), an explicit numeric conversion `T(x)` (see isConversionCall),
-// a free function, or a method call. print returns no value (void) - see
-// AGENTS.md's "print builtin" section - so its "result" is never used by
-// anything else in a checked tree.
+// a free function, a method call, or an indirect call through a
+// function-typed value (see isDirectFuncCall/genIndirectCall). print returns
+// no value (void) - see AGENTS.md's "print builtin" section - so its
+// "result" is never used by anything else in a checked tree.
 func (g *Generator) genCallExpr(n ast.NodeIndex) llvm.Value {
 	children := g.tree.Children(n)
 	calleeNode, argNodes := children[0], children[1:]
@@ -438,10 +482,63 @@ func (g *Generator) genCallExpr(n ast.NodeIndex) llvm.Value {
 	if g.isConversionCall(calleeNode) {
 		return g.genConversion(n, argNodes[0])
 	}
-	if g.tree.Nodes[calleeNode].Kind == enums.NodeKinds.MemberExpr {
+	switch {
+	case g.tree.Nodes[calleeNode].Kind == enums.NodeKinds.MemberExpr:
 		return g.genMethodCall(calleeNode, argNodes)
+	case g.isDirectFuncCall(calleeNode):
+		return g.genFuncCall(calleeNode, argNodes)
+	default:
+		return g.genIndirectCall(calleeNode, argNodes)
 	}
-	return g.genFuncCall(calleeNode, argNodes)
+}
+
+// isDirectFuncCall mirrors sema's own dispatch (funcSigForCall in
+// sema/typecheck.go): a call's callee compiles to a plain, direct `call`
+// instruction with zero fat-pointer/indirect-call overhead only when it's a
+// plain Ident resolving (via Info.Refs) to an actual declared free function
+// (SymFunc with a real FuncDecl, i.e. Decl != InvalidNode) - the
+// predeclared `print` builtin is intercepted earlier by isPrintCall and
+// never reaches here on a checked tree, but Decl != InvalidNode still
+// guards against it defensively. Anything else that type-checked as
+// callable - a function-typed variable/parameter, or any other expression
+// whose value is itself a function (e.g. a call result) - goes through
+// genIndirectCall instead (see CODEGEN.md's "First-class functions" section).
+func (g *Generator) isDirectFuncCall(calleeNode ast.NodeIndex) bool {
+	if g.tree.Nodes[calleeNode].Kind != enums.NodeKinds.Ident {
+		return false
+	}
+	sym, ok := g.info.Refs[calleeNode]
+	return ok && sym.Kind == sema.SymFunc && sym.Decl != ast.InvalidNode
+}
+
+// genIndirectCall lowers a call through a function-typed value - a
+// variable/parameter holding a function reference, or any other expression
+// whose value is itself a function (e.g. one returned from another call).
+// Unlike a direct call (genFuncCall, which looks the callee's LLVM function
+// straight up in g.funcs), this actually evaluates calleeNode as an
+// ordinary value expression to get its fat-pointer {fnPtr, ctxPtr}
+// representation (see genFuncValue and CODEGEN.md), extracts fnPtr, and builds
+// the llvm.FunctionType to call through it directly from the callee's own
+// sema.Type (Params/Return) - there's no FuncDecl node backing an indirect
+// callee the way genFuncCall's funcEntry lookup relies on. ctxPtr is
+// unused this round - every function value is a free-function reference
+// (see genFuncValue) - so it's never passed along as a hidden argument.
+func (g *Generator) genIndirectCall(calleeNode ast.NodeIndex, argNodes []ast.NodeIndex) llvm.Value {
+	fnVal := g.genExpr(calleeNode)
+	fnPtr := g.builder.CreateExtractValue(fnVal, 0, "")
+
+	calleeType := g.info.Types[calleeNode]
+	paramTypes := make([]llvm.Type, len(calleeType.Params))
+	for i, pt := range calleeType.Params {
+		paramTypes[i] = g.llvmType(pt)
+	}
+	fnType := llvm.FunctionType(g.llvmType(*calleeType.Return), paramTypes, false)
+
+	args := make([]llvm.Value, len(argNodes))
+	for i, a := range argNodes {
+		args[i] = g.genExpr(a)
+	}
+	return g.builder.CreateCall(fnType, fnPtr, args, "")
 }
 
 // isConversionCall mirrors sema's own recognition of `T(x)` as an explicit

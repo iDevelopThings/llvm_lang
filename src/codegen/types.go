@@ -20,6 +20,10 @@ import (
 //     plus a length, not a null-terminated C string. It's never guaranteed
 //     null-terminated, so every consumer (print, concatenation, equality)
 //     goes through the length field, never strlen.
+//   - a first-class function value (sema.TypeFunc) is the literal (unnamed)
+//     struct {ptr, ptr} - a "fat pointer" of {fnPtr, ctxPtr} - see
+//     CODEGEN.md's "First-class functions" section and genFuncValue
+//     (expr.go) for the one construction site that fills it in.
 func (g *Generator) setupTypes() {
 	g.i8Ty = g.ctx.Int8Type()
 	g.i16Ty = g.ctx.Int16Type()
@@ -31,6 +35,7 @@ func (g *Generator) setupTypes() {
 	g.ptrTy = llvm.PointerType(g.i8Ty, 0)
 	g.voidTy = g.ctx.VoidType()
 	g.stringTy = g.ctx.StructType([]llvm.Type{g.ptrTy, g.i32Ty}, false)
+	g.funcValTy = g.ctx.StructType([]llvm.Type{g.ptrTy, g.ptrTy}, false)
 }
 
 // llvmType maps a sema.Type (the output of type-checking) to the LLVM type
@@ -64,6 +69,8 @@ func (g *Generator) llvmType(t sema.Type) llvm.Type {
 		return g.structLayouts[t.Struct].llvmType
 	case sema.TypeArray:
 		return llvm.ArrayType(g.llvmType(*t.Elem), int(t.Size))
+	case sema.TypeFunc:
+		return g.funcValTy
 	default:
 		panic(fmt.Sprintf("codegen: type %s reached llvmType - only valid, checked types are supported", t))
 	}

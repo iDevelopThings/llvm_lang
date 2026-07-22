@@ -40,3 +40,5 @@ values:
   - name: CompositeLit
   - name: KeyValueExpr
   - name: ThisExpr
+  - name: FuncType
+  - name: ParamTypeList

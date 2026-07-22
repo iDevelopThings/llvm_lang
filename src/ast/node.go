@@ -38,10 +38,12 @@ type Span struct {
 //     (=, +=, -=, *=, /=, ++, --)
 //   - ShortVarDecl: the `:=` token
 //   - VarDecl, FuncDecl, StructDecl, IfStmt, ForStmt, ReturnStmt, BreakStmt,
-//     ContinueStmt: the leading keyword token
+//     ContinueStmt, FuncType: the leading keyword token (FuncType's is the
+//     `func` that introduces a function-type expression, e.g. `func(int) int`,
+//     see LANGUAGE.md's Types section)
 //   - everything else (File, Block, ParamList, Param, Field, CallExpr,
-//     ParenExpr, IndexExpr, ArrayType, CompositeLit, KeyValueExpr, ExprStmt):
-//     unused, left as the zero Token
+//     ParenExpr, IndexExpr, ArrayType, CompositeLit, KeyValueExpr, ExprStmt,
+//     ParamTypeList): unused, left as the zero Token
 //
 // Children shapes, by kind:
 //   - CallExpr: [callee, arg0, arg1, ...] - variable arity, callee always first
@@ -89,6 +91,17 @@ type Span struct {
 //     first (same CallExpr-style shape - nothing follows the variable part,
 //     unlike FuncDecl, so no wrapper is needed here)
 //   - File: [decl0, decl1, ...] - variable arity (the parse tree root)
+//   - ParamTypeList: [type0, type1, ...] - variable arity, each child a bare
+//     type-position node (an Ident, ArrayType, or another FuncType - no name,
+//     unlike ParamList's Param children) - a function type's parameter
+//     types, e.g. the `int, string` in `func(int, string) bool`
+//   - FuncType: [paramList, returnType] - fixed arity; paramList is always a
+//     ParamTypeList node (empty for a no-parameter function type); returnType
+//     may be InvalidNode (the function type declares no return value, same
+//     as FuncDecl's own optional return type - `func(int)` is a function
+//     type over a function taking one int and returning nothing). See
+//     LANGUAGE.md's "First-class functions" section for the language-level
+//     feature this represents, and CODEGEN.md for how it's lowered.
 //   - a fixed-arity kind may reserve a positional slot as InvalidNode for an
 //     omitted optional child (e.g. VarDecl's type annotation); a
 //     variable-arity kind (Block's statements, CallExpr's arguments) is

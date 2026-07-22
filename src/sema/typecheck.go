@@ -12,16 +12,32 @@ import (
 	"llvm_lang/src/enums"
 )
 
-// funcSignature is a function or method's parameter/return types, derived
-// from its FuncDecl node. Unlike Type, this never needs to be a Type
-// itself: function/method names aren't first-class values anywhere in this
-// language's grammar (parseTypeExpr has no function-type syntax, so a var
-// could never be declared to hold one) - a funcSignature only ever
-// describes the callee of a CallExpr, never something assigned a Type of
-// its own. See funcSigForCallee.
+// funcSignature is a callable's parameter/return types - a declared free
+// function or method's (derived from its FuncDecl node), or an indirect
+// call's (derived from a function-typed value's own TypeFunc - see
+// funcType/funcSigForCall). It exists as its own small struct, distinct
+// from Type, purely so checkCallExpr's argument-count/type checking has one
+// shape to check against regardless of which of those two a given call's
+// callee turns out to be - a funcSignature never becomes an expression's
+// own Type; only a real Type (TypeFunc, for a bare function reference or a
+// function-typed variable) does that. See funcSigForCall.
 type funcSignature struct {
 	Params []Type
 	Return Type
+}
+
+// funcType builds the Type (Kind: TypeFunc) describing sig - used when a
+// bare function name is referenced as a value rather than called (see
+// checkIdentExpr). ret is boxed into a fresh *Type since Type.Return must be
+// a pointer (see Type's own doc comment - a function type may itself return
+// another function type).
+func funcType(sig funcSignature) Type {
+	ret := sig.Return
+	return Type{
+		Kind:   TypeFunc,
+		Params: sig.Params,
+		Return: &ret,
+	}
 }
 
 // enclosingFunc is the return-type context checkReturnStmt checks against -
@@ -423,8 +439,39 @@ func (c *checker) computeTypeFromNode(n ast.NodeIndex) Type {
 		}
 	case enums.NodeKinds.ArrayType:
 		return c.arrayTypeFromNode(n)
+	case enums.NodeKinds.FuncType:
+		return c.funcTypeFromNode(n)
 	default:
 		return invalidType
+	}
+}
+
+// funcTypeFromNode converts a FuncType type-position node (`func(T1, T2) R`,
+// or `func(T1, T2)` with an implicit void return - see ast.Node's own
+// FuncType doc comment) into a Type - the function-type counterpart to
+// arrayTypeFromNode. Each parameter type and the return type (when present)
+// are themselves type-position nodes, so this recurses through typeFromNode
+// exactly like every other nested type position in this pass, keeping every
+// FuncType-reachable node covered by info.Types (see typeFromNode's own doc
+// comment).
+func (c *checker) funcTypeFromNode(n ast.NodeIndex) Type {
+	paramListNode := c.tree.Child(n, 0)
+	returnNode := c.tree.Child(n, 1)
+
+	paramNodes := c.tree.Children(paramListNode)
+	params := make([]Type, len(paramNodes))
+	for i, p := range paramNodes {
+		params[i] = c.typeFromNode(p)
+	}
+
+	ret := voidType
+	if returnNode != ast.InvalidNode {
+		ret = c.typeFromNode(returnNode)
+	}
+	return Type{
+		Kind:   TypeFunc,
+		Params: params,
+		Return: &ret,
 	}
 }
 
@@ -593,14 +640,27 @@ func (c *checker) checkCompoundOp(value ast.NodeIndex, op string, tt, vt Type) {
 // parser already rejected anything whose *shape* can't be an lvalue
 // (checkAssignTarget in parser/stmt.go accepts only Ident, MemberExpr, and
 // IndexExpr) - what's left for this type-aware pass is whether the name
-// behind that shape is actually assignable: an Ident might name a function
-// or type, not a variable; a MemberExpr might name a method, not a field.
-// Reusing checkExpr's own dispatch for all three catches this for free:
-// checkIdentExpr/checkMemberExpr already report and return TypeInvalid for
-// exactly those cases, so there is nothing extra to special-case here.
+// behind that shape is actually assignable: an Ident might name a type, not
+// a variable; a MemberExpr might name a method, not a field.
+// checkMemberExpr already reports and returns TypeInvalid for its own
+// not-a-field case, so IndexExpr/MemberExpr can still just reuse checkExpr's
+// dispatch directly. An Ident needs its own explicit guard now that a bare
+// function name type-checks successfully as a value (checkIdentExpr's
+// SymFunc case, for first-class functions - see LANGUAGE.md): a function has
+// nowhere to be assigned *to* (there's no storage location backing it, only
+// a fixed declaration), so checkExpr succeeding is no longer sufficient
+// proof of assignability the way it still is for every other kind.
 func (c *checker) checkLValue(n ast.NodeIndex) (Type, bool) {
 	switch c.tree.Nodes[n].Kind {
-	case enums.NodeKinds.Ident, enums.NodeKinds.MemberExpr, enums.NodeKinds.IndexExpr:
+	case enums.NodeKinds.Ident:
+		sym, ok := c.info.Refs[n]
+		if ok && sym.Kind != SymVar && sym.Kind != SymParam {
+			c.errorAt(n, "cannot assign to %s (%s is not a variable)", c.tree.Text(n), sym.Kind)
+			return invalidType, false
+		}
+		t := c.checkExpr(n)
+		return t, !t.IsInvalid()
+	case enums.NodeKinds.MemberExpr, enums.NodeKinds.IndexExpr:
 		t := c.checkExpr(n)
 		return t, !t.IsInvalid()
 	case enums.NodeKinds.Bad:
@@ -682,7 +742,10 @@ func (c *checker) checkCondition(n ast.NodeIndex) {
 // checkExpr type-checks n and memoizes its Type into info.Types, so every
 // expression node this pass visits has an entry - no nil/zero-value
 // checking needed downstream (codegen). The one deliberate exception is a
-// CallExpr/MemberExpr's callee position: see funcSigForCallee.
+// *direct* call's callee position (a plain function name, or a method's
+// MemberExpr) - see funcSigForCall: an *indirect* call's callee (a
+// function-typed variable/parameter, or any other function-valued
+// expression) does get a real entry, same as any other value expression.
 func (c *checker) checkExpr(n ast.NodeIndex) Type {
 	if n == ast.InvalidNode {
 		return invalidType
@@ -757,6 +820,17 @@ func (c *checker) checkNumberLit(n ast.NodeIndex) Type {
 	return untypedIntType
 }
 
+// checkIdentExpr types a bare identifier reference. A free function name
+// (SymFunc with a real declaration) is a first-class value now - its Type is
+// a TypeFunc built from its own signature (funcType/funcSigForDecl) - see
+// LANGUAGE.md's "First-class functions" section; this is deliberately scoped
+// to free functions only, never a method (a method is never reachable
+// through a bare Ident at all - only through a MemberExpr, which
+// checkMemberExpr still rejects as a value uncalled, exactly as before -
+// see LANGUAGE.md for why method values remain out of scope this round). The
+// predeclared `print` builtin is a SymFunc with no real declaration
+// (Decl == InvalidNode - see universeScope) and so has no signature to
+// build a Type from; referencing it bare remains an error.
 func (c *checker) checkIdentExpr(n ast.NodeIndex) Type {
 	sym, ok := c.info.Refs[n]
 	if !ok {
@@ -766,8 +840,11 @@ func (c *checker) checkIdentExpr(n ast.NodeIndex) Type {
 	case SymVar, SymParam:
 		return c.declType(sym.Decl)
 	case SymFunc:
-		c.errorAt(n, "%s is a function, not a value (call it with ())", c.tree.Text(n))
-		return invalidType
+		if sym.Decl == ast.InvalidNode {
+			c.errorAt(n, "%s is a builtin, not a value", c.tree.Text(n))
+			return invalidType
+		}
+		return funcType(c.funcSigForDecl(sym.Decl))
 	case SymStruct, SymBuiltinType:
 		c.errorAt(n, "%s is a type, not a value", c.tree.Text(n))
 		return invalidType
@@ -1088,8 +1165,12 @@ func (c *checker) resolveMember(n ast.NodeIndex) (*Symbol, bool) {
 
 // checkCallExpr type-checks a call: builtin print (special-cased - see
 // isPrintCall), an explicit numeric conversion `T(x)` (checkConversionCall),
-// a free function, or a method call (`p.move()`). Argument count and each
-// argument's type are checked against the resolved callee's signature.
+// a free function, a method call (`p.move()`), or an indirect call through
+// a function-typed value (`fn(1, 2)` where fn is a variable/parameter, or
+// any other expression whose value is itself a function - see
+// funcSigForCall). Argument count and each argument's type are checked
+// against the resolved callee's signature the same way regardless of which
+// of those a given call turns out to be.
 func (c *checker) checkCallExpr(n ast.NodeIndex) Type {
 	children := c.tree.Children(n)
 	callee, args := children[0], children[1:]
@@ -1101,7 +1182,7 @@ func (c *checker) checkCallExpr(n ast.NodeIndex) Type {
 		return t
 	}
 
-	sig, ok := c.funcSigForCallee(callee)
+	sig, ok := c.funcSigForCall(callee)
 	if !ok {
 		for _, a := range args {
 			c.checkValueExpr(a)
@@ -1167,7 +1248,7 @@ func (c *checker) checkPrintCall(n ast.NodeIndex, args []ast.NodeIndex) Type {
 // Scoped to numeric-to-numeric conversions only (see AGENTS.md's "Explicit
 // conversions" section) - string/struct/array/bool conversions aren't
 // meaningfully "conversions" here and remain unsupported, reported as such
-// rather than falling through to funcSigForCallee's "not a function" wording
+// rather than falling through to funcSigForCall's "not callable" wording
 // (which would be a confusing message for `Point(x)` - the real problem is
 // that Point isn't a numeric conversion target, not that it isn't callable).
 //
@@ -1224,30 +1305,53 @@ func (c *checker) checkConversionCall(n, callee ast.NodeIndex, args []ast.NodeIn
 	return target, true
 }
 
-// funcSigForCallee resolves a CallExpr's callee - an Ident naming a free
-// function, or a MemberExpr naming a method - to its signature. Function
-// and method names aren't first-class values in this language (see
-// funcSignature's doc comment), so unlike every other expression position,
-// callee gets no info.Types entry here - only the call's overall result
-// does.
-func (c *checker) funcSigForCallee(callee ast.NodeIndex) (funcSignature, bool) {
+// funcSigForCall resolves a CallExpr's callee to the funcSignature its
+// arguments must be checked against - the same argument-count/type checking
+// applies whether the call turns out to be direct or indirect (see
+// LANGUAGE.md's "First-class functions" section; codegen's own dispatch -
+// isDirectFuncCall, codegen/expr.go, documented in CODEGEN.md - mirrors this
+// exact distinction to choose a plain, direct `call` versus extracting a
+// fat pointer and calling through it, since only the calling convention
+// differs, never the type-checking):
+//
+//   - A direct call - a plain Ident resolving (via Info.Refs) to an actual
+//     declared free function (SymFunc with a real FuncDecl, i.e.
+//     Decl != InvalidNode - this excludes the predeclared `print` builtin,
+//     though isPrintCall already intercepts that case earlier and never
+//     reaches this function at all), or a MemberExpr naming a method
+//     (methodSigForCallee) - gets no info.Types entry for callee itself:
+//     the callee names a fixed declaration, not a value with its own Type,
+//     same as before this round.
+//   - Anything else that type-checks as callable - a function-typed
+//     variable/parameter, or any other expression (e.g. a call whose own
+//     result is itself a function) - is an *indirect* call: callee is
+//     checked as an ordinary value expression (so it does get a real
+//     info.Types entry - codegen needs it to actually evaluate the
+//     function value before calling through it) and its Type must be
+//     TypeFunc.
+func (c *checker) funcSigForCall(callee ast.NodeIndex) (funcSignature, bool) {
 	switch c.tree.Nodes[callee].Kind {
-	case enums.NodeKinds.Ident:
-		sym, ok := c.info.Refs[callee]
-		if !ok {
-			return funcSignature{}, false // undefined name; already reported by Resolve
-		}
-		if sym.Kind != SymFunc {
-			c.errorAt(callee, "cannot call %s (%s is not a function)", c.tree.Text(callee), sym.Kind)
-			return funcSignature{}, false
-		}
-		return c.funcSigForDecl(sym.Decl), true
 	case enums.NodeKinds.MemberExpr:
 		return c.methodSigForCallee(callee)
-	default:
-		c.errorAt(callee, "expression is not callable")
+	case enums.NodeKinds.Ident:
+		if sym, ok := c.info.Refs[callee]; ok && sym.Kind == SymFunc && sym.Decl != ast.InvalidNode {
+			return c.funcSigForDecl(sym.Decl), true
+		}
+	}
+
+	t := c.checkValueExpr(callee)
+	if t.IsInvalid() {
 		return funcSignature{}, false
 	}
+	if t.Kind != TypeFunc {
+		if c.tree.Nodes[callee].Kind == enums.NodeKinds.Ident {
+			c.errorAt(callee, "cannot call %s (%s is not a function)", c.tree.Text(callee), t)
+		} else {
+			c.errorAt(callee, "cannot call this expression (not a function)")
+		}
+		return funcSignature{}, false
+	}
+	return funcSignature{Params: t.Params, Return: *t.Return}, true
 }
 
 func (c *checker) methodSigForCallee(callee ast.NodeIndex) (funcSignature, bool) {
