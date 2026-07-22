@@ -1043,10 +1043,33 @@ func (c *checker) inferExpr(n ast.NodeIndex) Type {
 		return c.checkMemberExpr(n)
 	case enums.NodeKinds.CompositeLit:
 		return c.checkCompositeLit(n)
+	case enums.NodeKinds.ArrayType:
+		// Reachable two ways (see resolve.go's resolveExpr, which documents
+		// the same two paths for its own ArrayType case): a bare array type
+		// used where an expression was expected (the parser's own
+		// parse-error recovery path, parser/expr.go's parseArrayTypeLit -
+		// already flagged by the parser itself), or - a second, genuinely
+		// diagnostic-free path - a user function named `make` (shadowing the
+		// predeclared builtin, legal per scope.go's universeScope) called
+		// with make's own bespoke argument grammar: isMakeCallee (parser/
+		// expr.go) dispatches purely on the callee's lexical spelling, with
+		// no awareness that `make` might resolve to an ordinary function, so
+		// it unconditionally forces the first "argument" through
+		// parseTypeExpr into an ArrayType node. isBuiltinCall correctly sees
+		// through the shadowing and falls through to the ordinary-call path
+		// below, but that path expects every argument to be an ordinary
+		// value expression - without this case, this ArrayType node would
+		// silently type as invalidType with zero diagnostic (checkAssignable
+		// treats an already-invalid operand as "already reported elsewhere"),
+		// letting a syntactically-valid-looking call reach codegen's genExpr,
+		// which has no ArrayType case and panics. Reported here instead, so
+		// either path ends in a real diagnostic rather than an internal
+		// panic - matching this codebase's "lower already-correct code, not
+		// re-derive semantics" contract for codegen (see CODEGEN.md).
+		c.errorAt(n, "array type used as a value")
+		return invalidType
 	default:
-		// ArrayType (reachable only via the same parse-error recovery path
-		// resolve.go's resolveExpr documents) and Bad both have no
-		// sensible value type; already diagnosed upstream.
+		// Bad has no sensible value type; already diagnosed upstream.
 		return invalidType
 	}
 }

@@ -1,6 +1,7 @@
 package sema
 
 import (
+	"strings"
 	"testing"
 
 	"llvm_lang/src/ast"
@@ -486,6 +487,42 @@ func TestMakeSizeNeedNotBeConstant(t *testing.T) {
 	// Unlike [N]T's N, make's n/cap are ordinary runtime expressions - see
 	// LANGUAGE.md's "Dynamic arrays" section.
 	checkSrc(t, "func f(n int) {\n\tvar a []int = make([]int, n)\n}\n")
+}
+
+// TestMakeShadowedAsOrdinaryFunctionReportsDiagnostic covers a real, once-
+// panicking bug: shadowing the predeclared `make` with an ordinary
+// same-named function (legal - see scope.go's universeScope) and then
+// calling it with make's own bespoke argument grammar still in play (the
+// parser's isMakeCallee dispatches purely on the callee's lexical spelling -
+// see parser/expr.go - so it forces the first "argument" through
+// parseTypeExpr into an ArrayType node regardless of what `make` actually
+// resolves to). isBuiltinCall correctly sees through the shadowing here and
+// falls through to the ordinary-call path, which must now report a real
+// diagnostic for that stray value-position ArrayType instead of silently
+// type-checking (via checkAssignable's "already invalid, don't re-report"
+// rule) into something codegen has no case for and panics on. See
+// compiler's TestCompilePackage_ShadowedMakeCheckError for the same
+// scenario asserted end-to-end (the pipeline must stop here, before
+// codegen ever runs).
+func TestMakeShadowedAsOrdinaryFunctionReportsDiagnostic(t *testing.T) {
+	src := "" +
+		"func make(a int, b int) int {\n" +
+		"\treturn a + b\n" +
+		"}\n" +
+		"\n" +
+		"func main() int {\n" +
+		"\treturn make([]int, 2)\n" +
+		"}\n"
+	diags := expectCheckErrors(t, src, 1)
+	found := false
+	for _, d := range diags.All() {
+		if strings.Contains(d.Msg, "array type used as a value") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a diagnostic mentioning \"array type used as a value\", got: %v", diags.All())
+	}
 }
 
 func TestAppendOk(t *testing.T) {

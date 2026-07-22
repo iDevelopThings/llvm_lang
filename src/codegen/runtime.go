@@ -351,16 +351,20 @@ func (g *Generator) isBuiltinCall(calleeNode ast.NodeIndex, name string) bool {
 }
 
 // genArenaAllocElems asks the arena for a buffer sized to fit count elements
-// of elemLLType, returning both the allocated pointer and the element size
-// (an i64 constant, via llvm.SizeOf - the classic null-pointer-GEP trick,
-// resolved to a real constant by LLVM without this package needing its own
-// target-data-layout query) - shared by genMakeCall, genAppendCall's growth
-// path, and a dynamic-array composite literal (genCompositeLitInto).
-func (g *Generator) genArenaAllocElems(elemLLType llvm.Type, count llvm.Value) (buf, elemSize llvm.Value) {
+// of elemLLType, returning the allocated pointer, the element size (an i64
+// constant, via llvm.SizeOf - the classic null-pointer-GEP trick, resolved to
+// a real constant by LLVM without this package needing its own target-data-
+// layout query), and the total byte count already computed to size the
+// allocation (count zero-extended to i64, times elemSize) - shared by
+// genMakeCall, genAppendCall's growth path, and a dynamic-array composite
+// literal (genCompositeLitInto). Returning totalBytes lets genMakeCall reuse
+// it directly for its own memset call instead of recomputing the identical
+// zext+mul pair a second time.
+func (g *Generator) genArenaAllocElems(elemLLType llvm.Type, count llvm.Value) (buf, elemSize, totalBytes llvm.Value) {
 	elemSize = llvm.SizeOf(elemLLType)
 	countSize := g.builder.CreateZExt(count, g.i64Ty, "")
-	totalBytes := g.builder.CreateMul(countSize, elemSize, "")
-	return g.genArenaAlloc(totalBytes), elemSize
+	totalBytes = g.builder.CreateMul(countSize, elemSize, "")
+	return g.genArenaAlloc(totalBytes), elemSize, totalBytes
 }
 
 // genMakeCall lowers `make([]T, n)` / `make([]T, n, cap)` (see
@@ -370,12 +374,15 @@ func (g *Generator) genArenaAllocElems(elemLLType llvm.Type, count llvm.Value) (
 // AGENTS.md's "one centralized allocation point" rule - zero-fill the whole
 // allocated buffer (memset), and return the resulting {ptr, n, cap} value.
 // n/cap are ordinary runtime values (see sema's checkMakeCall) - ok, since a
-// dynamic array's whole point is a runtime-determined size - so cap<n (when
-// cap is given) is checked here, at runtime, the same trap-based mechanism
-// genBoundsCheck already uses for an out-of-range index (there is no
-// exception handling in this language - see AGENTS.md's "Array bounds
-// checking" section - so this is a hard process abort, exactly like that
-// one).
+// dynamic array's whole point is a runtime-determined size - so n<0, cap<0,
+// and cap<n (when cap is given) are all checked here, at runtime, the same
+// trap-based mechanism genBoundsCheck already uses for an out-of-range index
+// (there is no exception handling in this language - see AGENTS.md's "Array
+// bounds checking" section - so this is a hard process abort, exactly like
+// that one). The negative-size checks matter even when cap defaults to n
+// (the 2-argument form): n/cap are zero-extended (not sign-extended) to i64
+// for the byte-count computation below, so a negative i32 n would otherwise
+// become an enormous unsigned byte count instead of a clean trap.
 func (g *Generator) genMakeCall(callNode ast.NodeIndex, args []ast.NodeIndex) llvm.Value {
 	target := g.info.Types[callNode]
 	elemLLType := g.llvmType(*target.Elem)
@@ -384,11 +391,10 @@ func (g *Generator) genMakeCall(callNode ast.NodeIndex, args []ast.NodeIndex) ll
 	capVal := nVal
 	if len(args) == 3 {
 		capVal = g.genExpr(args[2])
-		g.genMakeCapCheck(nVal, capVal)
 	}
+	g.genMakeSizeCheck(nVal, capVal)
 
-	buf, elemSize := g.genArenaAllocElems(elemLLType, capVal)
-	capBytes := g.builder.CreateMul(g.builder.CreateZExt(capVal, g.i64Ty, ""), elemSize, "")
+	buf, _, capBytes := g.genArenaAllocElems(elemLLType, capVal)
 	g.builder.CreateCall(g.memsetType, g.memsetFn, []llvm.Value{buf, llvm.ConstInt(g.i32Ty, 0, false), capBytes}, "")
 
 	result := llvm.Undef(g.dynArrTy)
@@ -398,15 +404,24 @@ func (g *Generator) genMakeCall(callNode ast.NodeIndex, args []ast.NodeIndex) ll
 	return result
 }
 
-// genMakeCapCheck traps (llvm.trap + unreachable, same as genBoundsCheck)
-// if capVal < nVal - make's own runtime "cap can't be smaller than the
-// requested length" rule (see genMakeCall's doc comment for why this is a
-// runtime check rather than a sema diagnostic).
-func (g *Generator) genMakeCapCheck(nVal, capVal llvm.Value) {
-	ok := g.builder.CreateICmp(llvm.IntSGE, capVal, nVal, "")
+// genMakeSizeCheck traps (llvm.trap + unreachable, same as genBoundsCheck) on
+// any of make's own runtime size invariants failing: nVal < 0, capVal < 0, or
+// capVal < nVal ("cap can't be smaller than the requested length" - see
+// genMakeCall's doc comment for why these are all runtime checks rather than
+// sema diagnostics). All three conditions are folded into one trap block
+// rather than three separate ones - they're all the same class of "make was
+// asked for a nonsensical size" failure, so there's no value in distinguishing
+// which one fired once the process is about to abort anyway.
+func (g *Generator) genMakeSizeCheck(nVal, capVal llvm.Value) {
+	zero := llvm.ConstInt(g.i32Ty, 0, true)
+	nNonNegative := g.builder.CreateICmp(llvm.IntSGE, nVal, zero, "")
+	capNonNegative := g.builder.CreateICmp(llvm.IntSGE, capVal, zero, "")
+	capAtLeastN := g.builder.CreateICmp(llvm.IntSGE, capVal, nVal, "")
+	ok := g.builder.CreateAnd(nNonNegative, capNonNegative, "")
+	ok = g.builder.CreateAnd(ok, capAtLeastN, "")
 
-	trapBB := g.ctx.AddBasicBlock(g.curFn, "make.cap.trap")
-	okBB := g.ctx.AddBasicBlock(g.curFn, "make.cap.ok")
+	trapBB := g.ctx.AddBasicBlock(g.curFn, "make.size.trap")
+	okBB := g.ctx.AddBasicBlock(g.curFn, "make.size.ok")
 	g.builder.CreateCondBr(ok, okBB, trapBB)
 
 	g.builder.SetInsertPointAtEnd(trapBB)
@@ -454,7 +469,7 @@ func (g *Generator) genAppendCall(args []ast.NodeIndex) llvm.Value {
 	two := llvm.ConstInt(g.i32Ty, 2, false)
 	doubled := g.builder.CreateMul(capacity, two, "")
 	newCap := g.builder.CreateSelect(g.builder.CreateICmp(llvm.IntSLT, doubled, one, ""), one, doubled, "")
-	newBuf, elemSize := g.genArenaAllocElems(elemLLType, newCap)
+	newBuf, elemSize, _ := g.genArenaAllocElems(elemLLType, newCap)
 	oldBytes := g.builder.CreateMul(g.builder.CreateZExt(length, g.i64Ty, ""), elemSize, "")
 	g.builder.CreateCall(g.memcpyType, g.memcpyFn, []llvm.Value{newBuf, ptr, oldBytes}, "")
 	growEndBB := g.builder.GetInsertBlock()

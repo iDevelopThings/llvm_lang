@@ -64,6 +64,38 @@ func main() {
 	}
 }
 
+// TestGlobalDynamicArrayLiteralInitializerIsCodegenError covers
+// constfold.go's constCompositeLit rejecting a dynamic-array composite
+// literal (`[]T{...}`) as a global initializer: unlike a fixed-size array
+// literal (a plain LLVM ConstArray, no allocation needed), a slice literal
+// always needs a real runtime heap allocation (the arena - see
+// LANGUAGE.md's "Dynamic arrays" section), which a global initializer can
+// never provide (see this test's TestGlobalNonConstantInitializerIsCodegenError
+// sibling above for the general rule this is a specific instance of). sema
+// itself type-checks a dynamic-array-typed global fine (see
+// sema.TestDynamicArrayTypeChecksFine); this is purely a codegen-level
+// restriction.
+func TestGlobalDynamicArrayLiteralInitializerIsCodegenError(t *testing.T) {
+	gdiags := compileSrcExpectCodegenError(t, `
+var s []int = []int{1, 2, 3}
+
+func main() {
+}
+`)
+	if gdiags.ErrorCount() != 1 {
+		t.Fatalf("ErrorCount = %d, want 1: %v", gdiags.ErrorCount(), gdiags.All())
+	}
+	found := false
+	for _, d := range gdiags.All() {
+		if d.Msg == "global initializer must be a compile-time constant expression" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a diagnostic \"global initializer must be a compile-time constant expression\", got: %v", gdiags.All())
+	}
+}
+
 // TestMainWithoutReturnGetsExitCodeZero covers the fallback-terminator
 // policy for main specifically: a void main still needs a real `ret i32 0`
 // at the LLVM level (see func.go's emitFallbackTerminator), never

@@ -256,7 +256,7 @@ func trap(i int) int {
 }
 
 // TestMakeCapLessThanLenTraps covers make's own runtime cap>=n check
-// (genMakeCapCheck, runtime.go) - see LANGUAGE.md's "Dynamic arrays" section:
+// (genMakeSizeCheck, runtime.go) - see LANGUAGE.md's "Dynamic arrays" section:
 // n/cap are ordinary runtime expressions, so a bad relationship between them
 // can't always be caught at compile time, hence the same trap-based
 // mechanism the array-bounds check already uses.
@@ -279,6 +279,50 @@ func trap() int {
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatalf("expected the child process to crash (llvm.trap) for make([]int, 5, 2), but it exited cleanly - output:\n%s", out)
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("expected an *exec.ExitError from the crashing child, got %v (%T) - output:\n%s", err, err, out)
+	}
+	if exitErr.ExitCode() == 0 {
+		t.Fatalf("expected an abnormal (crash) exit, got a clean exit code 0 - output:\n%s", out)
+	}
+}
+
+// TestMakeNegativeSizeTraps covers a real safety gap: checkMakeSizeArg
+// (sema/typecheck.go) only enforces that make's n/cap arguments have integer
+// type, never that their runtime value is non-negative - reasonable, since
+// they're ordinary runtime expressions (see genMakeCall's doc comment). A
+// negative n/cap must still be rejected somewhere, though: n/cap are
+// zero-extended (not sign-extended) to i64 for the byte-count computation
+// genArenaAllocElems/genMakeCall build, so a negative i32 like
+// `make([]int, -1)` would otherwise become an enormous unsigned byte count
+// (~4.29 billion * element size) instead of the clean, deliberate trap this
+// project uses everywhere else for an invalid runtime size (see
+// TestOutOfBoundsIndexTraps, bounds_test.go, and TestMakeCapLessThanLenTraps
+// above - the very same genMakeSizeCheck, runtime.go, now covers this case
+// too). Uses the same re-exec-as-a-child-process pattern those tests do: a
+// real out-of-range make would crash the go test process itself if triggered
+// in-process.
+func TestMakeNegativeSizeTraps(t *testing.T) {
+	const childEnv = "LLVM_LANG_MAKE_NEGATIVE_SIZE_TRAP_CHILD"
+
+	if os.Getenv(childEnv) == "1" {
+		jm := compileAndJIT(t, `
+func trap() int {
+	s := make([]int, -1)
+	return len(s)
+}
+`)
+		jm.runInt32(t, "trap")
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestMakeNegativeSizeTraps$")
+	cmd.Env = append(os.Environ(), childEnv+"=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected the child process to crash (llvm.trap) for make([]int, -1), but it exited cleanly - output:\n%s", out)
 	}
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) {

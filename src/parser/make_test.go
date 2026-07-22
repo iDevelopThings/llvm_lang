@@ -1,6 +1,11 @@
 package parser
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"llvm_lang/src/lexer"
+)
 
 // TestMakeCallArgumentGrammar covers make's own bespoke first-argument
 // grammar (see expr.go's parseMakeArgs and LANGUAGE.md's "Dynamic arrays"
@@ -101,6 +106,50 @@ func TestMakeShadowedAsOrdinaryCallStillParses(t *testing.T) {
 		"  Ident \"b\"\n"
 	if got := tree.Dump(n); got != want {
 		t.Errorf("Dump(%q):\n got:\n%s\nwant:\n%s", "notMake(a, b)", got, want)
+	}
+}
+
+// TestMakeShadowedByRealMakeFunctionStillForcesTypeGrammar covers the actual
+// shadowing case TestMakeShadowedAsOrdinaryCallStillParses above doesn't
+// exercise at all: that test's callee is spelled "notMake", so it can never
+// reach isMakeCallee's special-cased branch in the first place. This test
+// declares a genuinely-named `make` function (legal shadowing of the
+// predeclared builtin - see sema/scope.go's universeScope) in the very same
+// program and calls it as `make([]int, 2)`: isMakeCallee (see its own doc
+// comment) is purely syntactic, checking only the callee's lexical text, so
+// it still dispatches to parseMakeArgs here too, forcing the first argument
+// through parseTypeExpr into an ArrayType node exactly as it would for the
+// real predeclared builtin - regardless of what `make` actually resolves to
+// once scoping is considered. That parser-level mismatch (a value-position
+// argument slot holding a type-shaped node, for a callee that turns out not
+// to be the builtin after all) is exactly what sema.Check must turn into a
+// real diagnostic rather than letting it reach codegen as a panic - see
+// sema's TestMakeShadowedAsOrdinaryFunctionReportsDiagnostic and compiler's
+// TestCompilePackage_ShadowedMakeCheckError for that follow-through.
+func TestMakeShadowedByRealMakeFunctionStillForcesTypeGrammar(t *testing.T) {
+	src := `
+func make(a int, b int) int {
+	return a + b
+}
+
+func main() int {
+	return make([]int, 2)
+}
+`
+	tree, diags := ParseFile(lexer.NewFile("t.ll", src))
+	if diags.HasErrors() {
+		t.Fatalf("unexpected parse errors: %v", diags.All())
+	}
+	want := "" +
+		"CallExpr\n" +
+		"          Ident \"make\"\n" +
+		"          ArrayType\n" +
+		"            <missing>\n" +
+		"            Ident \"int\"\n" +
+		"          NumberLit \"2\"\n"
+	got := tree.Dump(tree.Root)
+	if !strings.Contains(got, want) {
+		t.Errorf("Dump(root) does not contain the expected shadowed-make CallExpr shape.\ngot:\n%s\nwant substring:\n%s", got, want)
 	}
 }
 

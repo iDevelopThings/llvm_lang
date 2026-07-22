@@ -800,7 +800,7 @@ func (g *Generator) genDynArrayLitInto(dst llvm.Value, t sema.Type, elems []ast.
 	elemLLType := g.llvmType(*t.Elem)
 	count := llvm.ConstInt(g.i32Ty, uint64(len(elems)), false)
 
-	buf, _ := g.genArenaAllocElems(elemLLType, count)
+	buf, _, _ := g.genArenaAllocElems(elemLLType, count)
 	for i, e := range elems {
 		idx := llvm.ConstInt(g.i32Ty, uint64(i), false)
 		addr := g.builder.CreateInBoundsGEP(elemLLType, buf, []llvm.Value{idx}, "")

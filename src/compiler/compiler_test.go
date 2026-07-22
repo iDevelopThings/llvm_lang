@@ -197,6 +197,40 @@ func main() {
 	}
 }
 
+// TestCompilePackage_ShadowedMakeCheckError covers a real, once-panicking
+// bug end-to-end: shadowing the predeclared `make` with an ordinary
+// same-named function (legal shadowing, see sema/scope.go's universeScope)
+// and calling it with make's own bespoke argument grammar still in play
+// (the parser's isMakeCallee dispatches purely on the callee's lexical
+// spelling, forcing the first "argument" into a type-position ArrayType
+// node regardless of what `make` actually resolves to - see
+// parser/expr.go). Before the fix, this "type-checked" with zero
+// diagnostics and reached codegen.GeneratePackage's genExpr, which has no
+// case for a bare ArrayType and panics. sema.CheckProgram must now report a
+// real diagnostic and stop the pipeline right there, exactly like
+// TestCompilePackage_CheckError above - codegen must never run at all.
+func TestCompilePackage_ShadowedMakeCheckError(t *testing.T) {
+	res := CompilePackage([]loader.SourceFile{
+		{Name: "t.llx", Src: `
+func make(a int, b int) int {
+	return a + b
+}
+
+func main() int {
+	return make([]int, 2)
+}
+`},
+	})
+
+	if res.Module != nil {
+		res.Module.Dispose()
+		t.Fatal("Module = non-nil, want nil on a shadowed-make type-check error")
+	}
+	if !anyDiagContains(res, "array type used as a value") {
+		t.Errorf("expected a diagnostic mentioning \"array type used as a value\", got: %v", dumpDiags(res))
+	}
+}
+
 func anyDiagHasErrors(res *Result) bool {
 	for _, b := range res.Diags {
 		if b.HasErrors() {
