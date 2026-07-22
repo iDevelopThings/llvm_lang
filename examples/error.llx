@@ -1,0 +1,11 @@
+// error.llx - deliberately invalid: assigns a string literal to an int
+// variable, a real sema.Check type error. Used to demonstrate llvmc's
+// failure path (a printed diagnostic, non-zero exit, no crash).
+//
+// Run with:
+//   .\llvmc.exe examples\error.llx
+
+func main() {
+    var a int = "oops"
+    print(a)
+}

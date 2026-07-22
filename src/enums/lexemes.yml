@@ -1,0 +1,89 @@
+package: enums
+type: Lexeme
+underlying: int
+marshalText: false
+out: .
+
+fields:
+
+
+values:
+  - name: Number
+  - name: Identifier
+  - name: String
+  - name: Plus
+    char: "+"
+  - name: Minus
+    char: "-"
+  - name: Slash
+    char: "/"
+  - name: Asterisk
+    char: "*"
+  - name: Percent
+    char: "%"
+  - name: Caret
+    char: "^"
+  - name: LeftParen
+    char: "("
+  - name: RightParen
+    char: ")"
+  - name: Comma
+    char: ","
+  - name: Dot
+    char: "."
+  - name: Colon
+    char: ":"
+  - name: Semicolon
+    char: ";"
+  - name: Equal
+    char: "="
+  - name: LessThan
+    char: "<"
+  - name: GreaterThan
+    char: ">"
+  - name: LessThanEqual
+    char: "<="
+  - name: GreaterThanEqual
+    char: ">="
+  - name: NotEqual
+    char: "!="
+  - name: And
+    char: "&&"
+  - name: Or
+    char: "||"
+  - name: Not
+    char: "!"
+  - name: Question
+    char: "?"
+  - name: LeftBracket
+    char: "["
+  - name: RightBracket
+    char: "]"
+  - name: LeftBrace
+    char: "{"
+  - name: RightBrace
+    char: "}"
+  - name: ColonEqual
+    char: ":="
+  - name: EqualEqual
+    char: "=="
+  - name: PlusPlus
+    char: "++"
+  - name: MinusMinus
+    char: "--"
+  - name: PlusEqual
+    char: "+="
+  - name: MinusEqual
+    char: "-="
+  - name: AsteriskEqual
+    char: "*="
+  - name: SlashEqual
+    char: "/="
+  - name: Ampersand
+    char: "&"
+  - name: Pipe
+    char: "|"
+  - name: EOF
+  - name: Illegal
+
+

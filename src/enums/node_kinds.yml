@@ -1,0 +1,42 @@
+package: enums
+type: NodeKind
+underlying: int
+marshalText: false
+out: .
+
+fields:
+
+
+values:
+  - name: File
+  - name: Bad
+  - name: VarDecl
+  - name: ShortVarDecl
+  - name: FuncDecl
+  - name: ParamList
+  - name: Param
+  - name: StructDecl
+  - name: Field
+  - name: Block
+  - name: ExprStmt
+  - name: ReturnStmt
+  - name: BreakStmt
+  - name: ContinueStmt
+  - name: IfStmt
+  - name: ForStmt
+  - name: AssignStmt
+  - name: IncDecStmt
+  - name: Ident
+  - name: NumberLit
+  - name: StringLit
+  - name: BoolLit
+  - name: BinaryExpr
+  - name: UnaryExpr
+  - name: CallExpr
+  - name: ParenExpr
+  - name: IndexExpr
+  - name: MemberExpr
+  - name: ArrayType
+  - name: CompositeLit
+  - name: KeyValueExpr
+  - name: ThisExpr

@@ -1,0 +1,164 @@
+package codegen
+
+import (
+	"llvm_lang/src/ast"
+	"llvm_lang/src/sema"
+
+	"tinygo.org/x/go-llvm"
+)
+
+// declareFuncSignature declares decl's (a FuncDecl's - free function or
+// method alike, see ast.Node's doc comment: a method is just a FuncDecl with
+// a non-empty receiver child) LLVM function signature, with no body yet -
+// split from genFuncBody into its own pass (see genFile) so a call to a
+// function declared later in the source, or a recursive/mutually-recursive
+// call, always finds its callee already in g.funcs.
+//
+// A method's implicit receiver (see AGENTS.md: "every method is implicitly
+// by-reference") becomes a real, explicit first parameter of pointer-to-
+// struct type; there's no separate by-value/by-reference receiver kind to
+// distinguish. `main` is special-cased to the real i32-returning LLVM entry
+// point signature (see genFuncBody's fallback-terminator logic for the other
+// half of that decision).
+func (g *Generator) declareFuncSignature(decl ast.NodeIndex) {
+	receiver := g.tree.Child(decl, 0)
+	nameNode := g.tree.Child(decl, 1)
+	paramListNode := g.tree.Child(decl, 2)
+	returnTypeNode := g.tree.Child(decl, 3)
+
+	var paramTypes []llvm.Type
+	if receiver != ast.InvalidNode {
+		structInfo := g.info.Structs[g.tree.Text(receiver)]
+		paramTypes = append(paramTypes, llvm.PointerType(g.structLayouts[structInfo].llvmType, 0))
+	}
+	for _, paramNode := range g.tree.Children(paramListNode) {
+		paramTypes = append(paramTypes, g.llvmType(g.info.Types[g.tree.Child(paramNode, 1)]))
+	}
+
+	retType := sema.Type{Kind: sema.TypeVoid}
+	if returnTypeNode != ast.InvalidNode {
+		retType = g.info.Types[returnTypeNode]
+	}
+
+	isMain := receiver == ast.InvalidNode && g.tree.Text(nameNode) == "main"
+	llvmRet := g.llvmType(retType)
+	name := g.tree.Text(nameNode)
+	switch {
+	case isMain:
+		if retType.Kind != sema.TypeVoid && retType.Kind != sema.TypeInt {
+			g.errorAt(decl, "main must return either nothing or int, got %s - treating as int", retType)
+		}
+		llvmRet = g.i32Ty
+		name = "main"
+	case receiver != ast.InvalidNode:
+		name = g.tree.Text(receiver) + "." + name
+	}
+
+	fnType := llvm.FunctionType(llvmRet, paramTypes, false)
+	g.funcs[decl] = funcEntry{
+		fn:       llvm.AddFunction(g.mod, name, fnType),
+		fnType:   fnType,
+		retType:  retType,
+		isMethod: receiver != ast.InvalidNode,
+	}
+}
+
+// genFuncBody lowers decl's body, given its signature already declared (see
+// declareFuncSignature). Every VarDecl/ShortVarDecl/Param in the body gets a
+// stack slot via createEntryAlloca; a method's receiver needs none of its
+// own - the incoming pointer parameter already *is* its address (see
+// genAddr's ThisExpr case).
+func (g *Generator) genFuncBody(decl ast.NodeIndex) {
+	receiver := g.tree.Child(decl, 0)
+	paramListNode := g.tree.Child(decl, 2)
+	returnTypeNode := g.tree.Child(decl, 3)
+	body := g.tree.Child(decl, 4)
+
+	entry := g.funcs[decl]
+	g.curFn = entry.fn
+	g.entryBlock = g.ctx.AddBasicBlock(g.curFn, "entry")
+	g.builder.SetInsertPointAtEnd(g.entryBlock)
+	g.locals = make(map[*sema.Symbol]llvm.Value)
+	g.loopStack = nil
+
+	offset := 0
+	g.curReceiver = llvm.Value{}
+	if receiver != ast.InvalidNode {
+		g.curReceiver = g.curFn.Param(0)
+		offset = 1
+	}
+	for i, paramNode := range g.tree.Children(paramListNode) {
+		psym := g.info.Refs[g.tree.Child(paramNode, 0)]
+		pllt := g.llvmType(g.info.Types[g.tree.Child(paramNode, 1)])
+		addr := g.createEntryAlloca(pllt, psym.Name)
+		g.builder.CreateStore(g.curFn.Param(offset+i), addr)
+		g.locals[psym] = addr
+	}
+
+	g.curFunc = &funcCtx{
+		isMain:    receiver == ast.InvalidNode && g.tree.Text(g.tree.Child(decl, 1)) == "main",
+		hasReturn: returnTypeNode != ast.InvalidNode,
+	}
+
+	if !g.genBlock(body) {
+		g.emitFallbackTerminator()
+	}
+	g.curFunc = nil
+}
+
+// emitFallbackTerminator runs whenever a function's lowered body falls off
+// the end without every path already ending in a terminator instruction -
+// LLVM requires every basic block to end in exactly one.
+//
+// `sema.Check` now runs a full "does every path return" flow analysis of its
+// own (isTerminatingStmt in sema/typecheck.go, mirroring Go's own spec's
+// "terminating statements" - see AGENTS.md's "Missing return" section) and
+// rejects any function declaring a return type whose body isn't guaranteed
+// to return on every path. So, on a tree that already passed sema.Check, a
+// non-void, non-main function should never actually reach this fallback at
+// all - but this is left in place anyway, deliberately, as a defensive
+// backstop: it costs nothing at runtime (it only ever fires once per
+// function, at codegen time), and it guards against any gap in the flow
+// analysis itself (this package's own doc comment already assumes its input
+// passed sema.Check; if that assumption were ever wrong, `unreachable` is a
+// far better failure mode than an invalid, terminator-less basic block that
+// would otherwise fail LLVM's verifier with a much less specific error).
+//   - `main`, and any function declaring no return type, get a real,
+//     correct terminator (`ret i32 0` / `ret void`) - falling off the end of
+//     a void function is legitimate Go-like behavior, not a bug (sema places
+//     no termination requirement on it either), and main must always return
+//     a real exit code to its OS caller, never UB.
+//   - any other non-void function gets `unreachable` - reaching this given
+//     the above should be impossible on a validated tree; `unreachable`
+//     documents that assumption directly in the IR rather than inventing a
+//     fake return value that could silently mask a real bug.
+func (g *Generator) emitFallbackTerminator() {
+	switch {
+	case g.curFunc.isMain:
+		g.builder.CreateRet(llvm.ConstInt(g.i32Ty, 0, false))
+	case !g.curFunc.hasReturn:
+		g.builder.CreateRetVoid()
+	default:
+		g.builder.CreateUnreachable()
+	}
+}
+
+// createEntryAlloca allocates a stack slot of type t in the current
+// function's entry block, regardless of where the builder is currently
+// inserting - every local var/param this package generates goes through
+// this, not a plain CreateAlloca at the point of declaration, specifically
+// so a var-decl inside a loop body allocates once (in the entry block) and
+// is simply re-stored each iteration, rather than growing the stack by one
+// alloca per iteration (a non-entry-block alloca is a genuinely fresh stack
+// slot on every dynamic execution, not just a lexical one).
+func (g *Generator) createEntryAlloca(t llvm.Type, name string) llvm.Value {
+	savedBB := g.builder.GetInsertBlock()
+	if first := g.entryBlock.FirstInstruction(); first.IsNil() {
+		g.builder.SetInsertPointAtEnd(g.entryBlock)
+	} else {
+		g.builder.SetInsertPointBefore(first)
+	}
+	addr := g.builder.CreateAlloca(t, name)
+	g.builder.SetInsertPointAtEnd(savedBB)
+	return addr
+}

@@ -1,0 +1,34 @@
+package: enums
+type: Keyword
+underlying: string
+marshalText: false
+out: .
+
+fields:
+
+
+values:
+  - name: Var
+    string: "var"
+  - name: If
+    string: "if"
+  - name: Else
+    string: "else"
+  - name: For
+    string: "for"
+  - name: Break
+    string: "break"
+  - name: Continue
+    string: "continue"
+  - name: Return
+    string: "return"
+  - name: Func
+    string: "func"
+  - name: True
+    string: "true"
+  - name: False
+    string: "false"
+  - name: Struct
+    string: "struct"
+  - name: This
+    string: "this"

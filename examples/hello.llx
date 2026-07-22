@@ -1,0 +1,8 @@
+// hello.llx - the smallest possible llvm_lang program: one print call.
+//
+// Run with:
+//   .\llvmc.exe examples\hello.llx
+
+func main() {
+    print("Hello, World!")
+}
