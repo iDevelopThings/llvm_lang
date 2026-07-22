@@ -419,3 +419,51 @@ See `CODEGEN.md`'s "First-class functions" section for how a function value
 actually lowers to LLVM IR (the fat-pointer representation, and the direct-
 vs-indirect call distinction) - that's an implementation concern, not a
 language-spec one, so it lives there instead of here.
+
+## Multi-file packages
+
+A package is a directory of `.llx` files, Go-style: every `.llx` file
+directly inside one directory merges into a single shared scope, exactly as
+if their contents had all been concatenated into one file - a function,
+`var`, or `struct` declared in one file is visible and callable from every
+other file in the same directory, regardless of which file declares it
+first. Declaration order across files never matters, matching the existing
+same-file guarantee: a file processed later in a package can still be called
+from a file processed earlier, the same way two declarations later in a
+single file can already reference each other regardless of order.
+
+```
+myprogram/
+    main.llx     // func main() { print(double(21)) }
+    helper.llx   // func double(x int) int { return x * 2 }
+```
+
+Both of the following compile the identical package - a bare directory, or
+any one file inside it, both resolve to "every `.llx` file directly in that
+directory":
+
+```powershell
+llvmc myprogram
+llvmc myprogram/main.llx
+```
+
+**Non-recursive:** only the `.llx` files directly inside the given
+directory are part of the package - a subdirectory is never walked into,
+even if it also contains `.llx` files. A subdirectory full of `.llx` files
+is simply a separate, unrelated package by this round's rules (there's no
+way yet to reference it from another package at all - see below).
+
+**Single package only, no imports yet:** this round adds the directory/
+multi-file *scoping* model only - there is no `import` syntax, no
+cross-package resolution, and no cycle detection, because there is only
+ever one package in play at all: everything reachable from the directory
+you point `llvmc` at. A future round is expected to add real cross-package
+imports on top of this.
+
+**`Exported`/visibility is a hook, not a rule - yet:** Go's own name-case
+visibility convention (`Point` visible outside its package, `point` not) has
+a real field for it already reserved in the compiler (`sema.Symbol.Exported`
+- see `sema/scope.go`), but nothing enforces it this round: with only one
+package ever in play, there is no *outside* to be visible or invisible
+from, so enforcing the rule now would have nothing to check against. This
+is expected to become meaningful once cross-package imports exist.

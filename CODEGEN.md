@@ -358,16 +358,79 @@ stops that block's remaining statements from being generated at all - there
 is no `goto`/labels in this language, so nothing could ever jump back into
 that dead code anyway.
 
+## Multi-file packages: one shared Module per package
+
+See `LANGUAGE.md`'s "Multi-file packages" section for the language-level
+model (directory = package, non-recursive, shared scope). `GeneratePackage`
+(`src/codegen/codegen.go`) is the multi-file counterpart to `Generate`
+(now a thin wrapper: `Generate(tree, info, name)` is exactly
+`GeneratePackage([]*ast.Tree{tree}, map[*ast.Tree]*sema.Info{tree: info},
+name)`): it takes every file's `*ast.Tree` plus its own already-resolved/
+checked `*sema.Info` (see `sema.ResolvePackage`/`sema.CheckPackage`) and
+lowers all of them into **one shared `llvm.Module`** - not one module per
+file with cross-module linking, which this package has no need for: every
+file in a package always ends up in the exact same module regardless, so
+introducing separate per-file modules would only add real linking
+complexity (symbol visibility, declaring externs for cross-module calls)
+to solve a problem that doesn't exist here. See `DECISIONS.md` for this
+choice recorded as a dated decision.
+
+**Why no cross-file plumbing was needed inside a single function body.**
+Every codegen-internal lookup that resolves a *use* of a declared symbol -
+`Generator.funcs` (a call's callee), `Generator.globals` (a global var
+reference), `Generator.structLayouts` (a struct's field GEP indices/LLVM
+type) - is keyed by `*sema.Symbol`/`*sema.StructInfo` pointer identity, not
+by `ast.NodeIndex`. A `NodeIndex` is only meaningful relative to the one
+`*ast.Tree` it came from (see `ast.NodeIndex`'s own doc comment) - two
+unrelated declarations in two different files can share the same NodeIndex
+value - but a `*sema.Symbol`/`*sema.StructInfo` pointer is already globally
+unique the moment it's allocated (one fresh value per declaration, shared
+by every file's own `Info.Refs`/`Info.Structs` - see `sema.ResolvePackage`),
+so keying on it sidesteps the cross-tree ambiguity entirely. `funcs` used to
+be keyed by the FuncDecl's own `NodeIndex` before this round; that's the one
+lookup this round had to change (`declareFuncSignature`/`genFuncBody` now
+fetch the function's own `*sema.Symbol` via `Info.Refs` first) - every other
+map was already keyed correctly and needed no change at all.
+
+Because of that, `genPackage` (the multi-file counterpart to the old
+`genFile`) never needs to switch "which file's nodes am I currently
+reading" *in the middle of* lowering one declaration's body, unlike
+`sema.CheckPackage`'s checker (see `sema/typecheck.go`'s own doc comment on
+this exact point): every pass (`declareStructType`/`defineStructBody`,
+`genGlobalVarDecl`, `declareFuncSignature`, `genFuncBody`) only ever reads
+nodes that are children of the one declaration currently being processed -
+always in the same file - and a cross-file *reference* inside a function
+body (a call to a function declared elsewhere, a struct type named
+elsewhere) is resolved purely through the pointer-keyed maps above, which
+are already fully populated for the *whole package* by the time any
+function body is generated (every file's structs are declared before any
+file's globals; every file's globals before any file's function
+signatures; every file's function signatures before any file's function
+bodies - see `genPackage`). `Generator.tree`/`Generator.info` still switch
+per file, but only at the top of each pass's per-file loop, never mid-body.
+
 # The `llvmc` CLI driver (`cmd/llvmc`)
 
 The first way to actually *run* an llvm_lang program as a human, rather than
-only proving the pipeline works via `go test`: it reads a source file, drives
-it through the full pipeline (`lexer.NewFile` -> `parser.ParseFile` ->
-`sema.Resolve` -> `sema.Check` -> `codegen.Generate`), and on full success
-JIT-executes the resulting module's `main` directly in this process - so the
-program's own `print` calls (real libc `printf` calls under the hood) write
-to this process's real stdout, which a `go test`-hosted JIT call can't
-easily show.
+only proving the pipeline works via `go test`: given a path (a single source
+file, or a directory - see `LANGUAGE.md`'s "Multi-file packages" section),
+it resolves the package's full file list (`src/loader`'s `Load`, backed by
+`afero.NewOsFs()`), drives every file through the full pipeline
+(`lexer.NewFile` -> `parser.ParseFile` per file, then
+`sema.ResolvePackage` -> `sema.CheckPackage` -> `codegen.GeneratePackage`
+across all of them together), and on full success JIT-executes the
+resulting module's `main` directly in this process - so the program's own
+`print` calls (real libc `printf` calls under the hood) write to this
+process's real stdout, which a `go test`-hosted JIT call can't easily show.
+
+A single-file program (a directory containing exactly one `.llx` file, or a
+file whose sibling directory has no other `.llx` files) goes through this
+exact same path - there's no separate single-file code path in `llvmc`
+itself, only `compileAndRun` (used by this package's own in-process tests
+that build a source string directly, with no real file/directory on disk)
+staying as a thin one-file wrapper around `compileAndRunPackage`, the same
+relationship `codegen.Generate`/`sema.Resolve`/`sema.Check` each have to
+their own multi-file counterpart.
 
 ## Building and running
 
@@ -376,7 +439,10 @@ $mingw = "C:\msys64\mingw64\bin"
 if ($env:Path -notlike "*$mingw*") { $env:Path = "$mingw;$env:Path" }
 go build -tags=llvm22 -o llvmc.exe ./cmd/llvmc
 
-.\llvmc.exe path\to\program.llx
+.\llvmc.exe path\to\program.llx     # a single file - its containing
+                                    # directory's other .llx files (if any)
+                                    # are part of the same package too
+.\llvmc.exe path\to\a\directory     # every .llx file directly in it
 ```
 
 ## The `-emit-llvm` flag
@@ -425,19 +491,27 @@ not the JIT path's more careful engine/context teardown.
 This project's source files use the extension `.llx`, not `.ll` - `.ll` is
 already LLVM's own textual IR format's extension, and reusing it here would
 be a real (and confusing) collision with that, since this compiler also
-prints/inspects real LLVM IR (`Module.LLVM.String()`) elsewhere. Nothing in
-the compiler pipeline itself actually inspects a file's extension -
+prints/inspects real LLVM IR (`Module.LLVM.String()`) elsewhere. The
+compiler pipeline proper still doesn't inspect a file's extension at all -
 `lexer.NewFile` just takes a name (used only for diagnostics) and the source
-text - so this is purely a human-facing convention, not an enforced one. See
-`examples/` at the repo root for sample `.llx` programs (`hello.llx`, a
-struct+method+loop+arithmetic program in `features.llx`, and a deliberately
-invalid program in `error.llx` demonstrating the failure path).
+text, exactly as before - `src/loader`'s directory scan is the one place
+`.llx` is now checked for real (case-insensitively), since "every `.llx`
+file directly in this directory" (see `LANGUAGE.md`'s "Multi-file packages"
+section) has to mean *something* concrete when resolving a bare directory
+path rather than one named file. See `examples/` at the repo root for sample
+`.llx` programs, each now its own subdirectory so a single-file example
+doesn't accidentally pull its siblings into the same package (`hello/`,
+a struct+method+loop+arithmetic program in `features/`, a deliberately
+invalid program in `error/` demonstrating the failure path, and
+`multifile/` - three files demonstrating cross-file calls, see that
+directory's own doc comments).
 
 ## Exit codes
 
-- **2** - a usage error: no file argument, an unrecognized flag, or the file
-  couldn't be read. A short usage message goes to stderr; nothing is
-  compiled.
+- **2** - a usage error: no path argument, an unrecognized flag, the path
+  couldn't be resolved to a real file/directory, or its resolved directory
+  has zero `.llx` files in it (see `src/loader`'s `Load`). A short message
+  goes to stderr; nothing is compiled.
 - **1** - a compile-time diagnostic from the lexer, parser, `sema.Resolve`,
   `sema.Check`, or `codegen.Generate` stage (the pipeline stops at the first
   stage reporting an error-severity diagnostic, exactly like every other

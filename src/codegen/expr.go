@@ -97,7 +97,7 @@ func (g *Generator) genLoad(n ast.NodeIndex) llvm.Value {
 // rather than null - so the representation and calling convention need no
 // redesign when that lands.
 func (g *Generator) genFuncValue(sym *sema.Symbol) llvm.Value {
-	entry := g.funcs[sym.Decl]
+	entry := g.funcs[sym]
 	ctxPtr := llvm.ConstNull(g.ptrTy)
 	// Must go through g.ctx (not the package-level llvm.ConstStruct), same
 	// reasoning as constStringValue: otherwise the result's type is a
@@ -601,7 +601,7 @@ func (g *Generator) genConversion(n, argNode ast.NodeIndex) llvm.Value {
 
 func (g *Generator) genFuncCall(calleeNode ast.NodeIndex, argNodes []ast.NodeIndex) llvm.Value {
 	sym := g.info.Refs[calleeNode]
-	entry := g.funcs[sym.Decl]
+	entry := g.funcs[sym]
 	args := make([]llvm.Value, len(argNodes))
 	for i, a := range argNodes {
 		args[i] = g.genExpr(a)
@@ -615,7 +615,7 @@ func (g *Generator) genFuncCall(calleeNode ast.NodeIndex, argNodes []ast.NodeInd
 func (g *Generator) genMethodCall(calleeNode ast.NodeIndex, argNodes []ast.NodeIndex) llvm.Value {
 	objNode := g.tree.Child(calleeNode, 0)
 	sym := g.info.Refs[calleeNode]
-	entry := g.funcs[sym.Decl]
+	entry := g.funcs[sym]
 
 	args := make([]llvm.Value, len(argNodes)+1)
 	args[0] = g.genAddr(objNode)

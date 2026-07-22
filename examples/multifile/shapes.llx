@@ -1,0 +1,18 @@
+// shapes.llx - a struct and its methods, declared before main.llx in
+// alphabetical order even though main.llx is what actually uses them -
+// demonstrating that declaration order across files in a package never
+// matters (see LANGUAGE.md's "Multi-file packages" section).
+
+struct Rect {
+	width int
+	height int
+}
+
+func (Rect) area() int {
+	return this.width * this.height
+}
+
+func (Rect) scale(factor int) {
+	this.width = this.width * factor
+	this.height = this.height * factor
+}

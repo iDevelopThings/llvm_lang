@@ -1,0 +1,12 @@
+// util.llx - a couple of free functions and a package-level var, all used
+// from main.llx in the third file of this package.
+
+var basePerimeterBonus int = 2
+
+func perimeter(r Rect) int {
+	return 2 * (r.width + r.height)
+}
+
+func addBonus(x int) int {
+	return x + basePerimeterBonus
+}

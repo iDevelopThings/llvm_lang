@@ -49,32 +49,62 @@ type enclosingFunc struct {
 	ret       Type // meaningful only when hasReturn is true
 }
 
+// nodeRef pairs a NodeIndex with the Tree it's relative to. Every per-node
+// memoization cache below used to be keyed by a bare ast.NodeIndex, which
+// was fine when there was only ever one Tree in play; now that Check can
+// follow a Symbol's Decl into a different file's Tree entirely (see
+// checker.pushTree), a bare NodeIndex is ambiguous - file A's decl #5 and
+// file B's decl #5 are unrelated nodes that would otherwise collide in the
+// same map. See LANGUAGE.md's "Multi-file packages" section.
+type nodeRef struct {
+	tree *ast.Tree
+	idx  ast.NodeIndex
+}
+
+// checker's tree/info/diags fields always describe "whichever file is
+// currently active" - almost always the file whose own top-level
+// declarations checkFile is walking, but not always: computing another
+// file's declared function's signature (funcSigForDecl) or a variable's
+// type (declType) needs to read *that* file's own nodes (paramList,
+// return-type annotation, initializer...), so a cross-file Symbol
+// dereference (a call to a function declared elsewhere, a struct used
+// outside its own file, `this` referring to a struct declared in another
+// file) temporarily switches these three fields to the Symbol's own Tree via
+// pushTree, then restores them once that one lookup is done. Every
+// memoization cache (declTypes/computingDecl/typeNodeCache/funcSigs) is
+// keyed by nodeRef{tree, node} for exactly this reason - "tree" here is
+// always whatever c.tree happens to be at the moment of the call, which
+// pushTree guarantees is the node's own owning file.
 type checker struct {
+	infos    map[*ast.Tree]*Info
+	allDiags map[*ast.Tree]*diag.Bag
+
 	tree  *ast.Tree
 	diags *diag.Bag
 	info  *Info
 
 	// declTypes memoizes the type of each var-introducing declaration
-	// (VarDecl, ShortVarDecl, Param), keyed by the declaration node itself
-	// - not by *Symbol, since every declaration node is already unique
-	// tree-wide and this way computeDeclType doesn't need a Symbol handed
-	// to it. computingDecl is a cycle guard: a top-level var can
-	// forward-reference another (see resolve.go's pass ordering), so
-	// declType is re-entrant and needs to detect `var a = b; var b = a`.
-	declTypes     map[ast.NodeIndex]Type
-	computingDecl map[ast.NodeIndex]bool
+	// (VarDecl, ShortVarDecl, Param). computingDecl is a cycle guard: a
+	// top-level var can forward-reference another (see resolve.go's pass
+	// ordering, now across files too), so declType is re-entrant and needs
+	// to detect `var a = b; var b = a` even when a and b live in different
+	// files.
+	declTypes     map[nodeRef]Type
+	computingDecl map[nodeRef]bool
 
 	// typeNodeCache memoizes typeFromNode by the type-position node
 	// itself. Without it, the same struct field's type node - reachable
 	// from both checkStructDecl's upfront pass and every composite literal
-	// that names that field - would re-run (and, for a dynamic-array
-	// field, re-report) the same conversion once per reference.
-	typeNodeCache map[ast.NodeIndex]Type
+	// that names that field, possibly from another file - would re-run
+	// (and, for a dynamic-array field, re-report) the same conversion once
+	// per reference.
+	typeNodeCache map[nodeRef]Type
 
 	// funcSigs memoizes each FuncDecl's signature, keyed by the FuncDecl
 	// node. Computing it also type-checks its params/return type exactly
-	// once, however many call sites (or zero) end up asking for it.
-	funcSigs map[ast.NodeIndex]funcSignature
+	// once, however many call sites (or zero, or from another file) end up
+	// asking for it.
+	funcSigs map[nodeRef]funcSignature
 
 	curFunc *enclosingFunc
 
@@ -88,6 +118,38 @@ type checker struct {
 	loopDepth int
 }
 
+// enter switches the checker's current-file bookkeeping to tree
+// unconditionally - used by checkPackage's own per-file pass loops, as
+// opposed to pushTree's save-and-restore swap for a one-off cross-file
+// Symbol dereference in the middle of checking some other file's body.
+func (c *checker) enter(tree *ast.Tree) {
+	c.tree = tree
+	c.info = c.infos[tree]
+	c.diags = c.allDiags[tree]
+}
+
+// pushTree switches the checker's current-file bookkeeping to owner - the
+// Tree that actually declares whatever Symbol is about to be dereferenced
+// via its Decl node (see Symbol.Tree's doc comment) - for the duration of
+// that one lookup, returning a restore func (call it once done, typically
+// via defer) that puts the caller's own tree/info/diags back. A same-file
+// dereference (owner == c.tree) or a predeclared symbol with no owning file
+// at all (owner == nil) is a no-op.
+func (c *checker) pushTree(owner *ast.Tree) (restore func()) {
+	if owner == nil || owner == c.tree {
+		return func() {}
+	}
+	prevTree, prevInfo, prevDiags := c.tree, c.info, c.diags
+	c.tree = owner
+	c.info = c.infos[owner]
+	c.diags = c.allDiags[owner]
+	return func() {
+		c.tree = prevTree
+		c.info = prevInfo
+		c.diags = prevDiags
+	}
+}
+
 // Check type-checks tree, using the name/scope resolution info already
 // computed by Resolve (Info.Refs, Info.Scopes, Info.Structs). It fills in
 // info.Types with every expression's inferred Type, and resolves what
@@ -96,50 +158,80 @@ type checker struct {
 // actually be inferred (see resolve.go's doc comments for exactly what was
 // left unresolved and why).
 //
-// Diagnostics land in a fresh Bag, separate from Resolve's - same
-// convention as lexer errors staying distinct from parser ones - so a
-// caller can tell which pass reported what. Check never panics on a type
-// error: every violation is recorded and checking continues, so one mistake
-// doesn't hide the rest (see AGENTS.md; unlike the parser's token-stream
-// bailout, walking an already-finite tree has no unbounded-input risk to
-// guard against, so there's no error-count cap here).
+// Check is the single-file case of CheckPackage - see its doc comment for
+// the multi-file package entry point this wraps.
 func Check(tree *ast.Tree, info *Info) *diag.Bag {
+	return CheckPackage([]*ast.Tree{tree}, map[*ast.Tree]*Info{tree: info})[tree]
+}
+
+// CheckPackage type-checks every file in trees as one package: a call/
+// reference in one file to a func/var/struct declared in another resolves
+// and type-checks exactly like a same-file one would (see
+// LANGUAGE.md's "Multi-file packages" section) - funcSigForDecl/declType/
+// typeFromNode transparently follow a Symbol into its own declaring file via
+// pushTree whenever that differs from whichever file is currently being
+// checked.
+//
+// infos must already hold one *Info per tree (the output of ResolvePackage,
+// or - for the single-file case - Resolve) - Check fills in each one's Types
+// map in place. Diagnostics land in one fresh Bag per file, same convention
+// as ResolvePackage's own per-file Bags (a diagnostic's Pos is only
+// meaningful relative to the one file it's reported against) - Check never
+// panics on a type error: every violation is recorded and checking
+// continues, so one mistake doesn't hide the rest (see AGENTS.md; unlike the
+// parser's token-stream bailout, walking an already-finite tree has no
+// unbounded-input risk to guard against, so there's no error-count cap
+// here).
+func CheckPackage(trees []*ast.Tree, infos map[*ast.Tree]*Info) map[*ast.Tree]*diag.Bag {
 	c := &checker{
-		tree:          tree,
-		diags:         diag.NewBag(),
-		info:          info,
-		declTypes:     make(map[ast.NodeIndex]Type),
-		computingDecl: make(map[ast.NodeIndex]bool),
-		typeNodeCache: make(map[ast.NodeIndex]Type),
-		funcSigs:      make(map[ast.NodeIndex]funcSignature),
+		infos:         infos,
+		allDiags:      make(map[*ast.Tree]*diag.Bag, len(trees)),
+		declTypes:     make(map[nodeRef]Type),
+		computingDecl: make(map[nodeRef]bool),
+		typeNodeCache: make(map[nodeRef]Type),
+		funcSigs:      make(map[nodeRef]funcSignature),
 	}
-	info.Types = make(map[ast.NodeIndex]Type)
-	c.checkFile()
-	return c.diags
+	for _, tree := range trees {
+		c.allDiags[tree] = diag.NewBag()
+		infos[tree].Types = make(map[ast.NodeIndex]Type)
+	}
+
+	c.checkPackage(trees)
+
+	out := make(map[*ast.Tree]*diag.Bag, len(trees))
+	for _, tree := range trees {
+		out[tree] = c.allDiags[tree]
+	}
+	return out
 }
 
 func (c *checker) errorAt(n ast.NodeIndex, format string, a ...any) {
 	c.diags.Errorf(c.tree.SpanOf(n).Start, format, a...)
 }
 
-// checkFile mirrors resolveFile's two-pass shape (struct catalogs before
-// bodies): struct field types first, so a dynamic-array-field or bad-size
-// diagnostic in a struct nobody ever instantiates still surfaces, then every
-// top-level var's type and every function's body.
-func (c *checker) checkFile() {
-	decls := c.tree.Children(c.tree.Root)
-
-	for _, decl := range decls {
-		if c.tree.Nodes[decl].Kind == enums.NodeKinds.StructDecl {
-			c.checkStructDecl(decl)
+// checkPackage mirrors resolvePackage's shape one level up (struct field
+// types across every file first, so a dynamic-array-field or bad-size
+// diagnostic in a struct nobody ever instantiates still surfaces regardless
+// of which file declares it, then every file's top-level var types and
+// function bodies):
+func (c *checker) checkPackage(trees []*ast.Tree) {
+	for _, tree := range trees {
+		c.enter(tree)
+		for _, decl := range tree.Children(tree.Root) {
+			if tree.Nodes[decl].Kind == enums.NodeKinds.StructDecl {
+				c.checkStructDecl(decl)
+			}
 		}
 	}
-	for _, decl := range decls {
-		switch c.tree.Nodes[decl].Kind {
-		case enums.NodeKinds.VarDecl:
-			c.declType(decl)
-		case enums.NodeKinds.FuncDecl:
-			c.checkFuncDecl(decl)
+	for _, tree := range trees {
+		c.enter(tree)
+		for _, decl := range tree.Children(tree.Root) {
+			switch tree.Nodes[decl].Kind {
+			case enums.NodeKinds.VarDecl:
+				c.declType(decl)
+			case enums.NodeKinds.FuncDecl:
+				c.checkFuncDecl(decl)
+			}
 		}
 	}
 }
@@ -169,11 +261,12 @@ func (c *checker) checkFuncDecl(decl ast.NodeIndex) {
 // funcSigForDecl returns decl's (a FuncDecl's) signature, computing and
 // caching it on first use.
 func (c *checker) funcSigForDecl(decl ast.NodeIndex) funcSignature {
-	if sig, ok := c.funcSigs[decl]; ok {
+	key := nodeRef{c.tree, decl}
+	if sig, ok := c.funcSigs[key]; ok {
 		return sig
 	}
 	sig := c.computeFuncSig(decl)
-	c.funcSigs[decl] = sig
+	c.funcSigs[key] = sig
 	return sig
 }
 
@@ -202,17 +295,18 @@ func (c *checker) computeFuncSig(decl ast.NodeIndex) funcSignature {
 // reference (an Ident resolving to this decl) never redoes the work or
 // re-reports a diagnostic already raised while computing it.
 func (c *checker) declType(decl ast.NodeIndex) Type {
-	if t, ok := c.declTypes[decl]; ok {
+	key := nodeRef{c.tree, decl}
+	if t, ok := c.declTypes[key]; ok {
 		return t
 	}
-	if c.computingDecl[decl] {
+	if c.computingDecl[key] {
 		c.errorAt(decl, "type-checking cycle while inferring this declaration's type")
 		return invalidType
 	}
-	c.computingDecl[decl] = true
+	c.computingDecl[key] = true
 	t := c.computeDeclType(decl)
-	delete(c.computingDecl, decl)
-	c.declTypes[decl] = t
+	delete(c.computingDecl, key)
+	c.declTypes[key] = t
 	// A VarDecl/ShortVarDecl/Param declaration node is itself a type-position
 	// node as far as codegen is concerned - codegen.varDeclType used to
 	// re-derive exactly this value on its own (see AGENTS.md's codegen
@@ -387,11 +481,12 @@ func (c *checker) typeFromNode(n ast.NodeIndex) Type {
 	if n == ast.InvalidNode {
 		return invalidType
 	}
-	if t, ok := c.typeNodeCache[n]; ok {
+	key := nodeRef{c.tree, n}
+	if t, ok := c.typeNodeCache[key]; ok {
 		return t
 	}
 	t := c.computeTypeFromNode(n)
-	c.typeNodeCache[n] = t
+	c.typeNodeCache[key] = t
 	c.info.Types[n] = t
 	return t
 }
@@ -838,13 +933,24 @@ func (c *checker) checkIdentExpr(n ast.NodeIndex) Type {
 	}
 	switch sym.Kind {
 	case SymVar, SymParam:
-		return c.declType(sym.Decl)
+		// sym may be declared in a different file than the one currently
+		// being checked (a package-level var referenced from another file -
+		// see LANGUAGE.md's "Multi-file packages" section) - pushTree
+		// switches to its own owning file for the duration of declType,
+		// which reads that file's own declaration/initializer nodes.
+		restore := c.pushTree(sym.Tree)
+		t := c.declType(sym.Decl)
+		restore()
+		return t
 	case SymFunc:
 		if sym.Decl == ast.InvalidNode {
 			c.errorAt(n, "%s is a builtin, not a value", c.tree.Text(n))
 			return invalidType
 		}
-		return funcType(c.funcSigForDecl(sym.Decl))
+		restore := c.pushTree(sym.Tree)
+		sig := c.funcSigForDecl(sym.Decl)
+		restore()
+		return funcType(sig)
 	case SymStruct, SymBuiltinType:
 		c.errorAt(n, "%s is a type, not a value", c.tree.Text(n))
 		return invalidType
@@ -862,7 +968,11 @@ func (c *checker) checkThisExpr(n ast.NodeIndex) Type {
 	if !ok {
 		return invalidType // "this outside a method"; already reported by Resolve
 	}
-	name := c.tree.Text(c.tree.Child(sym.Decl, 0))
+	// sym.Decl is the receiver struct's own StructDecl node, which may live
+	// in a different file than the method itself (see Symbol.Tree's doc
+	// comment) - read it via sym.Tree, never c.tree, which is this method's
+	// own file and would misinterpret a foreign NodeIndex.
+	name := sym.Tree.Text(sym.Tree.Child(sym.Decl, 0))
 	info, ok := c.info.Structs[name]
 	if !ok {
 		return invalidType
@@ -1126,7 +1236,12 @@ func (c *checker) checkMemberExpr(n ast.NodeIndex) Type {
 		c.errorAt(n, "%s is a method, not a field (call it with ())", c.tree.Text(n))
 		return invalidType
 	}
-	return c.typeFromNode(c.tree.Child(sym.Decl, 1)) // Field: [name, type]
+	// The field's own Field node lives in its struct's file, which may
+	// differ from n's own file (see Symbol.Tree's doc comment).
+	restore := c.pushTree(sym.Tree)
+	t := c.typeFromNode(c.tree.Child(sym.Decl, 1)) // Field: [name, type]
+	restore()
+	return t
 }
 
 // resolveMember infers a MemberExpr's object type, requires it to be a
@@ -1335,7 +1450,12 @@ func (c *checker) funcSigForCall(callee ast.NodeIndex) (funcSignature, bool) {
 		return c.methodSigForCallee(callee)
 	case enums.NodeKinds.Ident:
 		if sym, ok := c.info.Refs[callee]; ok && sym.Kind == SymFunc && sym.Decl != ast.InvalidNode {
-			return c.funcSigForDecl(sym.Decl), true
+			// sym's FuncDecl may live in a different file than this call
+			// site (see LANGUAGE.md's "Multi-file packages" section).
+			restore := c.pushTree(sym.Tree)
+			sig := c.funcSigForDecl(sym.Decl)
+			restore()
+			return sig, true
 		}
 	}
 
@@ -1363,7 +1483,13 @@ func (c *checker) methodSigForCallee(callee ast.NodeIndex) (funcSignature, bool)
 		c.errorAt(callee, "%s is a field, not a method (cannot be called)", c.tree.Text(callee))
 		return funcSignature{}, false
 	}
-	return c.funcSigForDecl(sym.Decl), true
+	// The method may be declared in a different file than this call site
+	// (its own file need not match its receiver struct's - see
+	// LANGUAGE.md's "Multi-file packages" section).
+	restore := c.pushTree(sym.Tree)
+	sig := c.funcSigForDecl(sym.Decl)
+	restore()
+	return sig, true
 }
 
 // checkCompositeLit types a composite literal (`Point{...}` or `[N]T{...}`)
@@ -1416,7 +1542,13 @@ func (c *checker) checkCompositeLitElemFallback(elem ast.NodeIndex) {
 // field may be specified twice.
 func (c *checker) checkStructCompositeLit(n ast.NodeIndex, target Type, elems []ast.NodeIndex) {
 	info := target.Struct
+	// The struct's own Field nodes live in its declaring file, which may
+	// differ from n's own file (a composite literal naming a struct
+	// declared elsewhere in the package - see LANGUAGE.md's "Multi-file
+	// packages" section).
+	restore := c.pushTree(info.Symbol.Tree)
 	fields := c.tree.Children(info.Symbol.Decl)[1:] // Field nodes, declaration order
+	restore()
 	keyed := len(elems) > 0 && c.tree.Nodes[elems[0]].Kind == enums.NodeKinds.KeyValueExpr
 	seen := make(map[string]bool)
 
@@ -1430,7 +1562,7 @@ func (c *checker) checkStructCompositeLit(n ast.NodeIndex, target Type, elems []
 		if keyed {
 			c.checkKeyedStructElem(elem, info, seen)
 		} else {
-			c.checkPositionalStructElem(elem, i, fields)
+			c.checkPositionalStructElem(elem, i, info, fields)
 		}
 	}
 
@@ -1439,13 +1571,20 @@ func (c *checker) checkStructCompositeLit(n ast.NodeIndex, target Type, elems []
 	}
 }
 
-func (c *checker) checkPositionalStructElem(elem ast.NodeIndex, i int, fields []ast.NodeIndex) {
+// checkPositionalStructElem checks one positional composite-literal element.
+// elem is always in the literal's own (current) file; fields[i] belongs to
+// info's own declaring file (see checkStructCompositeLit) - checkValueExpr
+// runs against the caller's current tree first, and only the narrow
+// fieldType/fieldName lookup below switches into the struct's own file.
+func (c *checker) checkPositionalStructElem(elem ast.NodeIndex, i int, info *StructInfo, fields []ast.NodeIndex) {
 	vt := c.checkValueExpr(elem)
 	if i >= len(fields) {
 		return // count mismatch already reported by the caller
 	}
+	restore := c.pushTree(info.Symbol.Tree)
 	fieldType := c.typeFromNode(c.tree.Child(fields[i], 1))
 	fieldName := c.tree.Text(c.tree.Child(fields[i], 0))
+	restore()
 	c.checkAssignable(elem, fieldType, vt, fmt.Sprintf("field %s", fieldName))
 }
 
@@ -1470,7 +1609,11 @@ func (c *checker) checkKeyedStructElem(elem ast.NodeIndex, info *StructInfo, see
 	}
 	seen[name] = true
 
+	// fieldSym.Decl is a Field node in the struct's own declaring file,
+	// which may differ from elem's own file - see checkStructCompositeLit.
+	restore := c.pushTree(fieldSym.Tree)
 	fieldType := c.typeFromNode(c.tree.Child(fieldSym.Decl, 1))
+	restore()
 	c.checkAssignable(value, fieldType, vt, fmt.Sprintf("field %s", name))
 }
 

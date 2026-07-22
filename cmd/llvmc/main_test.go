@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"llvm_lang/src/loader"
 )
 
 // TestCompileAndRun_Success drives compileAndRun in-process against a valid
@@ -137,9 +139,9 @@ func TestMain(m *testing.M) {
 }
 
 // TestBinary_Success shells out to the real llvmc binary against the
-// repo's own examples/hello.llx and checks its real stdout and exit code.
+// repo's own examples/hello/hello.llx and checks its real stdout and exit code.
 func TestBinary_Success(t *testing.T) {
-	out, err := exec.Command(llvmcPath, "../../examples/hello.llx").Output()
+	out, err := exec.Command(llvmcPath, "../../examples/hello/hello.llx").Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
 			t.Fatalf("llvmc exited %v, stderr:\n%s", err, ee.Stderr)
@@ -154,7 +156,7 @@ func TestBinary_Success(t *testing.T) {
 
 // TestBinary_EmitLLVM covers the -emit-llvm flag end to end. The source
 // below concatenates two string literals at runtime ("a + b") rather than
-// printing a literal directly - a plain literal (e.g. examples/hello.llx's
+// printing a literal directly - a plain literal (e.g. examples/hello/hello.llx's
 // "Hello, World!") would still show up in -emit-llvm's output as a global
 // constant even without ever running anything, since codegen always embeds
 // every string literal it sees as module-level data (see AGENTS.md's
@@ -199,11 +201,11 @@ func main() {
 	}
 }
 
-// TestBinary_MainExitCode covers examples/features.llx end to end: its
+// TestBinary_MainExitCode covers examples/features/features.llx end to end: its
 // three print calls' real stdout, and its `func main() int` return value
 // coming back as the child process's own exit code.
 func TestBinary_MainExitCode(t *testing.T) {
-	cmd := exec.Command(llvmcPath, "../../examples/features.llx")
+	cmd := exec.Command(llvmcPath, "../../examples/features/features.llx")
 	out, err := cmd.Output()
 
 	if err != nil {
@@ -226,10 +228,10 @@ func TestBinary_MainExitCode(t *testing.T) {
 }
 
 // TestBinary_Failure covers the failure path through the real binary:
-// examples/error.llx must exit non-zero and print a diagnostic to stderr,
+// examples/error/error.llx must exit non-zero and print a diagnostic to stderr,
 // never a Go panic/stack trace.
 func TestBinary_Failure(t *testing.T) {
-	cmd := exec.Command(llvmcPath, "../../examples/error.llx")
+	cmd := exec.Command(llvmcPath, "../../examples/error/error.llx")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	err := cmd.Run()
@@ -269,4 +271,86 @@ func add(x int, y int) int {
 	if !strings.Contains(stderr.String(), "no main function") {
 		t.Errorf("stderr = %q, want it to mention the missing main function", stderr.String())
 	}
+}
+
+// --- Multi-file package tests (see LANGUAGE.md's "Multi-file packages"
+// section) - loader.Load resolves a directory (or a file within one) to
+// every .llx file directly inside it, compiled together as one package.
+
+// TestCompileAndRunPackage_MultipleFiles drives compileAndRunPackage
+// in-process against two files declared directly (no real filesystem
+// involved) - a function call and a struct/method pair, each declared in one
+// file and used from another.
+func TestCompileAndRunPackage_MultipleFiles(t *testing.T) {
+	var stderr bytes.Buffer
+	code := compileAndRunPackage([]loader.SourceFile{
+		{Name: "main.llx", Src: `
+func main() int {
+	p := Point{1, 2}
+	p.move(10, 20)
+	return double(p.x) + p.y
+}
+`},
+		{Name: "point.llx", Src: `
+struct Point {
+	x int
+	y int
+}
+
+func (Point) move(dx int, dy int) {
+	this.x = this.x + dx
+	this.y = this.y + dy
+}
+`},
+		{Name: "math.llx", Src: `
+func double(x int) int {
+	return x * 2
+}
+`},
+	}, &stderr, false)
+
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want empty", stderr.String())
+	}
+	// p.x = 11, doubled = 22; p.y = 22; total = 44.
+	if code != 44 {
+		t.Errorf("exit code = %d, want 44", code)
+	}
+}
+
+// TestBinary_MultiFileDirectory shells out to the real llvmc binary against
+// examples/multifile (three files: shapes.llx, util.llx, main.llx - see that
+// directory's own doc comments) two ways - the directory itself, and one of
+// its files - asserting both resolve to the identical package (same real
+// stdout, same exit code), exactly like LANGUAGE.md's "Multi-file packages"
+// section promises.
+func TestBinary_MultiFileDirectory(t *testing.T) {
+	const wantStdout = "12\n48\n30"
+	const wantExit = 30
+
+	runAndCheck := func(t *testing.T, path string) {
+		t.Helper()
+		cmd := exec.Command(llvmcPath, path)
+		out, err := cmd.Output()
+		if err != nil {
+			ee, ok := err.(*exec.ExitError)
+			if !ok {
+				t.Fatalf("running llvmc: %v", err)
+			}
+			if ee.ExitCode() != wantExit {
+				t.Fatalf("exit code = %d, want %d, stderr:\n%s", ee.ExitCode(), wantExit, ee.Stderr)
+			}
+		} else {
+			t.Fatalf("expected llvmc to exit %d, got exit 0", wantExit)
+		}
+
+		got := strings.ReplaceAll(string(out), "\r\n", "\n")
+		got = strings.TrimRight(got, "\n")
+		if got != wantStdout {
+			t.Errorf("stdout = %q, want %q", got, wantStdout)
+		}
+	}
+
+	t.Run("directory", func(t *testing.T) { runAndCheck(t, "../../examples/multifile") })
+	t.Run("file", func(t *testing.T) { runAndCheck(t, "../../examples/multifile/main.llx") })
 }

@@ -25,6 +25,7 @@ func (g *Generator) declareFuncSignature(decl ast.NodeIndex) {
 	nameNode := g.tree.Child(decl, 1)
 	paramListNode := g.tree.Child(decl, 2)
 	returnTypeNode := g.tree.Child(decl, 3)
+	sym := g.info.Refs[nameNode]
 
 	var paramTypes []llvm.Type
 	if receiver != ast.InvalidNode {
@@ -55,7 +56,7 @@ func (g *Generator) declareFuncSignature(decl ast.NodeIndex) {
 	}
 
 	fnType := llvm.FunctionType(llvmRet, paramTypes, false)
-	g.funcs[decl] = funcEntry{
+	g.funcs[sym] = funcEntry{
 		fn:       llvm.AddFunction(g.mod, name, fnType),
 		fnType:   fnType,
 		retType:  retType,
@@ -70,11 +71,12 @@ func (g *Generator) declareFuncSignature(decl ast.NodeIndex) {
 // genAddr's ThisExpr case).
 func (g *Generator) genFuncBody(decl ast.NodeIndex) {
 	receiver := g.tree.Child(decl, 0)
+	nameNode := g.tree.Child(decl, 1)
 	paramListNode := g.tree.Child(decl, 2)
 	returnTypeNode := g.tree.Child(decl, 3)
 	body := g.tree.Child(decl, 4)
 
-	entry := g.funcs[decl]
+	entry := g.funcs[g.info.Refs[nameNode]]
 	g.curFn = entry.fn
 	g.entryBlock = g.ctx.AddBasicBlock(g.curFn, "entry")
 	g.builder.SetInsertPointAtEnd(g.entryBlock)
@@ -96,7 +98,7 @@ func (g *Generator) genFuncBody(decl ast.NodeIndex) {
 	}
 
 	g.curFunc = &funcCtx{
-		isMain:    receiver == ast.InvalidNode && g.tree.Text(g.tree.Child(decl, 1)) == "main",
+		isMain:    receiver == ast.InvalidNode && g.tree.Text(nameNode) == "main",
 		hasReturn: returnTypeNode != ast.InvalidNode,
 	}
 

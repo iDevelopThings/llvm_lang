@@ -8,12 +8,21 @@ import (
 	"llvm_lang/src/enums"
 )
 
-// Info is the result of resolving one Tree: every reference's resolved
-// Symbol, every scope-introducing node's Scope, each struct's field/
-// method catalog, and (once Check has also run - see typecheck.go) every
-// expression's inferred Type - all keyed by NodeIndex (or struct name for
-// Structs), the same side-table pattern as the rest of the compiler:
-// semantic data lives here, not bolted onto ast.Node.
+// Info is the result of resolving one file (one *ast.Tree) within a package:
+// every reference's resolved Symbol, every scope-introducing node's Scope,
+// and (once Check has also run - see typecheck.go) every expression's
+// inferred Type - all keyed by NodeIndex, meaningful only relative to this
+// Info's own Tree (see ast.NodeIndex's doc comment and Symbol.Tree's) - the
+// same side-table pattern as the rest of the compiler: semantic data lives
+// here, not bolted onto ast.Node.
+//
+// Structs is the one field that ISN'T per-file: every Info produced by the
+// same ResolvePackage call shares the exact same Structs map instance (see
+// ResolvePackage) - a struct declared in one file is just as much a part of
+// the package's shared catalog as one declared in the file whose Info you
+// happen to be holding. This needs no special-casing at read sites: existing
+// code that indexes info.Structs by name already gets the whole package's
+// catalog, not just "this file's own structs".
 //
 // Refs covers both declaring occurrences (the name in `var a int`) and
 // referencing ones (a later use of `a`) uniformly - both map to the same
@@ -32,10 +41,35 @@ type Info struct {
 	Types   map[ast.NodeIndex]Type
 }
 
+// resolver's tree/info/bag fields always describe "whichever file is
+// currently being walked" - see enterFile. Resolve itself never needs to
+// follow a Symbol into a different file than the one currently being walked
+// (unlike sema/typecheck.go's checker - see that file's own doc comment for
+// why Check's lazy signature/decl-type computation genuinely does need
+// that): every node Resolve visits belongs to the tree it started from,
+// and a cross-file Symbol it looks up (scope.Lookup) is only ever recorded
+// into Refs, never dereferenced back into its own declaring file's tree.
 type resolver struct {
-	tree  *ast.Tree
-	diags *diag.Bag
-	info  *Info
+	infos map[*ast.Tree]*Info
+	bags  map[*ast.Tree]*diag.Bag
+
+	pkg     *Scope                 // shared package scope, every file's top-level names
+	structs map[string]*StructInfo // shared struct catalog, every file's structs
+
+	tree *ast.Tree
+	info *Info
+	bag  *diag.Bag
+}
+
+// enterFile switches the resolver's current-file bookkeeping to tree,
+// recording tree's own Root -> shared package Scope mapping as it does (see
+// resolveFile's per-file passes, all of which call this once per file before
+// walking that file's own declarations).
+func (r *resolver) enterFile(tree *ast.Tree) {
+	r.tree = tree
+	r.info = r.infos[tree]
+	r.bag = r.bags[tree]
+	r.info.Scopes[tree.Root] = r.pkg
 }
 
 // Resolve walks tree (the output of parser.ParseFile) and resolves every
@@ -44,61 +78,103 @@ type resolver struct {
 // (`p.field`, `p.method()`) isn't resolved here - see StructInfo's doc
 // comment - because that needs to know p's type, which belongs to the
 // type-checking pass this feeds into, not lexical scoping.
+//
+// Resolve is the single-file case of ResolvePackage - see its doc comment
+// for the multi-file package entry point this wraps.
 func Resolve(tree *ast.Tree) (*Info, *diag.Bag) {
+	infos, bags := ResolvePackage([]*ast.Tree{tree})
+	return infos[tree], bags[tree]
+}
+
+// ResolvePackage resolves every file in trees as one package: every file's
+// top-level struct/var/func names (and every method) are declared into one
+// shared package Scope, and every struct is entered into one shared catalog -
+// so a name declared in one file is visible from every other file in the
+// same package, exactly like within a single file today, regardless of which
+// file is processed first or which order trees is given in (see
+// LANGUAGE.md's "Multi-file packages" section).
+//
+// Returns one *Info and one *diag.Bag per input tree, keyed by the tree
+// itself - a diagnostic's Pos is only meaningful relative to the one file
+// it's reported against (see diag.Bag's own doc comment), so unlike Structs/
+// the package Scope, diagnostics are never merged across files.
+func ResolvePackage(trees []*ast.Tree) (map[*ast.Tree]*Info, map[*ast.Tree]*diag.Bag) {
 	r := &resolver{
-		tree:  tree,
-		diags: diag.NewBag(),
-		info: &Info{
+		infos:   make(map[*ast.Tree]*Info, len(trees)),
+		bags:    make(map[*ast.Tree]*diag.Bag, len(trees)),
+		structs: make(map[string]*StructInfo),
+	}
+	universe := universeScope()
+	r.pkg = newScope(ScopePackage, universe, ast.InvalidNode)
+
+	for _, tree := range trees {
+		r.infos[tree] = &Info{
 			Refs:    make(map[ast.NodeIndex]*Symbol),
 			Scopes:  make(map[ast.NodeIndex]*Scope),
-			Structs: make(map[string]*StructInfo),
-		},
+			Structs: r.structs,
+		}
+		r.bags[tree] = diag.NewBag()
 	}
-	r.resolveFile()
-	return r.info, r.diags
+
+	r.resolvePackage(trees)
+
+	out := make(map[*ast.Tree]*Info, len(trees))
+	diags := make(map[*ast.Tree]*diag.Bag, len(trees))
+	for _, tree := range trees {
+		out[tree] = r.infos[tree]
+		diags[tree] = r.bags[tree]
+	}
+	return out, diags
 }
 
 func (r *resolver) errorAt(n ast.NodeIndex, format string, a ...any) {
-	r.diags.Errorf(r.tree.SpanOf(n).Start, format, a...)
+	r.bag.Errorf(r.tree.SpanOf(n).Start, format, a...)
 }
 
-// resolveFile processes the whole tree in three passes, so declaration
-// order within the file never matters (Go allows top-level declarations to
-// reference each other regardless of which comes first):
-//  1. every struct's type name and field catalog, so methods (pass 2) and
-//     type positions (pass 3) can always find them
-//  2. every top-level var/free-function name, and every method (attached
-//     to the struct catalog pass 1 already built)
-//  3. every declaration's own content - types, initializers, function
-//     bodies - now that every top-level name is known
-func (r *resolver) resolveFile() {
-	universe := universeScope()
-	pkg := newScope(ScopePackage, universe, r.tree.Root)
-	r.info.Scopes[r.tree.Root] = pkg
-
-	decls := r.tree.Children(r.tree.Root)
-
-	for _, decl := range decls {
-		if r.tree.Nodes[decl].Kind == enums.NodeKinds.StructDecl {
-			r.declareStruct(pkg, decl)
+// resolvePackage processes every file in trees in three passes, so
+// declaration order both within a file and across the whole package never
+// matters (Go allows top-level declarations to reference each other
+// regardless of which comes first, or which file declares them) - the same
+// guarantee the single-file resolveFile used to provide one level down, now
+// applied across every file before any file's bodies are resolved:
+//  1. every file's struct type names and field catalogs, so methods (pass 2)
+//     and type positions (pass 3) can always find them regardless of which
+//     file declares the struct
+//  2. every file's top-level var/free-function names, and every method
+//     (attached to the struct catalog pass 1 already built)
+//  3. every file's own declaration content - types, initializers, function
+//     bodies - now that every top-level name in the whole package is known
+func (r *resolver) resolvePackage(trees []*ast.Tree) {
+	for _, tree := range trees {
+		r.enterFile(tree)
+		for _, decl := range tree.Children(tree.Root) {
+			if tree.Nodes[decl].Kind == enums.NodeKinds.StructDecl {
+				r.declareStruct(r.pkg, decl)
+			}
 		}
 	}
-	for _, decl := range decls {
-		switch r.tree.Nodes[decl].Kind {
-		case enums.NodeKinds.VarDecl:
-			r.declareLocal(pkg, decl, r.tree.Child(decl, 0), SymVar)
-		case enums.NodeKinds.FuncDecl:
-			r.declareFunc(pkg, decl)
+	for _, tree := range trees {
+		r.enterFile(tree)
+		for _, decl := range tree.Children(tree.Root) {
+			switch tree.Nodes[decl].Kind {
+			case enums.NodeKinds.VarDecl:
+				r.declareLocal(r.pkg, decl, tree.Child(decl, 0), SymVar)
+			case enums.NodeKinds.FuncDecl:
+				r.declareFunc(r.pkg, decl)
+			}
 		}
 	}
-	for _, decl := range decls {
-		switch r.tree.Nodes[decl].Kind {
-		case enums.NodeKinds.VarDecl:
-			r.resolveVarDeclBody(pkg, decl)
-		case enums.NodeKinds.FuncDecl:
-			r.resolveFuncBody(pkg, decl)
-		case enums.NodeKinds.StructDecl:
-			r.resolveStructFieldTypes(pkg, decl)
+	for _, tree := range trees {
+		r.enterFile(tree)
+		for _, decl := range tree.Children(tree.Root) {
+			switch tree.Nodes[decl].Kind {
+			case enums.NodeKinds.VarDecl:
+				r.resolveVarDeclBody(r.pkg, decl)
+			case enums.NodeKinds.FuncDecl:
+				r.resolveFuncBody(r.pkg, decl)
+			case enums.NodeKinds.StructDecl:
+				r.resolveStructFieldTypes(r.pkg, decl)
+			}
 		}
 	}
 }
@@ -111,6 +187,7 @@ func (r *resolver) declareLocal(scope *Scope, n, nameNode ast.NodeIndex, kind Sy
 		Name:  r.tree.Text(nameNode),
 		Kind:  kind,
 		Decl:  n,
+		Tree:  r.tree,
 		Scope: scope,
 	}
 	if prior, redeclared := scope.Define(sym); redeclared {
@@ -138,6 +215,7 @@ func (r *resolver) declareStruct(pkg *Scope, decl ast.NodeIndex) {
 			Name:  fieldName,
 			Kind:  SymField,
 			Decl:  field,
+			Tree:  r.tree,
 			Scope: pkg,
 		}
 		if _, exists := info.Fields[fieldName]; exists {
@@ -172,6 +250,7 @@ func (r *resolver) declareFunc(pkg *Scope, decl ast.NodeIndex) {
 		Name: r.tree.Text(nameNode),
 		Kind: SymFunc,
 		Decl: decl,
+		Tree: r.tree,
 	}
 	r.info.Refs[nameNode] = sym
 	r.addMethod(receiver, sym)
@@ -216,9 +295,15 @@ func (r *resolver) resolveFuncBody(pkg *Scope, decl ast.NodeIndex) {
 	if receiver != ast.InvalidNode {
 		if info, ok := r.info.Structs[r.tree.Text(receiver)]; ok {
 			fnScope.Receiver = &Symbol{
-				Name:  "this",
-				Kind:  SymReceiver,
-				Decl:  info.Symbol.Decl,
+				Name: "this",
+				Kind: SymReceiver,
+				Decl: info.Symbol.Decl,
+				// The receiver struct may be declared in a different file
+				// than the method itself (see Symbol.Tree's doc comment) -
+				// this must be the struct's own owning tree, not r.tree
+				// (this method's file), so a later cross-file dereference
+				// (sema/typecheck.go's checkThisExpr) reads the right one.
+				Tree:  info.Symbol.Tree,
 				Scope: fnScope,
 			}
 		}

@@ -1,0 +1,21 @@
+// main.llx - the entry point, calling across into shapes.llx (the Rect
+// struct and its methods) and util.llx (perimeter/addBonus/
+// basePerimeterBonus) - every name here is declared in a *different* file
+// than the one using it, exactly the case this example exists to show off.
+// Compile the whole package with either:
+//
+//	llvmc examples/multifile
+//	llvmc examples/multifile/main.llx
+
+func main() int {
+	r := Rect{3, 4}
+	print(r.area())
+
+	r.scale(2)
+	print(r.area())
+
+	p := addBonus(perimeter(r))
+	print(p)
+
+	return p
+}

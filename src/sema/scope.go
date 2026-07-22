@@ -5,12 +5,16 @@ import (
 )
 
 // ScopeKind classifies a Scope by what introduces it, mirroring Go's own
-// scope hierarchy (universe > package > file > function > block). Universe
-// and Package are the only ones that matter for cross-file concerns today,
-// but File (import bindings, once import syntax exists) and Package
-// aggregating declarations across multiple files are both meant to be
-// additive later - adding files to loop over, not restructuring how
-// scoping itself works.
+// scope hierarchy (universe > package > file > function > block). A
+// package's ScopePackage scope is now genuinely shared across every file in
+// that package (see LANGUAGE.md's "Multi-file packages" section and
+// ResolvePackage) - every file's top-level struct/var/func names are
+// declared into the exact same Scope instance, which is exactly what makes
+// a name declared in one file visible when resolving another's body,
+// regardless of file order. ScopeFile (import bindings) is still meant to be
+// additive later, once real cross-package import syntax exists - that's a
+// separate, still-unimplemented scope level from ScopePackage, not the same
+// thing under a different name.
 type ScopeKind int
 
 const (
@@ -30,7 +34,7 @@ const (
 type Scope struct {
 	Kind   ScopeKind
 	Parent *Scope
-	Owner  ast.NodeIndex // the File/FuncDecl this scope belongs to; InvalidNode for Universe/Block
+	Owner  ast.NodeIndex // the FuncDecl this scope belongs to; InvalidNode for Universe/Package (now spans every file - no single owning node)/Block
 
 	// Receiver is set only on a ScopeFunc belonging to a method - the
 	// symbol `this` resolves to inside that function's body. nil for a
@@ -131,6 +135,26 @@ type Symbol struct {
 	// or InvalidNode for a predeclared symbol (print, int, ...) that has no
 	// declaration site in the source at all.
 	Decl ast.NodeIndex
+
+	// Tree is the *ast.Tree Decl is an index into - nil for a predeclared
+	// symbol (Decl == InvalidNode), which has no owning file at all. This
+	// exists specifically for multi-file packages (see LANGUAGE.md's
+	// "Multi-file packages" section): ast.NodeIndex is only ever meaningful
+	// relative to the one Tree it came from (see ast.NodeIndex's own doc
+	// comment), so the moment a Symbol can be visible from a file other than
+	// the one that declares it, Decl alone is no longer enough to find the
+	// declaring node again - Tree says which of the package's files to index
+	// into. Every consumer that dereferences a foreign Symbol's Decl (a
+	// call/reference resolved in one file but declared in another) reads
+	// this field rather than assuming "whichever tree is currently being
+	// walked" - see sema/typecheck.go's checker.pushTree. codegen never
+	// actually needs to do this itself (see the Generator doc comment,
+	// src/codegen/codegen.go, for why every codegen-level lookup is already
+	// keyed by *Symbol/*StructInfo pointer identity instead), but the field
+	// still exists on Symbol - not just inside sema's own checker state -
+	// since Resolve, not Check, is what constructs every Symbol in the
+	// first place.
+	Tree *ast.Tree
 
 	// Scope is the scope this symbol was declared into - for a method,
 	// its receiver struct's own scope (package scope today).

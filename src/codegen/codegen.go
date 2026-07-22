@@ -1,8 +1,11 @@
 // Package codegen lowers a resolved and type-checked *ast.Tree (plus its
-// *sema.Info) into an LLVM Module, via tinygo.org/x/go-llvm.
+// *sema.Info) - or, for a multi-file package, every file's own tree/info
+// pair together (see GeneratePackage and LANGUAGE.md's "Multi-file
+// packages" section) - into one LLVM Module, via tinygo.org/x/go-llvm.
 //
-// This package assumes its input is already fully valid: Generate is meant
-// to be called only on a tree for which sema.Resolve and sema.Check both
+// This package assumes its input is already fully valid: Generate/
+// GeneratePackage are meant to be called only on tree(s) for which
+// sema.Resolve/sema.ResolvePackage and sema.Check/sema.CheckPackage all
 // returned an empty diagnostic Bag (see AGENTS.md - "a whole program is
 // available as tree+info with everything already validated; you are
 // lowering already-correct, already-typed code to LLVM IR, not re-deriving
@@ -12,8 +15,8 @@
 //
 // The one class of error still possible on a semantically valid tree is a
 // codegen-level restriction sema doesn't know about (see BLOCKERS.md): a
-// non-constant top-level var initializer. That lands in Generate's own
-// diag.Bag rather than panicking, so a caller gets it reported, same as
+// non-constant top-level var initializer. That lands in the affected file's
+// own diag.Bag rather than panicking, so a caller gets it reported, same as
 // every other pass in this compiler.
 package codegen
 
@@ -85,9 +88,28 @@ type structLayout struct {
 	fieldSemaTypes []sema.Type
 }
 
-// Generator holds every piece of state needed to lower one Tree into one
-// Module. It's used once per Generate call, never reused across trees.
+// Generator holds every piece of state needed to lower a whole package (one
+// or more *ast.Trees, sharing one *sema.Info per tree - see GeneratePackage)
+// into one Module. It's used once per GeneratePackage call, never reused.
+//
+// tree/info/diags always describe "whichever file's declarations are
+// currently being lowered" - genPackage's own pass loops switch these via
+// enter as they move from one file to the next. Unlike sema/typecheck.go's
+// checker, nothing here ever needs to *switch back* mid-declaration to
+// follow a Symbol into another file: every cross-file reference a function
+// body can contain (a call to a function declared elsewhere, a struct type
+// named elsewhere, a global var declared elsewhere) is looked up through
+// funcs/globals/structLayouts below, all keyed by *sema.Symbol or
+// *sema.StructInfo pointer identity rather than by ast.NodeIndex - so once
+// declareStructType/defineStructBody/genGlobalVarDecl/declareFuncSignature
+// have each run once (across every file, before any function body is
+// generated - see genPackage), every one of those lookups is a plain,
+// tree-agnostic map read, regardless of which file originally declared the
+// symbol being referenced.
 type Generator struct {
+	infos    map[*ast.Tree]*sema.Info
+	allDiags map[*ast.Tree]*diag.Bag
+
 	tree *ast.Tree
 	info *sema.Info
 
@@ -118,7 +140,17 @@ type Generator struct {
 
 	structLayouts map[*sema.StructInfo]*structLayout
 	globals       map[*sema.Symbol]llvm.Value
-	funcs         map[ast.NodeIndex]funcEntry
+
+	// funcs is keyed by *sema.Symbol (the declared free function or
+	// method's own symbol, from Info.Refs), not by its FuncDecl's
+	// ast.NodeIndex - a NodeIndex is only meaningful relative to the one
+	// Tree it came from (see ast.NodeIndex's doc comment), and once a
+	// package can span multiple files/trees, two unrelated functions in
+	// different files can share the same NodeIndex value. A *sema.Symbol
+	// pointer is already globally unique (one fresh Symbol per declaration,
+	// see sema/resolve.go), so keying on it sidesteps the collision
+	// entirely - the same reasoning globals/structLayouts already apply.
+	funcs map[*sema.Symbol]funcEntry
 
 	// locals is reset at the start of every function (see genFuncBody) -
 	// every VarDecl/ShortVarDecl/Param declaration node produces its own
@@ -190,67 +222,122 @@ type Generator struct {
 // level restrictions (constant global initializers, unsupported print
 // argument types) that can still produce diagnostics here.
 //
+// Generate is the single-file case of GeneratePackage - see its doc comment
+// for the multi-file package entry point this wraps.
+//
 // The returned Module owns its own Context; the caller must call
 // Module.Dispose once done with it (after verifying/JIT-executing/printing).
 func Generate(tree *ast.Tree, info *sema.Info, moduleName string) (*Module, *diag.Bag) {
+	mod, diags := GeneratePackage([]*ast.Tree{tree}, map[*ast.Tree]*sema.Info{tree: info}, moduleName)
+	return mod, diags[tree]
+}
+
+// GeneratePackage lowers every file in trees (each with its own already-
+// resolved/checked *sema.Info, sharing one package-wide struct catalog and
+// symbol identity - see sema.CheckPackage) into one shared LLVM Module named
+// moduleName: a function or global declared in one file is directly
+// callable/referenceable from another file's code in the same module, using
+// the same *sema.Symbol/*sema.StructInfo pointer identity codegen already
+// keys every lookup by (see the Generator doc comment) - not one Module per
+// file with cross-module linking, which this package has no need for since
+// every file in a package always ends up in the exact same module anyway.
+//
+// The returned Module owns its own Context; the caller must call
+// Module.Dispose once done with it (after verifying/JIT-executing/printing).
+// Diagnostics come back one *diag.Bag per file (a diagnostic's Pos is only
+// meaningful relative to the one file it's reported against - see
+// sema.CheckPackage's own doc comment for the identical reasoning), keyed by
+// tree, same as sema.ResolvePackage/sema.CheckPackage.
+func GeneratePackage(trees []*ast.Tree, infos map[*ast.Tree]*sema.Info, moduleName string) (*Module, map[*ast.Tree]*diag.Bag) {
 	ctx := llvm.NewContext()
 	mod := ctx.NewModule(moduleName)
 	builder := ctx.NewBuilder()
 
 	g := &Generator{
-		tree:          tree,
-		info:          info,
+		infos:         infos,
+		allDiags:      make(map[*ast.Tree]*diag.Bag, len(trees)),
 		ctx:           ctx,
 		mod:           mod,
 		builder:       builder,
-		diags:         diag.NewBag(),
 		structLayouts: make(map[*sema.StructInfo]*structLayout),
 		globals:       make(map[*sema.Symbol]llvm.Value),
-		funcs:         make(map[ast.NodeIndex]funcEntry),
+		funcs:         make(map[*sema.Symbol]funcEntry),
 		strLiterals:   make(map[string]llvm.Value),
+	}
+	for _, tree := range trees {
+		g.allDiags[tree] = diag.NewBag()
 	}
 	g.setupTypes()
 	g.setupRuntime()
-	g.genFile()
+	g.genPackage(trees)
 
 	builder.Dispose()
+
+	diags := make(map[*ast.Tree]*diag.Bag, len(trees))
+	for _, tree := range trees {
+		diags[tree] = g.allDiags[tree]
+	}
 	return &Module{
 		Ctx:  ctx,
 		LLVM: mod,
-	}, g.diags
+	}, diags
 }
 
-// genFile drives the whole module in passes, mirroring sema's own
-// resolveFile/checkFile shape (struct catalogs, then globals, then function
-// signatures, then bodies) so declaration order in the source never matters -
-// a function can call another declared later, and a global's type can name a
-// struct declared later.
-func (g *Generator) genFile() {
-	decls := g.tree.Children(g.tree.Root)
+// enter switches the Generator's current-file bookkeeping to tree - see the
+// Generator doc comment for why nothing here ever needs to switch back
+// mid-declaration the way sema/typecheck.go's checker does.
+func (g *Generator) enter(tree *ast.Tree) {
+	g.tree = tree
+	g.info = g.infos[tree]
+	g.diags = g.allDiags[tree]
+}
 
-	for _, d := range decls {
-		if g.tree.Nodes[d].Kind == enums.NodeKinds.StructDecl {
-			g.declareStructType(d)
+// genPackage drives the whole module in passes across every file in trees,
+// mirroring sema's own resolvePackage/checkPackage shape (struct catalogs,
+// then globals, then function signatures, then bodies - each pass covering
+// every file before the next begins) so declaration order never matters,
+// either within one file or across the whole package: a function can call
+// another declared later (in the same file or a different one), and a
+// global's type can name a struct declared later (ditto).
+func (g *Generator) genPackage(trees []*ast.Tree) {
+	for _, tree := range trees {
+		g.enter(tree)
+		for _, d := range tree.Children(tree.Root) {
+			if tree.Nodes[d].Kind == enums.NodeKinds.StructDecl {
+				g.declareStructType(d)
+			}
 		}
 	}
-	for _, d := range decls {
-		if g.tree.Nodes[d].Kind == enums.NodeKinds.StructDecl {
-			g.defineStructBody(d)
+	for _, tree := range trees {
+		g.enter(tree)
+		for _, d := range tree.Children(tree.Root) {
+			if tree.Nodes[d].Kind == enums.NodeKinds.StructDecl {
+				g.defineStructBody(d)
+			}
 		}
 	}
-	for _, d := range decls {
-		if g.tree.Nodes[d].Kind == enums.NodeKinds.VarDecl {
-			g.genGlobalVarDecl(d)
+	for _, tree := range trees {
+		g.enter(tree)
+		for _, d := range tree.Children(tree.Root) {
+			if tree.Nodes[d].Kind == enums.NodeKinds.VarDecl {
+				g.genGlobalVarDecl(d)
+			}
 		}
 	}
-	for _, d := range decls {
-		if g.tree.Nodes[d].Kind == enums.NodeKinds.FuncDecl {
-			g.declareFuncSignature(d)
+	for _, tree := range trees {
+		g.enter(tree)
+		for _, d := range tree.Children(tree.Root) {
+			if tree.Nodes[d].Kind == enums.NodeKinds.FuncDecl {
+				g.declareFuncSignature(d)
+			}
 		}
 	}
-	for _, d := range decls {
-		if g.tree.Nodes[d].Kind == enums.NodeKinds.FuncDecl {
-			g.genFuncBody(d)
+	for _, tree := range trees {
+		g.enter(tree)
+		for _, d := range tree.Children(tree.Root) {
+			if tree.Nodes[d].Kind == enums.NodeKinds.FuncDecl {
+				g.genFuncBody(d)
+			}
 		}
 	}
 }

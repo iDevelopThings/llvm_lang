@@ -86,3 +86,91 @@ of scope. See `LANGUAGE.md`'s "First-class functions" section for the
 language-level rules and `CODEGEN.md`'s "First-class functions" section for
 the fat-pointer construction site (`genFuncValue`) and the direct-vs-
 indirect call dispatch (`isDirectFuncCall`/`genIndirectCall`).
+
+---
+
+## 2026-07-22 - Multi-file packages: directory = package, non-recursive
+
+**Decision:** a package is exactly "every `.llx` file directly inside one
+directory" - Go's own model, adopted as-is rather than inventing a distinct
+convention. Explicitly non-recursive: a subdirectory's `.llx` files are
+never pulled in, even implicitly. `llvmc some/dir/main.llx` and
+`llvmc some/dir` are defined to compile the identical file set (a file
+argument resolves to its own containing directory - see `src/loader`).
+
+**Why:** this is the one genuinely obvious choice here - Go developers
+already know exactly what "package = directory, no recursion" means, and
+this language is already deliberately Go-flavored throughout (`LANGUAGE.md`'s
+own opening line). The alternative (an explicit file list in some manifest,
+or a recursive package tree like a namespace hierarchy) would add real
+design surface - manifest syntax, or nested-package name resolution - for a
+problem Go already has a well-understood answer to, with no motivating
+reason this project needs something different. Non-recursive specifically
+avoids a subdirectory silently becoming part of a package it wasn't
+obviously meant to belong to (e.g. a `testdata/`-style subfolder of sample
+`.llx` files next to a real package).
+
+**Status:** shipped. See `LANGUAGE.md`'s "Multi-file packages" section for
+the full model, and this round's `examples/multifile/` for a real example.
+Cross-package `import` syntax, actually acting on it, and the already-present
+`sema.Symbol.Exported` hook becoming a real enforced rule are all explicitly
+out of scope for this round - a single package is still the only unit that
+exists right now.
+
+---
+
+## 2026-07-22 - Multi-file packages: one shared Module per package, not one Module per file
+
+**Decision:** `codegen.GeneratePackage` lowers every file in a package into
+one single `llvm.Module`, never one `llvm.Module` per file linked together
+afterward.
+
+**Why:** every file in a package always ends up needing to call into, and be
+called from, every other file in that same package - there is no notion of
+"this file's functions are private to it" yet (see the `Exported` entry
+above - not enforced this round), so a per-file-module design would need
+every cross-file call to go through an external-linkage declaration plus a
+real link step (LLVM's own module linker, or an equivalent), purely to
+re-assemble something that one shared module already gives for free. Since
+this compiler is the only producer of every module in play - there's no
+external LLVM module from some other toolchain that this needs to
+interoperate with - there's no requirement to keep files as separate
+compilation units at the LLVM IR level; only a *frontend* file/tree
+distinction is required at all (for diagnostics, and so `ast.NodeIndex`
+stays meaningful - see `sema.Symbol.Tree`'s doc comment), not a *backend*
+one. One shared module is simply less machinery for a requirement (separate
+files, still one compiled program) this project doesn't have.
+
+**Status:** shipped. See `CODEGEN.md`'s "Multi-file packages: one shared
+Module per package" section for the mechanics (`Generator.funcs`/`globals`/
+`structLayouts` all keyed by `*sema.Symbol`/`*sema.StructInfo` pointer
+identity, not `ast.NodeIndex`, which is what makes a shared module free of
+extra cross-file plumbing).
+
+---
+
+## 2026-07-22 - Adopting `afero` for file loading
+
+**Decision:** all disk I/O this compiler needs for multi-file package
+loading (`src/loader`) goes through `github.com/spf13/afero`'s `afero.Fs`
+interface rather than calling `os.ReadFile`/`os.ReadDir`/`os.Stat` directly.
+Production wires in `afero.NewOsFs()`; tests build fake package layouts with
+`afero.NewMemMapFs()`.
+
+**Why:** `src/loader`'s own test suite needs to exercise several directory
+shapes (multiple files, an empty directory, a file resolving to its
+containing directory, an unreadable file) that would otherwise mean
+creating and tearing down real temp directories on disk for every test case
+- slower, and it leaves a real (if test-scoped) filesystem footprint that
+has to be cleaned up correctly on every path, including a failing test. An
+in-memory `afero.Fs` gives the exact same `Stat`/`ReadDir`/`Open`-shaped
+interface this package already needs, so `Load` itself has zero knowledge of
+which implementation it's handed - production and test code share the
+identical code path, not a mocked variant that could drift from what
+actually runs.
+
+**Status:** shipped, and adopted as a standing convention going forward, not
+just for this one package - see `AGENTS.md`'s new note under `## Standards`:
+any future disk I/O this compiler needs should go through `afero.Fs` for the
+same testability reason, rather than reaching for `os` directly out of
+habit.

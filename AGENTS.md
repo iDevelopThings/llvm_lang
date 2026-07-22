@@ -95,6 +95,8 @@ Max efficiency and performance, keeping allocations down to a minimum. We alread
 
 When the choice is right, opt for using iter.Seq yield feature, slices.X from std library etc.
 
+Any disk I/O this compiler needs goes through `afero.Fs` (`github.com/spf13/afero`), never direct `os` calls (`os.ReadFile`, `os.ReadDir`, `os.Stat`, ...) - see `src/loader` for the first (and, so far, only) place this matters. Production code wires in `afero.NewOsFs()`; tests build fake filesystem layouts with `afero.NewMemMapFs()` instead of creating/tearing down real temp directories. This is a deliberate standing convention (see `DECISIONS.md`'s "Adopting afero for file loading" entry), not just incidental to `src/loader` - keep it in mind for any future feature that needs to touch the filesystem.
+
 ## Architecture
 
 All code should be at it's correct layer, for example no code gen logic should be inside type checker(sema), and vice versa. (This applies everywhere, not just these two examples).

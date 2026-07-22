@@ -1,16 +1,22 @@
 // Command llvmc is the first real, human-facing way to run an llvm_lang
-// source file: read it, drive it through the full compiler pipeline
-// (lexer -> parser -> sema.Resolve -> sema.Check -> codegen), and, on full
-// success, JIT-execute the resulting module's `func main()` directly in this
-// process - so the program's own `print` calls (which lower to real libc
-// `printf` calls, see AGENTS.md's codegen section) write to this process's
-// real stdout, something a `go test`-hosted JIT call can't easily show (see
-// BLOCKERS.md's codegen-phase entry 7).
+// program: given a path - a single source file, or a directory (see
+// LANGUAGE.md's "Multi-file packages" section: a file resolves to its own
+// containing directory, so both forms compile the identical set of files) -
+// it resolves the package's full file list (src/loader), drives every file
+// through the full compiler pipeline (lexer -> parser per file, then
+// sema.ResolvePackage -> sema.CheckPackage -> codegen.GeneratePackage across
+// all of them together), and, on full success, JIT-executes the resulting
+// shared module's `func main()` directly in this process - so the program's
+// own `print` calls (which lower to real libc `printf` calls, see
+// AGENTS.md's codegen section) write to this process's real stdout,
+// something a `go test`-hosted JIT call can't easily show (see BLOCKERS.md's
+// codegen-phase entry 7).
 //
 // Usage:
 //
 //	llvmc <file.llx>
-//	llvmc -emit-llvm <file.llx>
+//	llvmc <directory>
+//	llvmc -emit-llvm <file.llx or directory>
 //
 // The -emit-llvm flag runs the exact same pipeline (including LLVM's own
 // module verifier) but, instead of JIT-executing the result, prints the
@@ -22,25 +28,29 @@
 //
 // Source file extension: this project picks ".llx" for llvm_lang source
 // files - ".ll" is already LLVM's own textual IR format's extension, and
-// reusing it here would be a real (and confusing) collision with that.
-// Nothing in the compiler pipeline itself actually inspects the extension -
+// reusing it here would be a real (and confusing) collision with that. The
+// compiler pipeline proper still doesn't inspect a file's extension at all -
 // lexer.NewFile just takes a name (used only for diagnostics) and the source
-// text - so this is purely a human-facing convention, not an enforced one.
+// text - src/loader's directory scan is the one place ".llx" is actually
+// checked for, since resolving a bare directory path needs a concrete
+// answer to "which files in here are part of the package".
 //
 // Exit codes:
-//   - 2: usage error - no file argument, an unrecognized flag, or the file
-//     couldn't be read. A short usage message is printed to stderr; nothing
-//     is compiled.
-//   - 1: a compile-time diagnostic - the lexer, parser, sema.Resolve,
-//     sema.Check, or codegen.Generate stage reported at least one
-//     error-severity diagnostic. Every diagnostic collected by whichever
-//     stage failed first is printed to stderr via diag.FormatSnippet (a
-//     "file:line:col: severity: message" header plus the offending source
-//     line and a caret), and no later stage runs. This also covers the
-//     module failing LLVM's own verifier, and the module JIT-executing but
-//     containing no `main` function to run. With -emit-llvm, this is the
-//     only non-zero exit code possible - a verified module's IR is always
-//     printed and this process always exits 0 afterward.
+//   - 2: usage error - no path argument, an unrecognized flag, the path
+//     couldn't be resolved to a real file/directory, or its resolved
+//     directory has zero .llx files in it. A short usage message is printed
+//     to stderr; nothing is compiled.
+//   - 1: a compile-time diagnostic - the lexer, parser, sema.ResolvePackage,
+//     sema.CheckPackage, or codegen.GeneratePackage stage reported at least
+//     one error-severity diagnostic in any file. Every diagnostic collected
+//     by whichever stage failed first is printed to stderr via
+//     diag.FormatSnippet (a "file:line:col: severity: message" header plus
+//     the offending source line and a caret), and no later stage runs. This
+//     also covers the module failing LLVM's own verifier, and the module
+//     JIT-executing but containing no `main` function to run. With
+//     -emit-llvm, this is the only non-zero exit code possible - a verified
+//     module's IR is always printed and this process always exits 0
+//     afterward.
 //   - otherwise: the language program's own exit code. `func main()` always
 //     lowers to a real `i32 @main()` LLVM function regardless of whether the
 //     source declares a return type for it (see AGENTS.md's "`main` is the
@@ -62,12 +72,15 @@ import (
 	"sync"
 	"syscall"
 
+	"llvm_lang/src/ast"
 	"llvm_lang/src/codegen"
 	"llvm_lang/src/diag"
 	"llvm_lang/src/lexer"
+	"llvm_lang/src/loader"
 	"llvm_lang/src/parser"
 	"llvm_lang/src/sema"
 
+	"github.com/spf13/afero"
 	"tinygo.org/x/go-llvm"
 )
 
@@ -84,7 +97,7 @@ func main() {
 // usage is the short usage message printed on any usage error, and also
 // documents the -emit-llvm flag (see the package doc comment for the full
 // exit-code writeup).
-const usage = "usage: llvmc [-emit-llvm] <file.llx>"
+const usage = "usage: llvmc [-emit-llvm] <file.llx | directory>"
 
 // run is main's testable body: it never calls os.Exit itself, so a test can
 // invoke it directly and just inspect the returned code plus whatever was
@@ -112,56 +125,70 @@ func run(args []string, stderr io.Writer) int {
 	}
 
 	path := fs.Arg(0)
-	src, err := os.ReadFile(path)
+	files, err := loader.Load(afero.NewOsFs(), path)
 	if err != nil {
-		fmt.Fprintf(stderr, "llvmc: cannot read %s: %v\n", path, err)
+		fmt.Fprintf(stderr, "llvmc: %v\n", err)
 		return exitUsage
 	}
 
-	return compileAndRun(path, string(src), stderr, *emitLLVM)
+	return compileAndRunPackage(files, stderr, *emitLLVM)
 }
 
-// compileAndRun drives the full pipeline for one source file: lexer.NewFile
-// -> parser.ParseFile -> sema.Resolve -> sema.Check -> codegen.Generate,
-// stopping at the first stage that reports an error-severity diagnostic (any
-// diagnostics from a stage - warnings included - are printed even when that
-// stage doesn't itself report an error, so nothing collected along the way
-// is silently dropped). On full success, it verifies the generated module
-// and then either JIT-executes its `main` (the default), or - when emitLLVM
-// is set (the `-emit-llvm` flag) - prints the module's LLVM IR text to
-// stdout and returns 0 without ever executing anything.
+// compileAndRun drives the full pipeline for a single source file - the
+// one-file case of compileAndRunPackage, kept as its own entry point purely
+// so this package's existing in-process tests (which build a source string
+// directly, with no need for a real file/directory on disk) don't have to
+// go through the loader package at all.
 func compileAndRun(name, src string, stderr io.Writer, emitLLVM bool) int {
-	file := lexer.NewFile(name, src)
+	return compileAndRunPackage([]loader.SourceFile{{Name: name, Src: src}}, stderr, emitLLVM)
+}
 
-	tree, pdiags := parser.ParseFile(file)
-	if pdiags.Len() > 0 {
-		printDiags(stderr, file, pdiags)
+// compileAndRunPackage drives the full pipeline for every file in files, as
+// one package (see LANGUAGE.md's "Multi-file packages" section):
+// lexer.NewFile -> parser.ParseFile per file, then sema.ResolvePackage ->
+// sema.CheckPackage -> codegen.GeneratePackage across all of them at once,
+// stopping at the first stage that reports an error-severity diagnostic in
+// any file (any diagnostics from a stage - warnings included - are printed
+// even when that stage doesn't itself report an error, so nothing collected
+// along the way is silently dropped). On full success, it verifies the
+// generated module and then either JIT-executes its `main` (the default), or
+// - when emitLLVM is set (the `-emit-llvm` flag) - prints the module's LLVM
+// IR text to stdout and returns 0 without ever executing anything.
+func compileAndRunPackage(files []loader.SourceFile, stderr io.Writer, emitLLVM bool) int {
+	lexFiles := make([]*lexer.File, len(files))
+	trees := make([]*ast.Tree, len(files))
+	anyParseErrors := false
+
+	for i, f := range files {
+		lexFiles[i] = lexer.NewFile(f.Name, f.Src)
+		tree, pdiags := parser.ParseFile(lexFiles[i])
+		if pdiags.Len() > 0 {
+			printDiags(stderr, lexFiles[i], pdiags)
+		}
+		if pdiags.HasErrors() {
+			anyParseErrors = true
+		}
+		trees[i] = tree
 	}
-	if pdiags.HasErrors() {
+	if anyParseErrors {
 		return exitCompile
 	}
 
-	info, rdiags := sema.Resolve(tree)
-	if rdiags.Len() > 0 {
-		printDiags(stderr, file, rdiags)
-	}
-	if rdiags.HasErrors() {
+	infos, rdiags := sema.ResolvePackage(trees)
+	if printAnyDiags(stderr, trees, lexFiles, rdiags) {
 		return exitCompile
 	}
 
-	cdiags := sema.Check(tree, info)
-	if cdiags.Len() > 0 {
-		printDiags(stderr, file, cdiags)
-	}
-	if cdiags.HasErrors() {
+	cdiags := sema.CheckPackage(trees, infos)
+	if printAnyDiags(stderr, trees, lexFiles, cdiags) {
 		return exitCompile
 	}
 
-	mod, gdiags := codegen.Generate(tree, info, name)
-	if gdiags.Len() > 0 {
-		printDiags(stderr, file, gdiags)
-	}
-	if gdiags.HasErrors() {
+	// moduleName matches this driver's own single-file convention of using
+	// the compiled path as the module's name - the package's first file is
+	// as reasonable a choice as any for a multi-file package.
+	mod, gdiags := codegen.GeneratePackage(trees, infos, files[0].Name)
+	if printAnyDiags(stderr, trees, lexFiles, gdiags) {
 		mod.Dispose()
 		return exitCompile
 	}
@@ -191,6 +218,27 @@ func compileAndRun(name, src string, stderr io.Writer, emitLLVM bool) int {
 		return exitCompile
 	}
 	return code
+}
+
+// printAnyDiags prints every file's diagnostics (see printDiags) from a
+// per-tree diagnostic map - trees/lexFiles are aligned by index, giving each
+// tree's diagnostics the one *lexer.File that can actually decode their
+// Pos values into a line/column (see diag.Bag's own doc comment: a
+// diagnostic's position is only meaningful relative to the file it was
+// reported against). Reports whether any file had at least one error-
+// severity diagnostic, so the caller knows whether to stop the pipeline.
+func printAnyDiags(w io.Writer, trees []*ast.Tree, lexFiles []*lexer.File, diags map[*ast.Tree]*diag.Bag) bool {
+	hasErrors := false
+	for i, tree := range trees {
+		b := diags[tree]
+		if b.Len() > 0 {
+			printDiags(w, lexFiles[i], b)
+		}
+		if b.HasErrors() {
+			hasErrors = true
+		}
+	}
+	return hasErrors
 }
 
 // printDiags renders every diagnostic in b (sorted by source position) via
