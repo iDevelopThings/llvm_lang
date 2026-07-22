@@ -179,7 +179,10 @@ func (g *Generator) pushDestructorEntry(sym *sema.Symbol, t sema.Type) {
 	if t.Kind != sema.TypeStruct || t.Struct == nil || t.Struct.Destructor == nil {
 		return
 	}
-	g.destructors = append(g.destructors, destructorEntry{sym: sym, info: t.Struct})
+	g.destructors = append(g.destructors, destructorEntry{
+		sym:  sym,
+		info: t.Struct,
+	})
 }
 
 // declareConstructorSignature declares ctor's (a ConstructorDecl's) LLVM

@@ -307,3 +307,113 @@ func run() int {
 		t.Errorf("run() = %d, want 1 (the parameter's own destructor must fire once consume returns)", got)
 	}
 }
+
+// TestForLoopInitDeclaredDestructorFiresAtLoopExit is the regression test for
+// the bug fixed alongside this test: a for-loop's init clause (`for r :=
+// Resource(1); ...`) declares r in a scope that closes the moment the loop
+// itself exits (see sema/resolve.go's own doc comment on this exact `for`
+// scoping rule) - r's destructor must fire right there, at the loop's own
+// exit, not get deferred all the way out to whatever statement follows the
+// `for` in its enclosing block. Before the fix, genForStmt captured its
+// destructor base *after* generating the init statement, so nothing ever
+// unwound r's own entry back down at the loop's real exit point - it just
+// sat on the flat function-scoped stack until `d`/`print(200)` had already
+// run, producing the wrong order (100, 100, 200, 9, 3) instead of the
+// correct one asserted here.
+func TestForLoopInitDeclaredDestructorFiresAtLoopExit(t *testing.T) {
+	jm := compileAndJIT(t, `
+struct Resource {
+	id int
+	constructor(v int) {
+		this.id = v
+	}
+	destructor() {
+		print(this.id)
+	}
+}
+func main() {
+	for r := Resource(1); r.id < 3; r.id = r.id + 1 {
+		print(100)
+	}
+	d := Resource(9)
+	print(200)
+}
+`)
+	out := captureStdout(t, func() {
+		jm.runInt32(t, "main")
+	})
+	want := "100\n100\n3\n200\n9\n"
+	if out != want {
+		t.Fatalf("captured stdout = %q, want %q (r must destruct right at the loop's own exit, before d/print(200))", out, want)
+	}
+}
+
+// TestForLoopInitDeclaredDestructorFiresOnBreak covers the same init-clause
+// scoping rule via the loop's other real exit path - a `break` from inside
+// the body, rather than the condition going false - confirming the fix
+// covers both: endBB is the single unwind point common to both a natural
+// condition-false fall-through and a break (break already branches to
+// endBB), so both should behave identically.
+func TestForLoopInitDeclaredDestructorFiresOnBreak(t *testing.T) {
+	jm := compileAndJIT(t, `
+struct Resource {
+	id int
+	constructor(v int) {
+		this.id = v
+	}
+	destructor() {
+		print(this.id)
+	}
+}
+func main() {
+	for r := Resource(1); r.id < 100; r.id = r.id + 1 {
+		if r.id == 2 {
+			break
+		}
+	}
+	print(200)
+}
+`)
+	out := captureStdout(t, func() {
+		jm.runInt32(t, "main")
+	})
+	want := "2\n200\n"
+	if out != want {
+		t.Fatalf("captured stdout = %q, want %q (r must destruct exactly once, at the break's landing point, before print(200))", out, want)
+	}
+}
+
+// TestForLoopInitDeclaredContinueDoesNotDestruct proves `continue` leaves the
+// init-clause local completely alone: it never leaves the loop's own scope
+// at all, so r must survive across iterations (never re-constructed, its
+// mutated id carried forward) and destruct exactly once, at the loop's real
+// exit, with its final value - not once per `continue`.
+func TestForLoopInitDeclaredContinueDoesNotDestruct(t *testing.T) {
+	jm := compileAndJIT(t, `
+struct Resource {
+	id int
+	constructor(v int) {
+		this.id = v
+	}
+	destructor() {
+		print(this.id)
+	}
+}
+func main() {
+	for r := Resource(0); r.id < 3; r.id = r.id + 1 {
+		if r.id == 1 {
+			continue
+		}
+		print(r.id)
+	}
+	print(200)
+}
+`)
+	out := captureStdout(t, func() {
+		jm.runInt32(t, "main")
+	})
+	want := "0\n2\n3\n200\n"
+	if out != want {
+		t.Fatalf("captured stdout = %q, want %q (continue must not destruct r; it survives across iterations and destructs once, at the end, with its final value)", out, want)
+	}
+}

@@ -462,12 +462,28 @@ func (g *Generator) genIfStmt(n ast.NodeIndex) bool {
 // break is exactly the kind of full flow analysis this project's
 // type-checking phase already deferred (see AGENTS.md/BLOCKERS.md), and
 // isn't reattempted here.
+//
+// preInitBase is captured before generating initNode, not after: init's own
+// declared local (a non-copyable `for r := Resource(1); ...; ...`, say) is
+// visible to the condition/post/body but scoped to nowhere past the loop's
+// own exit (see sema/resolve.go's doc comment on this exact `for` scoping
+// rule), so it must destruct right there, at endBB - loopCtx's own
+// destructorBase (captured after init, once the builder is at bodyBB) is
+// deliberately a separate, later snapshot: that one is break/continue's
+// target and must exclude init's own entry, since a `continue` re-enters the
+// loop without leaving its scope at all (init's local legitimately survives
+// across iterations), and a `break` already reaches endBB via the branch
+// below, where this function's own unwindDestructorsTo(preInitBase) call
+// runs anyway. Only once, right here, after the loop has structurally
+// finished (natural condition-false exit or a break landing at endBB) does
+// init's own local actually get destructed.
 func (g *Generator) genForStmt(n ast.NodeIndex) bool {
 	initNode := g.tree.Child(n, 0)
 	condNode := g.tree.Child(n, 1)
 	postNode := g.tree.Child(n, 2)
 	bodyNode := g.tree.Child(n, 3)
 
+	preInitBase := len(g.destructors)
 	if initNode != ast.InvalidNode {
 		g.genStmt(initNode)
 	}
@@ -504,5 +520,6 @@ func (g *Generator) genForStmt(n ast.NodeIndex) bool {
 	g.builder.CreateBr(condBB)
 
 	g.builder.SetInsertPointAtEnd(endBB)
+	g.unwindDestructorsTo(preInitBase)
 	return false
 }
