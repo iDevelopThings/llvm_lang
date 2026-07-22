@@ -60,7 +60,7 @@ for {
 
 Go-style prefix type syntax: `[N]T` (fixed-size) and `[]T` (dynamic/slice).
 
-Fixed-size arrays are implemented now - a plain LLVM array type, no runtime needed. Dynamic slices are parsed (so the grammar doesn't need to change later) but rejected at a later stage for now - they need heap allocation/an allocator, which is an investigation for after the LLVM lowering stage exists.
+Fixed-size arrays are a plain LLVM array type, no runtime needed:
 
 ```go
 var a [5]int
@@ -68,6 +68,77 @@ a[0] = 1
 
 b := [3]int{1, 2, 3}
 ```
+
+### Dynamic arrays (slices)
+
+`[]T` is a real, working type now - a growable, heap-backed sequence, built
+on top of the arena allocator (see `CODEGEN.md`'s "The arena allocator" and
+"Dynamic arrays" sections). Three predeclared builtins - `make`, `append`,
+and `len` - are how a program actually creates and grows one; there's no
+slice literal-with-no-elements shorthand or any other syntax for it.
+
+- **`make([]T, n)`** allocates a fresh, zero-filled backing buffer of length
+  `n` (and capacity `n`, since none was given). **`make([]T, n, cap)`**
+  allocates capacity `cap` up front instead, with length still `n` - room to
+  `append` into without an immediate reallocation. `n`/`cap` are ordinary
+  runtime `int` expressions, not required to be a compile-time constant the
+  way `[N]T`'s own `N` is (see "Array sizes" below) - that's the entire
+  point of "dynamic". `cap < n` (when both are given) is rejected - as a
+  runtime trap, the same hard-abort mechanism an out-of-range index already
+  uses (see "Array bounds checking" below), not a compile-time diagnostic:
+  since `n`/`cap` are arbitrary runtime values, there's no way to reject a
+  bad relationship between them until the program actually runs.
+
+  ```go
+  a := make([]int, 3)       // len 3, cap 3, all zero
+  b := make([]int, 1, 4)    // len 1, cap 4
+  ```
+
+- **`append(slice, elem)`** appends exactly one element per call - **not**
+  Go's full variadic `append(s, e1, e2, ...)` form. This is a deliberate,
+  natural-to-extend-later restriction (see `DECISIONS.md`), not an
+  oversight: this language has no variadic functions anywhere yet, and
+  inventing that machinery just for `append` was out of scope for this
+  round. Appending several elements is just several calls:
+
+  ```go
+  s := make([]int, 0)
+  s = append(s, 1)
+  s = append(s, 2)
+  ```
+
+  Growth matches Go's own real semantics, aliasing quirk included: if the
+  slice's `len < cap`, the new element is written directly into the
+  existing backing buffer and the result reuses the exact same backing
+  pointer - mutating in place, so another variable still holding the
+  pre-append slice will see the write too, exactly like Go. Only when
+  `len == cap` (capacity exhausted, including a zero-capacity slice) does
+  `append` allocate a new, larger buffer (doubling - see `DECISIONS.md`),
+  copy the existing elements over, and return a slice pointing at the new
+  buffer instead - the old one is simply abandoned (this project's arena
+  never frees anything - see `CODEGEN.md`).
+
+- **`len(x)`** works on a dynamic array (its runtime length), a fixed-size
+  array (its compile-time-known size), or a `string` (its runtime length) -
+  matching Go's own `len` working across all three. Any other type (a
+  struct, a numeric type, `bool`) is rejected.
+
+**Slice composite literals** (`[]T{1, 2, 3}`, as opposed to only `[N]T{...}`
+for a fixed-size array) also work, for consistency - sugar that allocates a
+properly sized backing buffer (via the same arena path `make` itself uses)
+and fills it positionally, with the resulting slice's `len` and `cap` both
+equal to however many elements the literal lists. Same restriction as a
+fixed-size array literal: positional elements only, no keyed form.
+
+```go
+s := []int{1, 2, 3}   // len 3, cap 3
+```
+
+**Slices are not comparable.** `==`/`!=` between two dynamic-array-typed
+operands is rejected outright, mirroring Go's own restriction exactly (Go
+only allows comparing a slice against `nil`, a concept this language doesn't
+have yet) - there's no slice equality semantics invented here that Go itself
+doesn't have.
 
 ## Structs
 

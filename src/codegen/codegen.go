@@ -138,6 +138,12 @@ type Generator struct {
 	// (expr.go), the one site that actually constructs one.
 	funcValTy llvm.Type
 
+	// dynArrTy is a dynamic array's (`[]T`) LLVM representation: the literal
+	// struct {ptr, i32, i32} = {dataPtr, len, cap} - see CODEGEN.md's
+	// "Dynamic arrays" section and setupTypes for why one shared struct type
+	// serves every element type.
+	dynArrTy llvm.Type
+
 	structLayouts map[*sema.StructInfo]*structLayout
 	globals       map[*sema.Symbol]llvm.Value
 
@@ -195,6 +201,8 @@ type Generator struct {
 	memcpyFn   llvm.Value
 	memcmpType llvm.Type
 	memcmpFn   llvm.Value
+	memsetType llvm.Type
+	memsetFn   llvm.Value
 	trapType   llvm.Type
 	trapFn     llvm.Value
 	fmtInt     llvm.Value

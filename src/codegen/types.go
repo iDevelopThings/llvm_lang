@@ -24,6 +24,16 @@ import (
 //     struct {ptr, ptr} - a "fat pointer" of {fnPtr, ctxPtr} - see
 //     CODEGEN.md's "First-class functions" section and genFuncValue
 //     (expr.go) for the one construction site that fills it in.
+//   - a dynamic array (sema.Type{Kind: TypeArray, Dynamic: true}) is the
+//     literal (unnamed) struct {ptr, i32, i32} - a data pointer, current
+//     length, and allocated capacity - following the exact same convention
+//     `string`'s {ptr, i32} already uses, just with a third field. One
+//     shared LLVM struct type serves every element type: g.ptrTy is already
+//     an opaque `ptr` (see its own field comment) regardless of what it
+//     points to, so the element type only ever matters at the point a GEP
+//     computes an address into the backing buffer (genMakeCall/genAppendCall/
+//     genAddr's IndexExpr case, expr.go), never in the struct's own shape.
+//     See CODEGEN.md's "Dynamic arrays" section.
 func (g *Generator) setupTypes() {
 	g.i8Ty = g.ctx.Int8Type()
 	g.i16Ty = g.ctx.Int16Type()
@@ -36,6 +46,7 @@ func (g *Generator) setupTypes() {
 	g.voidTy = g.ctx.VoidType()
 	g.stringTy = g.ctx.StructType([]llvm.Type{g.ptrTy, g.i32Ty}, false)
 	g.funcValTy = g.ctx.StructType([]llvm.Type{g.ptrTy, g.ptrTy}, false)
+	g.dynArrTy = g.ctx.StructType([]llvm.Type{g.ptrTy, g.i32Ty, g.i32Ty}, false)
 }
 
 // llvmType maps a sema.Type (the output of type-checking) to the LLVM type
@@ -68,6 +79,9 @@ func (g *Generator) llvmType(t sema.Type) llvm.Type {
 	case sema.TypeStruct:
 		return g.structLayouts[t.Struct].llvmType
 	case sema.TypeArray:
+		if t.Dynamic {
+			return g.dynArrTy
+		}
 		return llvm.ArrayType(g.llvmType(*t.Elem), int(t.Size))
 	case sema.TypeFunc:
 		return g.funcValTy

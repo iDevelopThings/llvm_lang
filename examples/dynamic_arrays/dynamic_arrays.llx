@@ -1,0 +1,45 @@
+// dynamic_arrays.llx - demonstrates make, append (both within- and
+// past-capacity), len, indexing, and a slice composite literal (see
+// LANGUAGE.md's "Dynamic arrays" section).
+//
+// Run with:
+//   .\llvmc.exe examples\dynamic_arrays\dynamic_arrays.llx
+//   echo $LASTEXITCODE   # (PowerShell) -> 10
+
+func main() int {
+    // make([]T, n) - a fresh, zero-filled backing buffer of length n (== cap
+    // when cap is omitted).
+    s := make([]int, 3)
+    s[0] = 1
+    s[1] = 2
+    s[2] = 3
+    print(s)             // [1 2 3]
+    print(len(s))        // 3
+
+    // make([]T, n, cap) - explicit capacity, room to grow without a
+    // reallocation on the very next append: len(1) < cap(2), so this first
+    // append stays within capacity - same backing buffer, mutated in place.
+    grown := make([]int, 1, 2)
+    grown[0] = 100
+    grown = append(grown, 200)
+    print(grown)          // [100 200]
+    print(len(grown))     // 2
+
+    // A second append: now len == cap (2 == 2), so this one really does
+    // grow into a fresh, larger buffer (newcap = max(1, cap*2) = 4).
+    grown = append(grown, 300)
+    print(grown)          // [100 200 300]
+    print(len(grown))     // 3
+
+    // A slice composite literal - sugar for make + positional fill, whose
+    // own len is immediately == cap.
+    lit := []int{7, 8, 9}
+    print(lit)            // [7 8 9]
+
+    // append past a slice literal's own len==cap - grows the same way.
+    lit = append(lit, 10)
+    print(lit)            // [7 8 9 10]
+    print(len(lit))       // 4
+
+    return len(s) + len(grown) + len(lit)   // 3 + 3 + 4 = 10
+}

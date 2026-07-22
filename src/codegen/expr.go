@@ -47,10 +47,27 @@ func (g *Generator) genAddr(n ast.NodeIndex) llvm.Value {
 	case enums.NodeKinds.IndexExpr:
 		targetNode := g.tree.Child(n, 0)
 		indexNode := g.tree.Child(n, 1)
-		base := g.genAddr(targetNode)
 		idx := g.genExpr(indexNode)
 		targetType := g.info.Types[targetNode]
-		g.genBoundsCheck(idx, targetType.Size)
+
+		if targetType.Dynamic {
+			// A dynamic array's backing storage lives on the arena heap, not
+			// in the slice variable's own storage - so, unlike a fixed-size
+			// array, there's no need for this expression's own address at
+			// all (genAddr(targetNode)): the slice's {ptr, len, cap} value
+			// already carries everything needed to compute an element's
+			// address, for both a read (genLoad) and a write (genAssignStmt)
+			// alike.
+			sliceVal := g.genExpr(targetNode)
+			ptr := g.builder.CreateExtractValue(sliceVal, 0, "")
+			length := g.builder.CreateExtractValue(sliceVal, 1, "")
+			g.genBoundsCheck(idx, length)
+			elemLLType := g.llvmType(*targetType.Elem)
+			return g.builder.CreateInBoundsGEP(elemLLType, ptr, []llvm.Value{idx}, "")
+		}
+
+		base := g.genAddr(targetNode)
+		g.genBoundsCheck(idx, llvm.ConstInt(g.i32Ty, uint64(targetType.Size), true))
 		arrType := g.llvmType(targetType)
 		zero := llvm.ConstInt(g.i32Ty, 0, false)
 		return g.builder.CreateInBoundsGEP(arrType, base, []llvm.Value{zero, idx}, "")
@@ -108,24 +125,30 @@ func (g *Generator) genFuncValue(sym *sema.Symbol) llvm.Value {
 }
 
 // genBoundsCheck emits a real runtime check that idx (an i32) satisfies
-// `0 <= idx < size` for a fixed-size array of that size, trapping
-// immediately (llvm.trap followed by unreachable - see setupRuntime,
-// runtime.go) rather than falling through to an out-of-bounds GEP, which
-// would otherwise be silent undefined behavior - a read/write through
-// arbitrary memory. See AGENTS.md's "Array bounds checking" section.
+// `0 <= idx < size`, trapping immediately (llvm.trap followed by
+// unreachable - see setupRuntime, runtime.go) rather than falling through to
+// an out-of-bounds GEP, which would otherwise be silent undefined behavior -
+// a read/write through arbitrary memory. See AGENTS.md's "Array bounds
+// checking" section.
+//
+// size is an arbitrary already-computed i32 llvm.Value, not a compile-time
+// constant - a fixed-size array's caller (genAddr's IndexExpr case) passes a
+// plain ConstInt built from its own compile-time-known Size, exactly as
+// before; a dynamic array's caller passes its slice value's actual runtime
+// len field instead (see LANGUAGE.md's "Dynamic arrays" section) - this
+// function itself needs no change at all to serve both, since an LLVM
+// ICmp/CondBr already works identically over a constant or a runtime value.
 //
 // Structurally the same CreateCondBr/AddBasicBlock shape genIfStmt/
 // genForStmt/genShortCircuit already use elsewhere in this package: a
 // condition, a taken ("trap") block, and a not-taken ("continue") block.
 // Leaves the builder positioned at the end of the continue block, so a
-// caller (genAddr's IndexExpr case) simply keeps emitting the actual
-// GEP/load/store right after this call, exactly as if no check had run at
-// all.
-func (g *Generator) genBoundsCheck(idx llvm.Value, size int64) {
+// caller simply keeps emitting the actual GEP/load/store right after this
+// call, exactly as if no check had run at all.
+func (g *Generator) genBoundsCheck(idx, size llvm.Value) {
 	zero := llvm.ConstInt(g.i32Ty, 0, true)
-	sizeConst := llvm.ConstInt(g.i32Ty, uint64(size), true)
 	geZero := g.builder.CreateICmp(llvm.IntSGE, idx, zero, "")
-	ltSize := g.builder.CreateICmp(llvm.IntSLT, idx, sizeConst, "")
+	ltSize := g.builder.CreateICmp(llvm.IntSLT, idx, size, "")
 	inBounds := g.builder.CreateAnd(geZero, ltSize, "")
 
 	trapBB := g.ctx.AddBasicBlock(g.curFn, "idx.trap")
@@ -496,6 +519,15 @@ func (g *Generator) genCallExpr(n ast.NodeIndex) llvm.Value {
 		g.genPrintCall(argNodes[0])
 		return llvm.Value{}
 	}
+	if g.isBuiltinCall(calleeNode, "make") {
+		return g.genMakeCall(n, argNodes)
+	}
+	if g.isBuiltinCall(calleeNode, "append") {
+		return g.genAppendCall(argNodes)
+	}
+	if g.isBuiltinCall(calleeNode, "len") {
+		return g.genLenCall(argNodes[0])
+	}
 	if g.isConstructorCall(calleeNode) {
 		return g.genConstructorCall(calleeNode, argNodes)
 	}
@@ -738,6 +770,10 @@ func (g *Generator) genCompositeLitInto(dst llvm.Value, n ast.NodeIndex) {
 		}
 
 	case sema.TypeArray:
+		if t.Dynamic {
+			g.genDynArrayLitInto(dst, t, elems)
+			return
+		}
 		arrType := g.llvmType(t)
 		zero := llvm.ConstInt(g.i32Ty, 0, false)
 		for i, e := range elems {
@@ -746,4 +782,35 @@ func (g *Generator) genCompositeLitInto(dst llvm.Value, n ast.NodeIndex) {
 			g.storeValueInto(addr, e)
 		}
 	}
+}
+
+// genDynArrayLitInto lowers a slice composite literal (`[]T{1, 2, 3}` - see
+// LANGUAGE.md's "Dynamic arrays" section): sugar that allocates a properly-
+// sized backing buffer via the same arena path make itself uses
+// (genArenaAllocElems), sized to the literal's own element count (known at
+// codegen time - unlike make's own n/cap, a composite literal's element
+// count is always fixed by how many elements it lexically lists), and fills
+// it positionally - mirroring the fixed-size array literal's own element-by-
+// element lowering just above, but writing into a fresh heap allocation
+// instead of dst's own inline storage, then storing the resulting
+// {ptr, count, count} value into dst (a pointer to the dynArrTy struct)
+// field-by-field via CreateStructGEP, the same way a struct literal's own
+// fields are filled.
+func (g *Generator) genDynArrayLitInto(dst llvm.Value, t sema.Type, elems []ast.NodeIndex) {
+	elemLLType := g.llvmType(*t.Elem)
+	count := llvm.ConstInt(g.i32Ty, uint64(len(elems)), false)
+
+	buf, _ := g.genArenaAllocElems(elemLLType, count)
+	for i, e := range elems {
+		idx := llvm.ConstInt(g.i32Ty, uint64(i), false)
+		addr := g.builder.CreateInBoundsGEP(elemLLType, buf, []llvm.Value{idx}, "")
+		g.storeValueInto(addr, e)
+	}
+
+	ptrAddr := g.builder.CreateStructGEP(g.dynArrTy, dst, 0, "")
+	g.builder.CreateStore(buf, ptrAddr)
+	lenAddr := g.builder.CreateStructGEP(g.dynArrTy, dst, 1, "")
+	g.builder.CreateStore(count, lenAddr)
+	capAddr := g.builder.CreateStructGEP(g.dynArrTy, dst, 2, "")
+	g.builder.CreateStore(count, capAddr)
 }

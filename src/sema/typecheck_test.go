@@ -447,8 +447,85 @@ func TestIndexAssignOk(t *testing.T) {
 
 // --- arrays ---
 
-func TestDynamicArrayIsRejected(t *testing.T) {
-	expectCheckErrors(t, "var a []int\n", 1)
+func TestDynamicArrayTypeChecksFine(t *testing.T) {
+	checkSrc(t, "var a []int\n")
+}
+
+func TestDynamicArrayAsParamAndReturnType(t *testing.T) {
+	checkSrc(t, "func f(a []int) []int {\n\treturn a\n}\n")
+}
+
+func TestDynamicArrayAsStructField(t *testing.T) {
+	checkSrc(t, "struct S {\n\ta []int\n}\n")
+}
+
+// --- make/append/len ---
+
+func TestMakeTwoArgOk(t *testing.T) {
+	checkSrc(t, "func f() {\n\tvar a []int = make([]int, 3)\n}\n")
+}
+
+func TestMakeThreeArgOk(t *testing.T) {
+	checkSrc(t, "func f() {\n\tvar a []int = make([]int, 3, 5)\n}\n")
+}
+
+func TestMakeWrongArgCount(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\tvar a []int = make([]int)\n}\n", 1)
+	expectCheckErrors(t, "func f() {\n\tvar a []int = make([]int, 1, 2, 3)\n}\n", 1)
+}
+
+func TestMakeRequiresDynamicArrayType(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\tvar a int = make(int, 3)\n}\n", 1)
+}
+
+func TestMakeSizeMustBeInt(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\tvar a []int = make([]int, \"x\")\n}\n", 1)
+}
+
+func TestMakeSizeNeedNotBeConstant(t *testing.T) {
+	// Unlike [N]T's N, make's n/cap are ordinary runtime expressions - see
+	// LANGUAGE.md's "Dynamic arrays" section.
+	checkSrc(t, "func f(n int) {\n\tvar a []int = make([]int, n)\n}\n")
+}
+
+func TestAppendOk(t *testing.T) {
+	checkSrc(t, "func f() {\n\ta := make([]int, 0)\n\ta = append(a, 1)\n}\n")
+}
+
+func TestAppendRequiresDynamicArray(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\tvar a [3]int = [3]int{1, 2, 3}\n\ta = append(a, 4)\n}\n", 1)
+}
+
+func TestAppendElementTypeMismatch(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\ta := make([]int, 0)\n\ta = append(a, \"x\")\n}\n", 1)
+}
+
+func TestAppendWrongArgCount(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\ta := make([]int, 0)\n\ta = append(a)\n}\n", 1)
+}
+
+func TestLenOnDynamicArray(t *testing.T) {
+	checkSrc(t, "func f() {\n\ta := make([]int, 3)\n\tvar n int = len(a)\n}\n")
+}
+
+func TestLenOnFixedArray(t *testing.T) {
+	checkSrc(t, "func f() {\n\ta := [3]int{1, 2, 3}\n\tvar n int = len(a)\n}\n")
+}
+
+func TestLenOnString(t *testing.T) {
+	checkSrc(t, "func f() {\n\tvar n int = len(\"hello\")\n}\n")
+}
+
+func TestLenOnUnsupportedType(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\tvar n int = len(5)\n}\n", 1)
+}
+
+func TestSliceCompositeLitOk(t *testing.T) {
+	checkSrc(t, "func f() {\n\tvar a []int = []int{1, 2, 3}\n}\n")
+}
+
+func TestSliceEqualityRejected(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\ta := make([]int, 1)\n\tb := make([]int, 1)\n\teq := a == b\n}\n", 1)
 }
 
 func TestArraySizeMustBeConstantLiteral(t *testing.T) {

@@ -150,6 +150,112 @@ memory-management strategy (actual scoped frees, refcounting, a real GC) is
 still an open, deliberately-deferred question for the user to decide - this
 arena is groundwork for that future decision, not an attempt to answer it.
 
+## Dynamic arrays (`[]T`)
+
+See `LANGUAGE.md`'s "Dynamic arrays" section for the language-level feature
+(`make`/`append`/`len`, single-element `append`, no slice equality, slice
+composite literals). This is the concrete "future heap-needing feature" the
+arena allocator (see below) was always meant to eventually support.
+
+**Representation.** `sema.Type{Kind: TypeArray, Dynamic: true}` maps to the
+literal (unnamed) LLVM struct `{ ptr, i32, i32 }` = `{ dataPtr, len, cap }`
+(`g.dynArrTy`, `setupTypes`, `src/codegen/types.go`) - the exact same
+"pointer + metadata, passed like any other small aggregate value" convention
+`string`'s `{ ptr, i32 }` already uses (see "`string` representation"
+below), just with a third field. `len`/`cap` are `i32`, matching this
+language's own `int` (see "`int` is 32-bit" above) - not `i64`, for the same
+consistency reason. One shared LLVM struct type serves *every* element
+type `T`: `g.ptrTy` is already an opaque `ptr` regardless of what it points
+to (see its own field comment, `codegen.go`), so a dynamic array's own
+element type only ever matters at the point some code computes an address
+into the backing buffer via a real, explicitly-typed GEP (`genMakeCall`/
+`genAppendCall`/`genDynArrayLitInto`, `genAddr`'s `IndexExpr` case) - never
+in the struct's own shape.
+
+**`make([]T, n)` / `make([]T, n, cap)`** (`genMakeCall`, `runtime.go`):
+allocates a fresh buffer sized for `cap` elements (`n`, when `cap` is
+omitted) via the arena allocator (`genArenaAllocElems`, a thin wrapper around
+`genArenaAlloc` that also returns the element's `llvm.SizeOf` - the classic
+null-pointer-GEP constant trick, resolved by LLVM itself with no target-data-
+layout query of this package's own), `memset`s the whole allocated region to
+zero (a real libc extern, declared in `setupRuntime` alongside `malloc`/
+`memcpy`/`memcmp` - "zero the entire allocation" is the simplest, safest
+choice: it avoids ever reading uninitialized arena memory through an element
+between `len` and `cap` a later `append` hasn't written yet), and returns the
+resulting `{ ptr, n, cap }` value. `n`/`cap` are ordinary already-evaluated
+runtime `llvm.Value`s, not compile-time constants (unlike `[N]T`'s own `N`) -
+so `cap < n` (when `cap` is given) is checked with a real runtime trap
+(`genMakeCapCheck`), the exact same `llvm.trap`+`unreachable` mechanism
+`genBoundsCheck` already uses for an out-of-range index (see "Array bounds
+checking" below): there's no way to reject a bad runtime relationship
+between two arbitrary expressions at compile time, so this is a hard process
+abort, same failure mode, not a `diag.Bag` entry.
+
+**`append(slice, elem)`** (`genAppendCall`, `runtime.go`): a real
+`CreateCondBr`/multi-basic-block lowering, not a single unconditional path -
+`len < cap` branches to a "fit" block (nothing to allocate; the existing
+pointer/capacity flow through unchanged) or a "grow" block (`newcap =
+max(1, cap*2)` - built via a `select` on `cap*2 < 1`, which is only true
+when `cap` itself is `0`, exactly the "cap==0" edge case landing on `1` -
+see `DECISIONS.md` - then a fresh arena allocation of that size, plus a
+`memcpy` of the existing `len` elements into it), and a join block reads
+both paths' final pointer/capacity back via `PHI` nodes before writing the
+new element at index `len` (through whichever pointer the `PHI` selected)
+and returning `{ finalPtr, len+1, finalCap }`. This is the one place this
+package's "pointer aliasing" story actually matters at the IR level: the
+"fit" path's `PHI` incoming value is the *original* pointer, so a caller
+still holding an older copy of the pre-append slice value genuinely observes
+the same backing memory being mutated - matching Go's own well-defined (if
+occasionally surprising) semantics exactly, not approximating it.
+
+**`len(x)`** (`genLenCall`, `runtime.go`): a dynamic array reads its runtime
+`len` field (`ExtractValue` index 1, same as a string reads its own length
+field); a fixed-size array returns a plain `ConstInt` built directly from its
+already-known `sema.Type.Size` - no different from any other compile-time
+constant, and in particular the exact same value its own bounds check
+already uses; a string reads its own runtime length field the same way a
+dynamic array does.
+
+**Indexing** (`genAddr`'s `IndexExpr` case, `expr.go`): a dynamic array's
+element address is computed straight from its own `{ ptr, len, cap }`
+value's `ptr`/`len` fields (`genExpr(targetNode)` then two `ExtractValue`s) -
+unlike a fixed-size array, there's no need for the *slice variable's own*
+address at all, since the backing storage always lives separately on the
+arena heap; this works identically for both a read (`genLoad`) and a write
+(`genAssignStmt`), since both go through `genAddr` the same way. The bounds
+check itself is the same `genBoundsCheck` a fixed-size array's index already
+used, generalized to take its `size` operand as an arbitrary already-computed
+`llvm.Value` rather than only a compile-time `int64` constant (see "Array
+bounds checking" below) - a dynamic array's caller passes its slice's actual
+runtime `len` field; a fixed-size array's caller passes a plain `ConstInt`
+built from its own compile-time-known `Size`, exactly as before.
+
+**Slice composite literals** (`[]T{1, 2, 3}`, `genDynArrayLitInto`,
+`expr.go`): unlike `make`'s own `n`/`cap` (arbitrary runtime expressions),
+a literal's element count is always known at codegen time - however many
+elements it lexically lists - so this allocates a buffer of exactly that
+size via the same `genArenaAllocElems` primitive `make`/`append`'s growth
+path both use, fills it positionally (mirroring the fixed-size array
+literal's own element-by-element lowering just above it, but writing into a
+fresh heap allocation instead of the destination's own inline storage), and
+then stores the resulting `{ ptr, count, count }` fields directly into the
+destination (a pointer to `g.dynArrTy`) via three `CreateStructGEP`s - the
+same field-by-field fill a struct literal's own destination already uses,
+rather than building a temporary aggregate value and copying it wholesale.
+
+**Printing** (`genPrintDynArrayValue`, `runtime.go`): renders the same
+`[e0 e1 ...]` shape a fixed-size array already does (`genPrintArrayValue`),
+but as a real `CreateCondBr`/`AddBasicBlock` runtime loop over the slice's
+own `len` field - the same control-flow shape `genForStmt`/`genBoundsCheck`
+already use elsewhere in this package - rather than a static unrolled
+sequence of `printf` calls the way a fixed-size array's element count
+(known at codegen time) allows: a dynamic array's element count isn't known
+until the program actually runs, so there's no way to unroll it ahead of
+time. `genPrintArrayValue` branches on `t.Dynamic` right up front to pick
+one or the other - the two are different enough in shape (static unroll vs.
+a real loop with its own basic blocks) that forcing them into one code path
+would only make both harder to read, not simpler.
+
 ## Array bounds checking
 
 Indexing a fixed-size array - both a read (`a[i]`) and a store
@@ -162,7 +268,10 @@ prefix as an intrinsic regardless of how it's declared in the IR) followed
 by `unreachable`, rather than ever proceeding to read/write through an
 out-of-range address. See `genBoundsCheck`, `src/codegen/expr.go` - the same
 `CreateCondBr`/basic-block shape `if`/`for` lowering already uses elsewhere
-in this package.
+in this package. `genBoundsCheck` takes its `size` operand as an arbitrary
+already-computed `llvm.Value`, not only a compile-time constant - a dynamic
+array's index (see "Dynamic arrays" above) passes its slice's actual runtime
+`len` field through the identical check, unchanged.
 
 ```go
 a := [5]int{1, 2, 3, 4, 5}

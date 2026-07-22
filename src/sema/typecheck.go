@@ -726,21 +726,19 @@ func (c *checker) funcTypeFromNode(n ast.NodeIndex) Type {
 	}
 }
 
-// arrayTypeFromNode converts an ArrayType node. A dynamic array (`[]T`,
-// size == InvalidNode) is reported exactly once, right here - the one place
-// every dynamic array type, wherever it appears (a var's type, a param, a
-// field, a composite literal's target type, a return type), passes through -
-// and still returns a fully-formed Type with Dynamic set, per the task: the
-// form must be represented, not just rejected outright, so a caller that
-// only cares about the shape (codegen, once it exists) isn't forced to
-// special-case an invalid Type just to learn "this was a slice".
+// arrayTypeFromNode converts an ArrayType node - a fixed-size `[N]T` or a
+// dynamic `[]T` (size == InvalidNode) - into a Type. This is the one place
+// every array type, wherever it appears (a var's type, a param, a field, a
+// composite literal's target type, a return type, make's own first
+// argument), passes through - see LANGUAGE.md's "Dynamic arrays" section for
+// make/append/len, the real, working feature built on top of this Type
+// shape.
 func (c *checker) arrayTypeFromNode(n ast.NodeIndex) Type {
 	sizeNode := c.tree.Child(n, 0)
 	elemNode := c.tree.Child(n, 1)
 	elem := c.typeFromNode(elemNode)
 
 	if sizeNode == ast.InvalidNode {
-		c.errorAt(n, "dynamic arrays ([]T) are not supported yet - only fixed-size [N]T")
 		return Type{
 			Kind:    TypeArray,
 			Elem:    &elem,
@@ -1318,8 +1316,17 @@ func (c *checker) resolveNumericOperands(lNode, rNode ast.NodeIndex, lt, rt Type
 	}
 }
 
-// checkEqualityOperands types `==`/`!=`.
+// checkEqualityOperands types `==`/`!=`. A dynamic array (slice) is never
+// comparable with either operator - mirroring Go's own restriction exactly
+// (Go only allows a slice to be compared against `nil`, a concept this
+// language doesn't have yet - see LANGUAGE.md's "Dynamic arrays" section) -
+// checked before the general struct/array case below, which would otherwise
+// happily accept two identically-typed slices via Type.Equal.
 func (c *checker) checkEqualityOperands(n, lNode, rNode ast.NodeIndex, lt, rt Type, op string) Type {
+	if (lt.Kind == TypeArray && lt.Dynamic) || (rt.Kind == TypeArray && rt.Dynamic) {
+		c.errorAt(n, "slices are not comparable with %s", op)
+		return invalidType
+	}
 	switch {
 	case lt.Kind == TypeStruct, lt.Kind == TypeArray:
 		if lt.Equal(rt) {
@@ -1559,6 +1566,15 @@ func (c *checker) checkCallExpr(n ast.NodeIndex) Type {
 	if c.isPrintCall(callee) {
 		return c.checkPrintCall(n, args)
 	}
+	if c.isBuiltinCall(callee, "make") {
+		return c.checkMakeCall(n, args)
+	}
+	if c.isBuiltinCall(callee, "append") {
+		return c.checkAppendCall(n, args)
+	}
+	if c.isBuiltinCall(callee, "len") {
+		return c.checkLenCall(n, args)
+	}
 	if t, ok := c.checkConstructorCall(n, callee, args); ok {
 		return t
 	}
@@ -1617,6 +1633,134 @@ func (c *checker) checkPrintCall(n ast.NodeIndex, args []ast.NodeIndex) Type {
 		c.defaultIfUntyped(a, c.checkValueExpr(a))
 	}
 	return voidType
+}
+
+// isBuiltinCall reports whether callee names the predeclared builtin
+// function name (make/append/len - print has its own isPrintCall, unchanged)
+// - see scope.go's universeScope: each of these, like print, is a SymFunc
+// with no real declaration (Decl is InvalidNode), so it can't go through the
+// normal FuncDecl-based signature machinery every user function does.
+func (c *checker) isBuiltinCall(callee ast.NodeIndex, name string) bool {
+	if c.tree.Nodes[callee].Kind != enums.NodeKinds.Ident {
+		return false
+	}
+	sym, ok := c.info.Refs[callee]
+	return ok && sym.Kind == SymFunc && sym.Decl == ast.InvalidNode && sym.Name == name
+}
+
+// checkMakeCall type-checks `make([]T, n)` / `make([]T, n, cap)` - see
+// LANGUAGE.md's "Dynamic arrays" section. Unlike every other call this
+// language has, make's first argument (args[0]) is a type-position node (an
+// ArrayType, built by the parser's own bespoke make grammar - see
+// parser/expr.go's parseMakeArgs), not a value expression, so it goes
+// through typeFromNode rather than checkValueExpr. n and cap are ordinary
+// runtime int expressions - unlike [N]T's N (see constArraySize), neither is
+// required to be a compile-time constant; that's the entire point of
+// "dynamic" (see codegen's genMakeCall for the runtime cap>=n check this
+// implies, since sema can't reject a bad runtime relationship between two
+// arbitrary expressions at compile time).
+func (c *checker) checkMakeCall(n ast.NodeIndex, args []ast.NodeIndex) Type {
+	if len(args) < 2 || len(args) > 3 {
+		c.errorAtNodes(args, n, "make requires 2 or 3 arguments, got %d", len(args))
+		if len(args) > 0 {
+			c.typeFromNode(args[0])
+			for _, a := range args[1:] {
+				c.checkValueExpr(a)
+			}
+		}
+		return invalidType
+	}
+
+	typeNode := args[0]
+	target := c.typeFromNode(typeNode)
+	if target.IsInvalid() {
+		for _, a := range args[1:] {
+			c.checkValueExpr(a)
+		}
+		return invalidType
+	}
+	if target.Kind != TypeArray || !target.Dynamic {
+		c.errorAt(typeNode, "make requires a dynamic array type ([]T), got %s", target)
+		for _, a := range args[1:] {
+			c.checkValueExpr(a)
+		}
+		return invalidType
+	}
+
+	c.checkMakeSizeArg(args[1])
+	if len(args) == 3 {
+		c.checkMakeSizeArg(args[2])
+	}
+	return target
+}
+
+// checkMakeSizeArg type-checks one of make's own n/cap arguments: any
+// integer type, with an untyped constant (a bare literal) defaulting to int
+// exactly like any other value context with no declared type to adapt to
+// (defaultIfUntyped) - there's no int-width restriction on this beyond
+// "integer", matching every other int-typed position in this language.
+func (c *checker) checkMakeSizeArg(node ast.NodeIndex) {
+	t := c.defaultIfUntyped(node, c.checkValueExpr(node))
+	if t.IsInvalid() {
+		return
+	}
+	if t.Kind != TypeI32 {
+		c.errorAt(node, "make argument must be int, got %s", t)
+	}
+}
+
+// checkAppendCall type-checks `append(slice, elem)` - scoped to exactly one
+// element per call this round (see LANGUAGE.md's "Dynamic arrays" section:
+// this language has no variadic functions to build Go's full
+// `append(s, e1, e2, ...)` form on top of; appending several elements is
+// just `s = append(s, a); s = append(s, b)`).
+func (c *checker) checkAppendCall(n ast.NodeIndex, args []ast.NodeIndex) Type {
+	if len(args) != 2 {
+		c.errorAtNodes(args, n, "append requires exactly 2 arguments (a slice and one element), got %d", len(args))
+		for _, a := range args {
+			c.checkValueExpr(a)
+		}
+		return invalidType
+	}
+
+	sliceType := c.checkValueExpr(args[0])
+	if sliceType.IsInvalid() {
+		c.checkValueExpr(args[1])
+		return invalidType
+	}
+	if sliceType.Kind != TypeArray || !sliceType.Dynamic {
+		c.errorAt(args[0], "append requires a dynamic array ([]T), got %s", sliceType)
+		c.checkValueExpr(args[1])
+		return invalidType
+	}
+
+	elemType := c.checkValueExpr(args[1])
+	c.checkAssignable(args[1], *sliceType.Elem, elemType, "append argument 2")
+	return sliceType
+}
+
+// checkLenCall type-checks `len(x)` - a dynamic array's runtime length, a
+// fixed-size array's compile-time-known size, or a string's runtime length
+// (see LANGUAGE.md's "Dynamic arrays" section) - matching Go's own `len`
+// working across all three. Not meaningful for anything else (a struct,
+// numeric type, or bool), rejected with a clear diagnostic.
+func (c *checker) checkLenCall(n ast.NodeIndex, args []ast.NodeIndex) Type {
+	if len(args) != 1 {
+		c.errorAtNodes(args, n, "len takes exactly 1 argument, got %d", len(args))
+		for _, a := range args {
+			c.checkValueExpr(a)
+		}
+		return invalidType
+	}
+	t := c.checkValueExpr(args[0])
+	if t.IsInvalid() {
+		return invalidType
+	}
+	if t.Kind == TypeArray || t.Kind == TypeString {
+		return i32Type
+	}
+	c.errorAt(args[0], "len is not defined for %s", t)
+	return invalidType
 }
 
 // checkConstructorCall recognizes and type-checks `Name(args)` where Name

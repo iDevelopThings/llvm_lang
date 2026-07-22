@@ -322,5 +322,19 @@ func universeScope() *Scope {
 		Kind:  SymFunc,
 		Scope: u,
 	})
+	// make/append/len are predeclared exactly like print (see LANGUAGE.md's
+	// "Dynamic arrays" section): each is a SymFunc with no real Decl, so it
+	// can't go through the normal FuncDecl-based signature machinery every
+	// user function does - checkCallExpr/genCallExpr recognize each by name
+	// (isBuiltinCall in typecheck.go/runtime.go) and check/lower it with its
+	// own bespoke logic instead of an ordinary call's argument-count/type
+	// matching against a declared signature.
+	for _, name := range []string{"make", "append", "len"} {
+		u.Define(&Symbol{
+			Name:  name,
+			Kind:  SymFunc,
+			Scope: u,
+		})
+	}
 	return u
 }

@@ -733,9 +733,14 @@ func (r *resolver) resolveExpr(scope *Scope, n ast.NodeIndex) {
 			}
 		}
 	case enums.NodeKinds.ArrayType:
-		// Reachable only via a parse-error recovery path (a bare array
-		// type used where an expression was expected, already flagged by
-		// the parser) - forwarded here rather than silently ignored.
+		// Reachable two ways: a bare array type used where an expression was
+		// expected (a parse-error recovery path, already flagged by the
+		// parser), or - now a genuinely valid case - make's own first
+		// argument (`make([]T, n)`, parsed as a bare ArrayType by the
+		// parser's bespoke make grammar - see parser/expr.go's parseMakeArgs
+		// and LANGUAGE.md's "Dynamic arrays" section). Either way this is a
+		// type position, not a value, so it's forwarded to resolveType
+		// rather than resolved (or silently ignored) as one.
 		r.resolveType(scope, n)
 	case enums.NodeKinds.CompositeLit:
 		r.resolveCompositeLit(scope, n)

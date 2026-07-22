@@ -31,6 +31,14 @@ func (g *Generator) setupRuntime() {
 	g.memcmpType = llvm.FunctionType(g.i32Ty, []llvm.Type{g.ptrTy, g.ptrTy, g.i64Ty}, false)
 	g.memcmpFn = llvm.AddFunction(g.mod, "memcmp", g.memcmpType)
 
+	// memset - used by genMakeCall (expr.go) to zero-fill a freshly
+	// arena-allocated dynamic-array backing buffer (see LANGUAGE.md's
+	// "Dynamic arrays" section: make always zero-fills its entire allocated
+	// buffer, the simplest, safest choice - it avoids ever reading
+	// uninitialized arena memory).
+	g.memsetType = llvm.FunctionType(g.ptrTy, []llvm.Type{g.ptrTy, g.i32Ty, g.i64Ty}, false)
+	g.memsetFn = llvm.AddFunction(g.mod, "memset", g.memsetType)
+
 	// llvm.trap - used by genBoundsCheck (expr.go) to abort immediately on an
 	// out-of-range array index rather than proceeding to an out-of-bounds
 	// GEP (see AGENTS.md's "Array bounds checking" section). Declared as a
@@ -331,6 +339,167 @@ func (g *Generator) isPrintCall(calleeNode ast.NodeIndex) bool {
 	return ok && sym.Kind == sema.SymFunc && sym.Decl == ast.InvalidNode && sym.Name == "print"
 }
 
+// isBuiltinCall reports whether calleeNode names the predeclared builtin
+// function name (make/append/len - print has its own isPrintCall above,
+// unchanged) - mirrors sema/typecheck.go's own isBuiltinCall exactly.
+func (g *Generator) isBuiltinCall(calleeNode ast.NodeIndex, name string) bool {
+	if g.tree.Nodes[calleeNode].Kind != enums.NodeKinds.Ident {
+		return false
+	}
+	sym, ok := g.info.Refs[calleeNode]
+	return ok && sym.Kind == sema.SymFunc && sym.Decl == ast.InvalidNode && sym.Name == name
+}
+
+// genArenaAllocElems asks the arena for a buffer sized to fit count elements
+// of elemLLType, returning both the allocated pointer and the element size
+// (an i64 constant, via llvm.SizeOf - the classic null-pointer-GEP trick,
+// resolved to a real constant by LLVM without this package needing its own
+// target-data-layout query) - shared by genMakeCall, genAppendCall's growth
+// path, and a dynamic-array composite literal (genCompositeLitInto).
+func (g *Generator) genArenaAllocElems(elemLLType llvm.Type, count llvm.Value) (buf, elemSize llvm.Value) {
+	elemSize = llvm.SizeOf(elemLLType)
+	countSize := g.builder.CreateZExt(count, g.i64Ty, "")
+	totalBytes := g.builder.CreateMul(countSize, elemSize, "")
+	return g.genArenaAlloc(totalBytes), elemSize
+}
+
+// genMakeCall lowers `make([]T, n)` / `make([]T, n, cap)` (see
+// LANGUAGE.md's "Dynamic arrays" section): allocate a fresh backing buffer
+// sized for cap elements (n, when cap is omitted) via the arena allocator -
+// the exact same primitive genStringConcat already routes through, per
+// AGENTS.md's "one centralized allocation point" rule - zero-fill the whole
+// allocated buffer (memset), and return the resulting {ptr, n, cap} value.
+// n/cap are ordinary runtime values (see sema's checkMakeCall) - ok, since a
+// dynamic array's whole point is a runtime-determined size - so cap<n (when
+// cap is given) is checked here, at runtime, the same trap-based mechanism
+// genBoundsCheck already uses for an out-of-range index (there is no
+// exception handling in this language - see AGENTS.md's "Array bounds
+// checking" section - so this is a hard process abort, exactly like that
+// one).
+func (g *Generator) genMakeCall(callNode ast.NodeIndex, args []ast.NodeIndex) llvm.Value {
+	target := g.info.Types[callNode]
+	elemLLType := g.llvmType(*target.Elem)
+
+	nVal := g.genExpr(args[1])
+	capVal := nVal
+	if len(args) == 3 {
+		capVal = g.genExpr(args[2])
+		g.genMakeCapCheck(nVal, capVal)
+	}
+
+	buf, elemSize := g.genArenaAllocElems(elemLLType, capVal)
+	capBytes := g.builder.CreateMul(g.builder.CreateZExt(capVal, g.i64Ty, ""), elemSize, "")
+	g.builder.CreateCall(g.memsetType, g.memsetFn, []llvm.Value{buf, llvm.ConstInt(g.i32Ty, 0, false), capBytes}, "")
+
+	result := llvm.Undef(g.dynArrTy)
+	result = g.builder.CreateInsertValue(result, buf, 0, "")
+	result = g.builder.CreateInsertValue(result, nVal, 1, "")
+	result = g.builder.CreateInsertValue(result, capVal, 2, "")
+	return result
+}
+
+// genMakeCapCheck traps (llvm.trap + unreachable, same as genBoundsCheck)
+// if capVal < nVal - make's own runtime "cap can't be smaller than the
+// requested length" rule (see genMakeCall's doc comment for why this is a
+// runtime check rather than a sema diagnostic).
+func (g *Generator) genMakeCapCheck(nVal, capVal llvm.Value) {
+	ok := g.builder.CreateICmp(llvm.IntSGE, capVal, nVal, "")
+
+	trapBB := g.ctx.AddBasicBlock(g.curFn, "make.cap.trap")
+	okBB := g.ctx.AddBasicBlock(g.curFn, "make.cap.ok")
+	g.builder.CreateCondBr(ok, okBB, trapBB)
+
+	g.builder.SetInsertPointAtEnd(trapBB)
+	g.builder.CreateCall(g.trapType, g.trapFn, nil, "")
+	g.builder.CreateUnreachable()
+
+	g.builder.SetInsertPointAtEnd(okBB)
+}
+
+// genAppendCall lowers `append(slice, elem)` (see LANGUAGE.md's "Dynamic
+// arrays" section - scoped to exactly one element per call): if len < cap,
+// elem is written directly into the existing backing buffer at index len and
+// the result reuses the same pointer/cap, mutating in place, matching Go's
+// own (sometimes-surprising but well-defined) aliasing behavior when capacity
+// allows it; if len == cap (cap == 0 included), a new, larger buffer is
+// allocated via the arena (newcap = max(1, cap*2) - simple doubling, see
+// DECISIONS.md), the existing len elements are memcpy'd over, and the result
+// carries the new pointer/capacity instead - the old buffer is simply
+// abandoned, consistent with this project's existing, explicit "the arena
+// never frees" design.
+func (g *Generator) genAppendCall(args []ast.NodeIndex) llvm.Value {
+	sliceType := g.info.Types[args[0]]
+	elemLLType := g.llvmType(*sliceType.Elem)
+
+	sliceVal := g.genExpr(args[0])
+	elemVal := g.genExpr(args[1])
+
+	ptr := g.builder.CreateExtractValue(sliceVal, 0, "")
+	length := g.builder.CreateExtractValue(sliceVal, 1, "")
+	capacity := g.builder.CreateExtractValue(sliceVal, 2, "")
+
+	hasRoom := g.builder.CreateICmp(llvm.IntSLT, length, capacity, "")
+
+	fitBB := g.ctx.AddBasicBlock(g.curFn, "append.fit")
+	growBB := g.ctx.AddBasicBlock(g.curFn, "append.grow")
+	contBB := g.ctx.AddBasicBlock(g.curFn, "append.cont")
+	g.builder.CreateCondBr(hasRoom, fitBB, growBB)
+
+	g.builder.SetInsertPointAtEnd(fitBB)
+	fitEndBB := g.builder.GetInsertBlock()
+	g.builder.CreateBr(contBB)
+
+	g.builder.SetInsertPointAtEnd(growBB)
+	one := llvm.ConstInt(g.i32Ty, 1, false)
+	two := llvm.ConstInt(g.i32Ty, 2, false)
+	doubled := g.builder.CreateMul(capacity, two, "")
+	newCap := g.builder.CreateSelect(g.builder.CreateICmp(llvm.IntSLT, doubled, one, ""), one, doubled, "")
+	newBuf, elemSize := g.genArenaAllocElems(elemLLType, newCap)
+	oldBytes := g.builder.CreateMul(g.builder.CreateZExt(length, g.i64Ty, ""), elemSize, "")
+	g.builder.CreateCall(g.memcpyType, g.memcpyFn, []llvm.Value{newBuf, ptr, oldBytes}, "")
+	growEndBB := g.builder.GetInsertBlock()
+	g.builder.CreateBr(contBB)
+
+	g.builder.SetInsertPointAtEnd(contBB)
+	finalPtr := g.builder.CreatePHI(g.ptrTy, "")
+	finalPtr.AddIncoming([]llvm.Value{ptr, newBuf}, []llvm.BasicBlock{fitEndBB, growEndBB})
+	finalCap := g.builder.CreatePHI(g.i32Ty, "")
+	finalCap.AddIncoming([]llvm.Value{capacity, newCap}, []llvm.BasicBlock{fitEndBB, growEndBB})
+
+	elemAddr := g.builder.CreateInBoundsGEP(elemLLType, finalPtr, []llvm.Value{length}, "")
+	g.builder.CreateStore(elemVal, elemAddr)
+	newLen := g.builder.CreateAdd(length, llvm.ConstInt(g.i32Ty, 1, false), "")
+
+	result := llvm.Undef(g.dynArrTy)
+	result = g.builder.CreateInsertValue(result, finalPtr, 0, "")
+	result = g.builder.CreateInsertValue(result, newLen, 1, "")
+	result = g.builder.CreateInsertValue(result, finalCap, 2, "")
+	return result
+}
+
+// genLenCall lowers `len(x)` - a dynamic array's runtime len field, a
+// fixed-size array's compile-time-known size (folded to a constant directly,
+// the same value its own bounds check already uses - see sema's
+// checkLenCall), or a string's runtime length field.
+func (g *Generator) genLenCall(argNode ast.NodeIndex) llvm.Value {
+	t := g.info.Types[argNode]
+	switch {
+	case t.Kind == sema.TypeArray && t.Dynamic:
+		v := g.genExpr(argNode)
+		return g.builder.CreateExtractValue(v, 1, "")
+	case t.Kind == sema.TypeArray:
+		return llvm.ConstInt(g.i32Ty, uint64(t.Size), false)
+	case t.Kind == sema.TypeString:
+		v := g.genExpr(argNode)
+		return g.builder.CreateExtractValue(v, 1, "")
+	default:
+		// Only a dynamic array, fixed-size array, or string reach here on a
+		// tree that already passed sema.Check (see checkLenCall,
+		// sema/typecheck.go, and the package doc comment).
+		panic("codegen: genLenCall reached an unsupported type " + t.String())
+	}
+}
+
 // genPrintCall lowers `print(arg)`. Every numeric width/bool/string prints
 // directly via a single self-contained printf call (its own format string
 // already includes the trailing newline - see AGENTS.md's "print builtin"
@@ -458,8 +627,15 @@ func (g *Generator) genPrintStructValue(t sema.Type, v llvm.Value) {
 
 // genPrintArrayValue renders an array value as `[e0 e1 ...]` - each
 // element's own value, space-separated, in index order, wrapped in
-// brackets. See AGENTS.md's codegen section.
+// brackets. See AGENTS.md's codegen section. A fixed-size array's element
+// count is known at codegen time, so this is a static unrolled sequence of
+// printf calls, same as before; a dynamic array's isn't (see
+// genPrintDynArrayValue), so it needs an actual runtime loop instead.
 func (g *Generator) genPrintArrayValue(t sema.Type, v llvm.Value) {
+	if t.Dynamic {
+		g.genPrintDynArrayValue(t, v)
+		return
+	}
 	g.genPrintLiteral(g.fmtLBracket)
 	for i := int64(0); i < t.Size; i++ {
 		if i > 0 {
@@ -468,5 +644,54 @@ func (g *Generator) genPrintArrayValue(t sema.Type, v llvm.Value) {
 		ev := g.builder.CreateExtractValue(v, int(i), "")
 		g.genPrintValueBare(*t.Elem, ev)
 	}
+	g.genPrintLiteral(g.fmtRBracket)
+}
+
+// genPrintDynArrayValue renders a dynamic array value the same way a
+// fixed-size one is (`[e0 e1 ...]`), reading its runtime len field to know
+// how many elements to walk - a real runtime loop (CreateCondBr/
+// AddBasicBlock, the same control-flow shape genForStmt/genBoundsCheck
+// already use elsewhere in this package), not a static unrolled sequence of
+// printf calls, since the element count isn't known until the program
+// actually runs.
+func (g *Generator) genPrintDynArrayValue(t sema.Type, v llvm.Value) {
+	ptr := g.builder.CreateExtractValue(v, 0, "")
+	length := g.builder.CreateExtractValue(v, 1, "")
+	elemLLType := g.llvmType(*t.Elem)
+
+	g.genPrintLiteral(g.fmtLBracket)
+
+	idxAddr := g.createEntryAlloca(g.i32Ty, "print.idx")
+	g.builder.CreateStore(llvm.ConstInt(g.i32Ty, 0, false), idxAddr)
+
+	condBB := g.ctx.AddBasicBlock(g.curFn, "print.arr.cond")
+	bodyBB := g.ctx.AddBasicBlock(g.curFn, "print.arr.body")
+	spaceBB := g.ctx.AddBasicBlock(g.curFn, "print.arr.space")
+	elemBB := g.ctx.AddBasicBlock(g.curFn, "print.arr.elem")
+	endBB := g.ctx.AddBasicBlock(g.curFn, "print.arr.end")
+
+	g.builder.CreateBr(condBB)
+
+	g.builder.SetInsertPointAtEnd(condBB)
+	idx := g.builder.CreateLoad(g.i32Ty, idxAddr, "")
+	g.builder.CreateCondBr(g.builder.CreateICmp(llvm.IntSLT, idx, length, ""), bodyBB, endBB)
+
+	g.builder.SetInsertPointAtEnd(bodyBB)
+	isFirst := g.builder.CreateICmp(llvm.IntEQ, idx, llvm.ConstInt(g.i32Ty, 0, false), "")
+	g.builder.CreateCondBr(isFirst, elemBB, spaceBB)
+
+	g.builder.SetInsertPointAtEnd(spaceBB)
+	g.genPrintLiteral(g.fmtSpace)
+	g.builder.CreateBr(elemBB)
+
+	g.builder.SetInsertPointAtEnd(elemBB)
+	elemAddr := g.builder.CreateInBoundsGEP(elemLLType, ptr, []llvm.Value{idx}, "")
+	elemVal := g.builder.CreateLoad(elemLLType, elemAddr, "")
+	g.genPrintValueBare(*t.Elem, elemVal)
+	nextIdx := g.builder.CreateAdd(idx, llvm.ConstInt(g.i32Ty, 1, false), "")
+	g.builder.CreateStore(nextIdx, idxAddr)
+	g.builder.CreateBr(condBB)
+
+	g.builder.SetInsertPointAtEnd(endBB)
 	g.genPrintLiteral(g.fmtRBracket)
 }

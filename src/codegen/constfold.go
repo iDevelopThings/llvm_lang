@@ -251,6 +251,14 @@ func (g *Generator) constCompositeLit(n ast.NodeIndex) (llvm.Value, bool) {
 		return llvm.ConstNamedStruct(layout.llvmType, vals), true
 
 	case sema.TypeArray:
+		if t.Dynamic {
+			// A slice literal always needs a real runtime heap allocation
+			// (the arena - see LANGUAGE.md's "Dynamic arrays" section), so
+			// it can never be a compile-time constant, unlike a fixed-size
+			// array literal (a plain LLVM ConstArray, no allocation needed).
+			g.errorAt(n, "global initializer must be a compile-time constant expression")
+			return llvm.Value{}, false
+		}
 		elemType := g.llvmType(*t.Elem)
 		vals := make([]llvm.Value, len(elems))
 		for i, e := range elems {

@@ -246,9 +246,14 @@ func parseBinaryExpr(p *Parser, left ast.NodeIndex) ast.NodeIndex {
 func parseCallExpr(p *Parser, callee ast.NodeIndex) ast.NodeIndex {
 	p.expect(enums.Lexemes.LeftParen)
 	p.exprLev++
-	args := append([]ast.NodeIndex{callee}, p.parseCommaList(enums.Lexemes.RightParen, func() ast.NodeIndex {
-		return p.parseExpr(precLowest)
-	})...)
+	var args []ast.NodeIndex
+	if isMakeCallee(p, callee) {
+		args = append([]ast.NodeIndex{callee}, p.parseMakeArgs()...)
+	} else {
+		args = append([]ast.NodeIndex{callee}, p.parseCommaList(enums.Lexemes.RightParen, func() ast.NodeIndex {
+			return p.parseExpr(precLowest)
+		})...)
+	}
 	p.exprLev--
 	closeTok := p.expect(enums.Lexemes.RightParen)
 	span := ast.Span{
@@ -256,6 +261,49 @@ func parseCallExpr(p *Parser, callee ast.NodeIndex) ast.NodeIndex {
 		End:   closeTok.End,
 	}
 	return p.tree.NewNode(enums.NodeKinds.CallExpr, lexer.Token{}, span, args...)
+}
+
+// isMakeCallee reports whether callee is a bare reference to the
+// predeclared `make` builtin, syntactically - just its identifier text, the
+// same name-based check Go's own parser uses for make/new/append (see
+// parseMakeArgs's doc comment): this pass has no symbol resolution yet, so
+// there's no way to tell a real reference to the predeclared `make` apart
+// from a local/package-level name that merely happens to be spelled "make".
+// A program that shadows "make" as an ordinary function or variable (legal -
+// see sema/scope.go's universeScope, exactly like `print` can be shadowed)
+// and then tries to call it as such is out of scope for this round, the same
+// narrow edge case Go itself carries for its own predeclared identifiers.
+func isMakeCallee(p *Parser, callee ast.NodeIndex) bool {
+	return p.tree.Nodes[callee].Kind == enums.NodeKinds.Ident && p.tree.Text(callee) == "make"
+}
+
+// parseMakeArgs parses make's own bespoke argument grammar: `make([]T, n)` or
+// `make([]T, n, cap)` - unlike every other call in this language, make's
+// first "argument" position is a type expression (`[]T`), not a value
+// expression (see LANGUAGE.md's "Dynamic arrays" section for why: a bare
+// `[]T` with no composite-literal body isn't parseable as an ordinary
+// expression at all, the same wrinkle Go's own grammar hits and solves the
+// same way - bespoke grammar for make/new/append rather than making arbitrary
+// types parse as expressions everywhere). The type is parsed via
+// parseTypeExpr directly, sidestepping parseArrayTypeLit's expression-level
+// `[` prefix rule (which requires a following `{...}` body) entirely; every
+// remaining argument (n, optionally cap) parses as an ordinary expression.
+func (p *Parser) parseMakeArgs() []ast.NodeIndex {
+	if p.at(enums.Lexemes.RightParen) {
+		return nil
+	}
+	typ := p.parseTypeExpr()
+	args := []ast.NodeIndex{typ}
+	for {
+		if _, ok := p.accept(enums.Lexemes.Comma); !ok {
+			break
+		}
+		if p.at(enums.Lexemes.RightParen) {
+			break // a trailing comma is tolerated right before close
+		}
+		args = append(args, p.parseExpr(precLowest))
+	}
+	return args
 }
 
 func parseIndexExpr(p *Parser, target ast.NodeIndex) ast.NodeIndex {

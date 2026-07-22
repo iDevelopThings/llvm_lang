@@ -285,3 +285,50 @@ lowering (each constructor becomes its own real LLVM function, reusing the
 implicit-receiver-pointer convention an ordinary method already uses, named
 `Struct.constructor.N` since a constructor has no name of its own to draw
 from).
+
+---
+
+## 2026-07-22 - Dynamic arrays: `append` scoped to exactly one element per call
+
+**Decision:** `append(slice, elem)` takes exactly one element to append, not
+Go's full variadic `append(s, e1, e2, ...)` form.
+
+**Why:** this language has no variadic functions anywhere yet, and inventing
+that machinery (parameter-list syntax, argument-count checking against an
+open-ended arity, how it'd interact with the existing fixed-arity function-
+type grammar - see `LANGUAGE.md`'s "First-class functions" section) purely
+to give `append` a multi-element form was out of scope for this round.
+Appending several elements is simply several calls (`s = append(s, a); s =
+append(s, b)`), which is no less correct, just more verbose at the call
+site - a real, deliberate restriction, not an oversight, and a natural
+extension point once (if) variadic functions are ever designed generally: at
+that point `append` would be the obvious first beneficiary, not a special
+case needing its own bespoke retrofit.
+
+**Status:** shipped. See `LANGUAGE.md`'s "Dynamic arrays" section for the
+language-level rule and `CODEGEN.md`'s "Dynamic arrays" section for
+`genAppendCall`'s lowering.
+
+---
+
+## 2026-07-22 - Dynamic arrays: capacity growth by simple doubling
+
+**Decision:** `append`'s growth strategy, once a slice's `len == cap`, is
+`newcap = max(1, cap*2)` - the simplest possible doubling strategy, not
+Go's own more elaborate real-world growth curve (which slows its growth
+factor for larger slices to bound total copying overhead across a program's
+lifetime, and has changed more than once across Go's own releases).
+
+**Why:** this project doesn't have a performance-sensitive workload driving
+slice growth yet, and Go's own tuned curve is itself an incidental
+implementation detail of Go's runtime, not a language-semantic guarantee -
+nothing about `append`'s observable behavior (same-backing-pointer-when-it-
+fits, a fresh buffer with old data preserved when it doesn't) depends on
+*which* doubling/growth curve is used, only on `cap` ending up large enough.
+Simple doubling is the smallest correct implementation that satisfies that
+contract, and is a well-understood, easy-to-revisit default if a real
+workload ever demonstrates it matters.
+
+**Status:** shipped. See `CODEGEN.md`'s "Dynamic arrays" section for
+`genAppendCall`'s exact lowering (`newcap = max(1, cap*2)`, built via a
+`select` on `cap*2 < 1`).
