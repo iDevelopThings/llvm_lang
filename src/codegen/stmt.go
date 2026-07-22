@@ -117,9 +117,53 @@ func (g *Generator) storeValueInto(addr llvm.Value, valueNode ast.NodeIndex) {
 // direct call to libc's `free` against p's own pointer value - the real,
 // separate heap `new` mallocs from (runtime.go's setupRuntime), never the
 // bump-allocator arena, which has no per-allocation free at all.
+//
+// After the free itself, if the deleted operand is a bare local variable/
+// parameter reference (deleteLocalSlot below), its own stack slot is also
+// stored-over with a null pointer - a narrow, partial use-after-free
+// mitigation: it turns *some* immediate reuse-through-the-same-variable bugs
+// (`delete p; *p = 5`) into a clean, deterministic null-pointer-dereference
+// trap instead of silently corrupting whatever memory got reallocated into
+// that freed slot. This is intentionally the only case handled - see
+// deleteLocalSlot's own doc comment and LANGUAGE.md's "Pointers" section for
+// exactly what this does and doesn't cover (a struct field, an array/slice
+// element, a second variable/parameter holding a copy of the same address,
+// and a captured-by-reference outer local are all real, deliberately
+// unmitigated use-after-free surfaces still - nulling one variable's own
+// slot can never reach any of those).
 func (g *Generator) genDeleteStmt(n ast.NodeIndex) {
-	ptr := g.genExpr(g.tree.Child(n, 0))
+	operand := g.tree.Child(n, 0)
+	ptr := g.genExpr(operand)
 	g.builder.CreateCall(g.freeType, g.freeFn, []llvm.Value{ptr}, "")
+
+	if addr, ok := g.deleteLocalSlot(operand); ok {
+		g.builder.CreateStore(llvm.ConstNull(g.ptrTy), addr)
+	}
+}
+
+// deleteLocalSlot reports whether operand (delete's own operand expression,
+// stripped of any enclosing parentheses) is a bare reference to a local
+// variable/parameter declared directly in the function currently being
+// generated - the one case where "the pointer's own storage slot" is
+// unambiguous and directly addressable - and if so, returns that slot's
+// address (the exact same alloca genAddr's own Ident case would resolve to).
+//
+// Deliberately narrow: an Ident resolving to a *global* (g.globals, not
+// g.locals) or to an outer function's captured symbol (reached through a
+// lambda's own closure context, not a plain alloca at all - see
+// addrOfSymbol) does not count either, on top of the non-Ident shapes this
+// naturally excludes already (a MemberExpr/`.field`, an IndexExpr/`[i]`, or
+// any other expression) - only a real, direct alloca in the current
+// function's own g.locals is ever nulled.
+func (g *Generator) deleteLocalSlot(operand ast.NodeIndex) (llvm.Value, bool) {
+	for g.tree.Nodes[operand].Kind == enums.NodeKinds.ParenExpr {
+		operand = g.tree.Child(operand, 0)
+	}
+	if g.tree.Nodes[operand].Kind != enums.NodeKinds.Ident {
+		return llvm.Value{}, false
+	}
+	addr, ok := g.locals[g.info.Refs[operand]]
+	return addr, ok
 }
 
 // genAssignStmt lowers `=` and the compound forms `+= -= *= /=`. `+=` also

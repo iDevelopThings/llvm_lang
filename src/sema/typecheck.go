@@ -2206,7 +2206,10 @@ func (c *checker) checkNewExpr(n ast.NodeIndex) Type {
 		if t.IsInvalid() {
 			return invalidType
 		}
-		return Type{Kind: TypePointer, Elem: &t}
+		return Type{
+			Kind: TypePointer,
+			Elem: &t,
+		}
 	case enums.NodeKinds.CallExpr:
 		t := c.checkExpr(inner)
 		calleeNode := c.tree.Child(inner, 0)
@@ -2215,7 +2218,10 @@ func (c *checker) checkNewExpr(n ast.NodeIndex) Type {
 			c.errorAt(n, "new requires a struct constructor call or composite literal")
 			return invalidType
 		}
-		return Type{Kind: TypePointer, Elem: &t}
+		return Type{
+			Kind: TypePointer,
+			Elem: &t,
+		}
 	default:
 		// Still check inner so an undefined identifier/etc. inside it gets
 		// its own diagnostic too, rather than being silently skipped.

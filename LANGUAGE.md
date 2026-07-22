@@ -253,13 +253,40 @@ so `delete`ing a `new`'d pointer is a real, individually-freeable
 deallocation, not a no-op against a never-freed arena. `p` must be a real
 pointer type; `delete` itself produces no value, matching `break`/`continue`
 being their own dedicated statement forms rather than call-shaped builtins.
-There is no automatic memory management here at all - deleting a value
-that's still reachable through another pointer, or using a pointer again
-after deleting it, is a real use-after-free/double-free, exactly as
-unchecked as it would be in C. **Destructors/RAII are explicitly out of
-scope** for this round - `delete` only frees raw memory, it never runs any
-struct-specific cleanup logic (there is no such concept in this language
-yet).
+**Destructors/RAII are explicitly out of scope** for this round - `delete`
+only frees raw memory, it never runs any struct-specific cleanup logic
+(there is no such concept in this language yet).
+
+There is essentially no automatic memory management here - with one narrow,
+deliberate exception: when `delete`'s own operand is a bare local variable or
+parameter (`delete p`, not `delete p.next`/`delete arr[i]`/a copy held in a
+second variable), that variable's own storage slot is additionally
+overwritten with a null pointer immediately after the free. This turns the
+single most immediate mistake - reusing the *same variable* right after
+deleting it - into a deterministic, clean null-pointer-dereference trap
+instead of silent memory corruption:
+
+```go
+p := new Point(1, 2)
+delete p
+*p = Point{0, 0}   // p is nil here - traps cleanly, does not corrupt
+                    // whatever memory got reallocated into the freed block
+```
+
+This mitigation is real but intentionally narrow - it covers exactly one
+case and no others. All of the following remain completely unmitigated, real
+use-after-free/double-free bugs, exactly as unchecked as they would be in C:
+
+- a pointer reached through a struct field (`delete p.next; *p.next = ...`)
+  or an array/slice element (`delete arr[i]; *arr[i] = ...`) - only a bare
+  variable's own slot is ever nulled, never a field/element's storage;
+- a second variable or parameter holding a copy of the same now-freed
+  address (`q := p; delete p; *q = ...`) - each variable has its own
+  independent slot, so nulling `p`'s slot has no effect on `q`'s;
+- deleting a value that's still reachable through another pointer at all,
+  in general - `delete` has no notion of aliasing or ownership, so nothing
+  here ever prevents a *different* still-live pointer to the same freed
+  block from being dereferenced.
 
 ```go
 p := new Point(1, 2)

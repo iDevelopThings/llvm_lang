@@ -294,3 +294,149 @@ func main() {
 		t.Fatalf("print output = %q, want %q", out, want)
 	}
 }
+
+// TestPointerToPointerRoundTrip covers a real `**int` value end to end - not
+// just the parser-level shape assertions TestPointerTypeShape/
+// TestAddressOfAndDerefShape (parser/pointer_test.go) already have - proving
+// `**pp = v` (double-dereference used as an assignment target) actually
+// writes through both indirections to the original variable, and `**pp`
+// (used as a value) reads it back correctly.
+func TestPointerToPointerRoundTrip(t *testing.T) {
+	jm := compileAndJIT(t, `
+func f() int {
+	x := 5
+	p := &x
+	pp := &p
+	**pp = 99
+	return x
+}
+`)
+	if got := jm.runInt32(t, "f"); got != 99 {
+		t.Errorf("f() = %d, want 99 (write through **pp should reach x)", got)
+	}
+}
+
+// TestPointerToPointerReadsCurrentValue covers `**pp` as a value expression
+// (not an assignment target) reflecting x's current value through both
+// indirections.
+func TestPointerToPointerReadsCurrentValue(t *testing.T) {
+	jm := compileAndJIT(t, `
+func f() int {
+	x := 7
+	p := &x
+	pp := &p
+	x = 123
+	return **pp
+}
+`)
+	if got := jm.runInt32(t, "f"); got != 123 {
+		t.Errorf("f() = %d, want 123", got)
+	}
+}
+
+// TestStructPointerFieldChainMutation covers a struct with a pointer-typed
+// field (self-referential, the `p.next.value` shape LANGUAGE.md's "Pointers"
+// section models auto-deref member access on), mutated through the chain
+// `head.next.value = ...` and read back through a *different* path (the
+// original `tail` pointer the chain was built from) - real proof the write
+// landed at the shared heap address, not a copy, not just "it compiles".
+func TestStructPointerFieldChainMutation(t *testing.T) {
+	jm := compileAndJIT(t, `
+struct Node {
+	value int
+	next *Node
+}
+
+func f() int {
+	tail := new Node{1, nil}
+	head := new Node{0, tail}
+	head.next.value = 42
+	return tail.value
+}
+`)
+	if got := jm.runInt32(t, "f"); got != 42 {
+		t.Errorf("f() = %d, want 42 (write through head.next.value should reach the same node tail points to)", got)
+	}
+}
+
+// TestDeleteViaStructFieldDoesNotNullField covers `delete` on a pointer read
+// out of a struct field (see LANGUAGE.md's "Pointers" section's now-corrected
+// delete documentation): `free` is still called correctly (no crash), but
+// the narrow null-out mitigation genDeleteStmt applies to a bare local/
+// parameter (deleteLocalSlot, stmt.go) does *not* reach into the field's own
+// storage - it isn't an Ident at all, so the field is left holding its
+// stale (now-freed) address, exactly as documented, not silently nulled.
+func TestDeleteViaStructFieldDoesNotNullField(t *testing.T) {
+	jm := compileAndJIT(t, `
+struct Point {
+	x int
+}
+
+struct Box {
+	p *Point
+}
+
+func f() bool {
+	var b Box
+	b.p = new Point{1}
+	delete b.p
+	return b.p == nil
+}
+`)
+	if got := jm.runBool(t, "f"); got {
+		t.Errorf("f() = %v, want false (delete via a struct field must not null the field itself)", got)
+	}
+}
+
+// TestDeleteViaParameterDoesNotNullCallersCopy covers `delete` on a pointer
+// passed into a function as a parameter: the callee's own parameter is a
+// bare local (its own alloca - see allocLocalSlot), so `delete param` inside
+// the callee does null *that* parameter's own slot (matching item 1's
+// documented scope), but the caller passed a copy of the pointer value, not
+// a shared address for that variable - the caller's own variable has its own
+// independent storage, so it is correctly left completely unaffected. This
+// is the "second variable/parameter holding a copy of the same address"
+// non-case LANGUAGE.md's "Pointers" section now documents explicitly.
+func TestDeleteViaParameterDoesNotNullCallersCopy(t *testing.T) {
+	jm := compileAndJIT(t, `
+struct Point {
+	x int
+}
+
+func consume(p *Point) {
+	delete p
+}
+
+func f() bool {
+	q := new Point{1}
+	consume(q)
+	return q == nil
+}
+`)
+	if got := jm.runBool(t, "f"); got {
+		t.Errorf("f() = %v, want false (the caller's own copy of the pointer must not be nulled by the callee's delete)", got)
+	}
+}
+
+// TestDeleteNullsOutLocalVariable is the real hands-on-verifiable proof of
+// item 1's fix itself: `delete p` on a bare local sets p's own slot to a
+// real null pointer afterward, so `p == nil` reads true immediately - the
+// mitigation LANGUAGE.md's "Pointers" section now documents turns a
+// same-variable use-after-free into a clean, deterministic nil-pointer
+// trap instead of silent corruption.
+func TestDeleteNullsOutLocalVariable(t *testing.T) {
+	jm := compileAndJIT(t, `
+struct Point {
+	x int
+}
+
+func f() bool {
+	p := new Point{1}
+	delete p
+	return p == nil
+}
+`)
+	if got := jm.runBool(t, "f"); !got {
+		t.Errorf("f() = %v, want true (delete on a bare local must null its own slot)", got)
+	}
+}
