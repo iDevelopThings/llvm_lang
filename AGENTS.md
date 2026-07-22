@@ -95,6 +95,8 @@ Max efficiency and performance, keeping allocations down to a minimum. We alread
 
 When the choice is right, opt for using iter.Seq yield feature, slices.X from std library etc.
 
+To be specific about the iter.Seq preference above: it's not a checkbox to tick, it's about avoiding hand-rolled loops-with-conditions when a custom iterator can express the same filtering/derivation more directly. For any new utility/helper function that conceptually "returns a collection" (a filtered/derived set of nodes, symbols, fields, etc.) - default to returning `iter.Seq[T]` rather than materializing and returning a `[]T`. This isn't absolute: a caller that genuinely needs indexed/random access, a length known upfront, or multiple passes over the same data can still reasonably want a plain slice (or `slices.Collect` over an iterator) - but that should be the exception, decided at the call site, not the default shape a new helper is written in.
+
 Any disk I/O this compiler needs goes through `afero.Fs` (`github.com/spf13/afero`), never direct `os` calls (`os.ReadFile`, `os.ReadDir`, `os.Stat`, ...) - see `src/loader` for the first (and, so far, only) place this matters. Production code wires in `afero.NewOsFs()`; tests build fake filesystem layouts with `afero.NewMemMapFs()` instead of creating/tearing down real temp directories. This is a deliberate standing convention (see `DECISIONS.md`'s "Adopting afero for file loading" entry), not just incidental to `src/loader` - keep it in mind for any future feature that needs to touch the filesystem.
 
 ## Architecture
