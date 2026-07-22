@@ -16,6 +16,50 @@ There is a build.ps1 script you can use to compile.
 Enums are code generated using go generate, you can find existing yml defs inside src/enums.
 It's preferable to use the enum gen rather than go style enums, the generator is flexible, lets us add extra fields, creates maps we need, provides extra helper functions for the type etc.
 
+See: cmd/enum_codegen/README.md for a full reference.
+
+**Default to enum_codegen for any new discriminated-`kind`-style type** (a
+small closed set of named values - a new `NodeKind`, a new IR-level
+"opcode"/"tag" type, etc.) rather than hand-rolling a plain Go
+`const ... iota` block with a hand-maintained `String()` switch. The
+generator gives you the constants, `Values()`/`Infos()`/`All()`/`Parse()`,
+and a real `String()` for free - a hand-written enum has to redo all of that
+by hand and keep it in sync forever.
+
+A hand-rolled Go enum (like `lexer.TriviaKind`) is only justified when the
+type is genuinely internal to one package and not a cross-cutting language
+concept (`Lexeme`/`Keyword`/`NodeKind` describe the language itself;
+`TriviaKind` just classifies skipped lexer trivia and nothing outside the
+lexer package ever branches on it). Even then, prefer enum_codegen once
+there's a real reason to (see below) - it's cheap to set up a spec.
+
+A few things that are easy to miss from the README alone:
+
+- **Specs don't have to live in `src/enums`.** That's just where most of the
+  current cross-cutting ones happen to sit, kept separate because
+  enum_codegen generates extra supporting code around them. A
+  package-internal enum can keep its `.yml` right next to the package it
+  belongs to - the only requirement is a correct `//go:generate` directive
+  pointing at it (`go generate ./...` finds and runs every one).
+- **Members can carry arbitrary typed metadata**, not just a name/value -
+  extra YAML keys become typed columns (inferred from the YAML scalar, or
+  pinned explicitly via a top-level `fields:` block), including references
+  to *other* generated enums (compile-checked, not stringly-typed) and even
+  slices of a real Go struct in the same package, rendered as proper nested
+  composite literals. This is the concrete case for reaching for
+  enum_codegen over a plain Go enum: the moment a "kind" wants to carry any
+  side data per member (a display name, a set of flags, a related enum
+  value), that's a strong signal it should be generated rather than
+  hand-maintained as a parallel `map[Kind]something`.
+- **Extra iterators** (`iterators: [colA, colB]`) generate an `iter.Seq`
+  walker over a specific metadata column, in declaration order - useful
+  instead of hand-writing a small loop helper.
+- `sema.TypeKind` is a plausible future candidate for this treatment if it
+  ever needs named per-kind metadata (e.g. bit width, signedness, a
+  human-facing name) beyond what its current hand-written `String()`/helper
+  methods do - not an immediate action, just noted here since the shape
+  fits well.
+
 ## Standards
 
 Max efficiency and performance, keeping allocations down to a minimum. We already have cgo overhead, so we must avoid adding anymore.
