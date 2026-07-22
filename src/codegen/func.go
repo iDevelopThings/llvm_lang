@@ -21,10 +21,10 @@ import (
 // point signature (see genFuncBody's fallback-terminator logic for the other
 // half of that decision).
 func (g *Generator) declareFuncSignature(decl ast.NodeIndex) {
-	receiver := g.tree.Child(decl, 0)
-	nameNode := g.tree.Child(decl, 1)
-	paramListNode := g.tree.Child(decl, 2)
-	returnTypeNode := g.tree.Child(decl, 3)
+	receiver := g.tree.FuncReceiver(decl)
+	nameNode := g.tree.FuncName(decl)
+	paramListNode := g.tree.FuncParamList(decl)
+	returnTypeNode := g.tree.FuncReturnType(decl)
 	sym := g.info.Refs[nameNode]
 
 	var paramTypes []llvm.Type
@@ -46,9 +46,12 @@ func (g *Generator) declareFuncSignature(decl ast.NodeIndex) {
 	name := g.tree.Text(nameNode)
 	switch {
 	case isMain:
-		if retType.Kind != sema.TypeVoid && retType.Kind != sema.TypeInt {
-			g.errorAt(decl, "main must return either nothing or int, got %s - treating as int", retType)
-		}
+		// main's declared return type is already validated by sema
+		// (checkMainReturnType, src/sema/typecheck.go: either nothing or
+		// int) - main's real LLVM signature is always i32-returning
+		// regardless, since it must hand a real exit code back to the OS
+		// caller even when the source declares no return type at all (see
+		// CODEGEN.md's "main is the real entry point" section).
 		llvmRet = g.i32Ty
 		name = "main"
 	case receiver != ast.InvalidNode:
@@ -70,11 +73,11 @@ func (g *Generator) declareFuncSignature(decl ast.NodeIndex) {
 // own - the incoming pointer parameter already *is* its address (see
 // genAddr's ThisExpr case).
 func (g *Generator) genFuncBody(decl ast.NodeIndex) {
-	receiver := g.tree.Child(decl, 0)
-	nameNode := g.tree.Child(decl, 1)
-	paramListNode := g.tree.Child(decl, 2)
-	returnTypeNode := g.tree.Child(decl, 3)
-	body := g.tree.Child(decl, 4)
+	receiver := g.tree.FuncReceiver(decl)
+	nameNode := g.tree.FuncName(decl)
+	paramListNode := g.tree.FuncParamList(decl)
+	returnTypeNode := g.tree.FuncReturnType(decl)
+	body := g.tree.FuncBody(decl)
 
 	entry := g.funcs[g.info.Refs[nameNode]]
 	g.curFn = entry.fn

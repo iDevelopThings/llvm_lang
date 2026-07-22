@@ -223,6 +223,30 @@ func TestReturnValueInVoidFunctionIsError(t *testing.T) {
 	expectCheckErrors(t, "func f() {\n\treturn 1\n}\n", 1)
 }
 
+// --- main's return type ---
+
+func TestMainWithNoDeclaredReturnTypeIsFine(t *testing.T) {
+	checkSrc(t, "func main() {\n}\n")
+}
+
+func TestMainReturningIntIsFine(t *testing.T) {
+	checkSrc(t, "func main() int {\n\treturn 0\n}\n")
+}
+
+func TestMainReturningOtherTypeIsError(t *testing.T) {
+	expectCheckErrors(t, "func main() f64 {\n\treturn 1.5\n}\n", 1)
+}
+
+func TestMainReturningStringIsError(t *testing.T) {
+	expectCheckErrors(t, "func main() string {\n\treturn \"x\"\n}\n", 1)
+}
+
+func TestNonMainFunctionMayReturnAnyType(t *testing.T) {
+	// The restriction is specific to the real entry point - an ordinary
+	// function named anything else may declare any return type.
+	checkSrc(t, "func f() f64 {\n\treturn 1.5\n}\n")
+}
+
 // --- break / continue placement ---
 
 func TestBreakOutsideLoopIsError(t *testing.T) {

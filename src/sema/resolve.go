@@ -220,10 +220,8 @@ func (r *resolver) resolvePackage(trees []*ast.Tree) {
 	}
 	for _, tree := range trees {
 		r.enterFile(tree)
-		for _, decl := range tree.Children(tree.Root) {
-			if tree.Nodes[decl].Kind == enums.NodeKinds.StructDecl {
-				r.declareStruct(r.pkg, decl)
-			}
+		for decl := range tree.TopLevelDeclsOfKind(enums.NodeKinds.StructDecl) {
+			r.declareStruct(r.pkg, decl)
 		}
 	}
 	for _, tree := range trees {
@@ -268,10 +266,7 @@ func (r *resolver) buildFileScope(tree *ast.Tree) {
 
 	imports := r.fileImports[tree]
 	idx := 0
-	for _, decl := range tree.Children(tree.Root) {
-		if tree.Nodes[decl].Kind != enums.NodeKinds.ImportDecl {
-			continue
-		}
+	for decl := range tree.TopLevelDeclsOfKind(enums.NodeKinds.ImportDecl) {
 		if idx >= len(imports) {
 			break // an unresolved import - already reported by the loader
 		}
@@ -326,7 +321,7 @@ func (r *resolver) declareStruct(pkg *Scope, decl ast.NodeIndex) {
 	sym.StructInfo = info
 	r.info.Structs[sym.Name] = info
 
-	for _, field := range r.tree.Children(decl)[1:] {
+	for _, field := range r.tree.StructFields(decl) {
 		fieldNameNode := r.tree.Child(field, 0)
 		fieldName := r.tree.Text(fieldNameNode)
 		fieldSym := &Symbol{
@@ -347,7 +342,7 @@ func (r *resolver) declareStruct(pkg *Scope, decl ast.NodeIndex) {
 }
 
 func (r *resolver) resolveStructFieldTypes(pkg *Scope, decl ast.NodeIndex) {
-	for _, field := range r.tree.Children(decl)[1:] {
+	for _, field := range r.tree.StructFields(decl) {
 		r.resolveType(pkg, r.tree.Child(field, 1))
 	}
 }
@@ -357,8 +352,8 @@ func (r *resolver) resolveStructFieldTypes(pkg *Scope, decl ast.NodeIndex) {
 // instead (see StructInfo: methods aren't in package scope at all, since
 // they're looked up via the receiver's type, not a plain name lookup).
 func (r *resolver) declareFunc(pkg *Scope, decl ast.NodeIndex) {
-	receiver := r.tree.Child(decl, 0)
-	nameNode := r.tree.Child(decl, 1)
+	receiver := r.tree.FuncReceiver(decl)
+	nameNode := r.tree.FuncName(decl)
 
 	if receiver == ast.InvalidNode {
 		r.declareLocal(pkg, decl, nameNode, SymFunc)
@@ -405,10 +400,10 @@ func (r *resolver) resolveVarDeclBody(scope *Scope, decl ast.NodeIndex) {
 }
 
 func (r *resolver) resolveFuncBody(pkg *Scope, decl ast.NodeIndex) {
-	receiver := r.tree.Child(decl, 0)
-	paramList := r.tree.Child(decl, 2)
-	returnType := r.tree.Child(decl, 3)
-	body := r.tree.Child(decl, 4)
+	receiver := r.tree.FuncReceiver(decl)
+	paramList := r.tree.FuncParamList(decl)
+	returnType := r.tree.FuncReturnType(decl)
+	body := r.tree.FuncBody(decl)
 
 	fnScope := newScope(ScopeFunc, pkg, decl)
 	r.info.Scopes[decl] = fnScope
@@ -690,10 +685,10 @@ func (r *resolver) resolvePackageMemberExpr(n ast.NodeIndex, pkgSym *Symbol) {
 }
 
 func (r *resolver) resolveCompositeLit(scope *Scope, n ast.NodeIndex) {
-	children := r.tree.Children(n)
-	r.resolveType(scope, children[0])
-	for _, elem := range children[1:] {
-		if r.tree.Nodes[elem].Kind == enums.NodeKinds.KeyValueExpr {
+	typeExpr, elems := r.tree.CompositeLitElems(n)
+	r.resolveType(scope, typeExpr)
+	for _, elem := range elems {
+		if r.tree.IsKeyedElement(elem) {
 			// The key is a struct field name, resolved once the literal's
 			// type is known (type-checking's job); only the value
 			// resolves lexically here.

@@ -281,30 +281,11 @@ func (g *Generator) genBinaryExpr(n ast.NodeIndex) llvm.Value {
 	isFloat := lt.IsFloatKind()
 
 	switch op {
-	case "+":
-		switch {
-		case lt.Kind == sema.TypeString:
+	case "+", "-", "*", "/":
+		if op == "+" && lt.Kind == sema.TypeString {
 			return g.genStringConcat(lv, rv)
-		case isFloat:
-			return g.builder.CreateFAdd(lv, rv, "")
-		default:
-			return g.builder.CreateAdd(lv, rv, "")
 		}
-	case "-":
-		if isFloat {
-			return g.builder.CreateFSub(lv, rv, "")
-		}
-		return g.builder.CreateSub(lv, rv, "")
-	case "*":
-		if isFloat {
-			return g.builder.CreateFMul(lv, rv, "")
-		}
-		return g.builder.CreateMul(lv, rv, "")
-	case "/":
-		if isFloat {
-			return g.builder.CreateFDiv(lv, rv, "")
-		}
-		return g.builder.CreateSDiv(lv, rv, "")
+		return g.genArithOp(op, lv, rv, isFloat)
 	case "%":
 		return g.builder.CreateSRem(lv, rv, "")
 	case "&":
@@ -345,6 +326,42 @@ func (g *Generator) genBinaryExpr(n ast.NodeIndex) llvm.Value {
 		return g.genIntOrder(op, lv, rv)
 	default:
 		panic("codegen: unsupported binary operator " + op)
+	}
+}
+
+// genArithOp lowers `+ - * /` for an already-evaluated operand pair (lv, rv),
+// dispatching to the matching float instruction whenever isFloat - shared by
+// genBinaryExpr, genAssignStmt's compound-assignment cases (`+= -= *= /=`),
+// and genIncDecStmt (`++`/`--`, which only ever passes "+"/"-"), so this
+// float-vs-int dispatch lives in exactly one place instead of three
+// hand-written copies of the same switch (see AGENTS.md's Architecture
+// section). String concatenation (`+`'s other overload) isn't handled here -
+// every caller special-cases it first, since only some of them (genBinaryExpr,
+// genAssignStmt's `+=`) ever see a string operand at all.
+func (g *Generator) genArithOp(op string, lv, rv llvm.Value, isFloat bool) llvm.Value {
+	switch op {
+	case "+":
+		if isFloat {
+			return g.builder.CreateFAdd(lv, rv, "")
+		}
+		return g.builder.CreateAdd(lv, rv, "")
+	case "-":
+		if isFloat {
+			return g.builder.CreateFSub(lv, rv, "")
+		}
+		return g.builder.CreateSub(lv, rv, "")
+	case "*":
+		if isFloat {
+			return g.builder.CreateFMul(lv, rv, "")
+		}
+		return g.builder.CreateMul(lv, rv, "")
+	case "/":
+		if isFloat {
+			return g.builder.CreateFDiv(lv, rv, "")
+		}
+		return g.builder.CreateSDiv(lv, rv, "")
+	default:
+		panic("codegen: genArithOp called with unsupported operator " + op)
 	}
 }
 
@@ -663,7 +680,7 @@ func (g *Generator) genMethodCall(calleeNode ast.NodeIndex, argNodes []ast.NodeI
 // whatever garbage the destination's memory already held.
 func (g *Generator) genCompositeLitInto(dst llvm.Value, n ast.NodeIndex) {
 	t := g.info.Types[n]
-	elems := g.tree.Children(n)[1:]
+	_, elems := g.tree.CompositeLitElems(n)
 
 	switch t.Kind {
 	case sema.TypeStruct:
@@ -672,18 +689,11 @@ func (g *Generator) genCompositeLitInto(dst llvm.Value, n ast.NodeIndex) {
 			addr := g.builder.CreateStructGEP(layout.llvmType, dst, i, "")
 			g.builder.CreateStore(llvm.ConstNull(ft), addr)
 		}
-		keyed := len(elems) > 0 && g.tree.Nodes[elems[0]].Kind == enums.NodeKinds.KeyValueExpr
-		if keyed {
-			for _, e := range elems {
-				sym := g.info.Refs[g.tree.Child(e, 0)]
-				addr := g.builder.CreateStructGEP(layout.llvmType, dst, layout.fieldIndex[sym], "")
-				g.storeValueInto(addr, g.tree.Child(e, 1))
-			}
-		} else {
-			for i, e := range elems {
-				addr := g.builder.CreateStructGEP(layout.llvmType, dst, i, "")
-				g.storeValueInto(addr, e)
-			}
+		keyed := len(elems) > 0 && g.tree.IsKeyedElement(elems[0])
+		for i, e := range elems {
+			idx, valueNode := g.structLitFieldSlot(layout, e, i, keyed)
+			addr := g.builder.CreateStructGEP(layout.llvmType, dst, idx, "")
+			g.storeValueInto(addr, valueNode)
 		}
 
 	case sema.TypeArray:

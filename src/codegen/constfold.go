@@ -230,7 +230,7 @@ func (g *Generator) constFloatBinaryExpr(n ast.NodeIndex, op string, lv, rv llvm
 // runtime (see AGENTS.md/sema: a keyed literal need not name every field).
 func (g *Generator) constCompositeLit(n ast.NodeIndex) (llvm.Value, bool) {
 	t := g.info.Types[n]
-	elems := g.tree.Children(n)[1:]
+	_, elems := g.tree.CompositeLitElems(n)
 
 	switch t.Kind {
 	case sema.TypeStruct:
@@ -239,24 +239,14 @@ func (g *Generator) constCompositeLit(n ast.NodeIndex) (llvm.Value, bool) {
 		for i, ft := range layout.fieldTypes {
 			vals[i] = llvm.ConstNull(ft)
 		}
-		keyed := len(elems) > 0 && g.tree.Nodes[elems[0]].Kind == enums.NodeKinds.KeyValueExpr
-		if keyed {
-			for _, e := range elems {
-				sym := g.info.Refs[g.tree.Child(e, 0)]
-				v, ok := g.constExpr(g.tree.Child(e, 1))
-				if !ok {
-					return llvm.Value{}, false
-				}
-				vals[layout.fieldIndex[sym]] = v
+		keyed := len(elems) > 0 && g.tree.IsKeyedElement(elems[0])
+		for i, e := range elems {
+			idx, valueNode := g.structLitFieldSlot(layout, e, i, keyed)
+			v, ok := g.constExpr(valueNode)
+			if !ok {
+				return llvm.Value{}, false
 			}
-		} else {
-			for i, e := range elems {
-				v, ok := g.constExpr(e)
-				if !ok {
-					return llvm.Value{}, false
-				}
-				vals[i] = v
-			}
+			vals[idx] = v
 		}
 		return llvm.ConstNamedStruct(layout.llvmType, vals), true
 

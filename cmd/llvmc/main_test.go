@@ -401,8 +401,9 @@ func TestBinary_ImportsExample(t *testing.T) {
 // TestCompileAndRunProgram_CrossPackageImports drives compileAndRunProgram
 // in-process (via loader.LoadProgram over an afero.MemMapFs, so no real
 // filesystem is involved) against a two-package program - proving the
-// cmd/llvmc <-> loader <-> sema bridging (compileAndRunProgram,
-// runPipeline) works end to end, not just the individually-tested pieces.
+// cmd/llvmc <-> loader <-> src/compiler <-> sema bridging
+// (compileAndRunProgram, compiler.CompileProgram, its shared finishPipeline
+// tail) works end to end, not just the individually-tested pieces.
 func TestCompileAndRunProgram_CrossPackageImports(t *testing.T) {
 	fs := afero.NewMemMapFs()
 	sep := string(filepath.Separator)

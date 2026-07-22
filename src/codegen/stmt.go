@@ -133,32 +133,12 @@ func (g *Generator) genAssignStmt(n ast.NodeIndex) {
 
 	var result llvm.Value
 	switch op {
-	case "+=":
-		switch {
-		case targetType.Kind == sema.TypeString:
+	case "+=", "-=", "*=", "/=":
+		baseOp := op[:1] // "+=" -> "+", etc.
+		if baseOp == "+" && targetType.Kind == sema.TypeString {
 			result = g.genStringConcat(cur, rhs)
-		case isFloat:
-			result = g.builder.CreateFAdd(cur, rhs, "")
-		default:
-			result = g.builder.CreateAdd(cur, rhs, "")
-		}
-	case "-=":
-		if isFloat {
-			result = g.builder.CreateFSub(cur, rhs, "")
 		} else {
-			result = g.builder.CreateSub(cur, rhs, "")
-		}
-	case "*=":
-		if isFloat {
-			result = g.builder.CreateFMul(cur, rhs, "")
-		} else {
-			result = g.builder.CreateMul(cur, rhs, "")
-		}
-	case "/=":
-		if isFloat {
-			result = g.builder.CreateFDiv(cur, rhs, "")
-		} else {
-			result = g.builder.CreateSDiv(cur, rhs, "")
+			result = g.genArithOp(baseOp, cur, rhs, isFloat)
 		}
 	default:
 		panic("codegen: unsupported compound assignment operator " + op)
@@ -177,22 +157,18 @@ func (g *Generator) genIncDecStmt(n ast.NodeIndex) {
 	cur := g.builder.CreateLoad(llt, addr, "")
 	isInc := g.tree.Text(n) == "++"
 
-	var result llvm.Value
-	if t.IsFloatKind() {
-		one := llvm.ConstFloat(llt, 1)
-		if isInc {
-			result = g.builder.CreateFAdd(cur, one, "")
-		} else {
-			result = g.builder.CreateFSub(cur, one, "")
-		}
+	isFloat := t.IsFloatKind()
+	var one llvm.Value
+	if isFloat {
+		one = llvm.ConstFloat(llt, 1)
 	} else {
-		one := llvm.ConstInt(llt, 1, true)
-		if isInc {
-			result = g.builder.CreateAdd(cur, one, "")
-		} else {
-			result = g.builder.CreateSub(cur, one, "")
-		}
+		one = llvm.ConstInt(llt, 1, true)
 	}
+	op := "-"
+	if isInc {
+		op = "+"
+	}
+	result := g.genArithOp(op, cur, one, isFloat)
 	g.builder.CreateStore(result, addr)
 }
 

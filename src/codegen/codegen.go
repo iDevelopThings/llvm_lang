@@ -302,42 +302,32 @@ func (g *Generator) enter(tree *ast.Tree) {
 func (g *Generator) genPackage(trees []*ast.Tree) {
 	for _, tree := range trees {
 		g.enter(tree)
-		for _, d := range tree.Children(tree.Root) {
-			if tree.Nodes[d].Kind == enums.NodeKinds.StructDecl {
-				g.declareStructType(d)
-			}
+		for d := range tree.TopLevelDeclsOfKind(enums.NodeKinds.StructDecl) {
+			g.declareStructType(d)
 		}
 	}
 	for _, tree := range trees {
 		g.enter(tree)
-		for _, d := range tree.Children(tree.Root) {
-			if tree.Nodes[d].Kind == enums.NodeKinds.StructDecl {
-				g.defineStructBody(d)
-			}
+		for d := range tree.TopLevelDeclsOfKind(enums.NodeKinds.StructDecl) {
+			g.defineStructBody(d)
 		}
 	}
 	for _, tree := range trees {
 		g.enter(tree)
-		for _, d := range tree.Children(tree.Root) {
-			if tree.Nodes[d].Kind == enums.NodeKinds.VarDecl {
-				g.genGlobalVarDecl(d)
-			}
+		for d := range tree.TopLevelDeclsOfKind(enums.NodeKinds.VarDecl) {
+			g.genGlobalVarDecl(d)
 		}
 	}
 	for _, tree := range trees {
 		g.enter(tree)
-		for _, d := range tree.Children(tree.Root) {
-			if tree.Nodes[d].Kind == enums.NodeKinds.FuncDecl {
-				g.declareFuncSignature(d)
-			}
+		for d := range tree.TopLevelDeclsOfKind(enums.NodeKinds.FuncDecl) {
+			g.declareFuncSignature(d)
 		}
 	}
 	for _, tree := range trees {
 		g.enter(tree)
-		for _, d := range tree.Children(tree.Root) {
-			if tree.Nodes[d].Kind == enums.NodeKinds.FuncDecl {
-				g.genFuncBody(d)
-			}
+		for d := range tree.TopLevelDeclsOfKind(enums.NodeKinds.FuncDecl) {
+			g.genFuncBody(d)
 		}
 	}
 }
@@ -374,7 +364,7 @@ func (g *Generator) defineStructBody(decl ast.NodeIndex) {
 	info := g.info.Structs[g.tree.Text(nameNode)]
 	layout := g.structLayouts[info]
 
-	fieldNodes := g.tree.Children(decl)[1:]
+	fieldNodes := g.tree.StructFields(decl)
 	fieldTypes := make([]llvm.Type, len(fieldNodes))
 	fieldSemaTypes := make([]sema.Type, len(fieldNodes))
 	for i, fieldNode := range fieldNodes {
@@ -389,6 +379,25 @@ func (g *Generator) defineStructBody(decl ast.NodeIndex) {
 	layout.fieldTypes = fieldTypes
 	layout.fieldSemaTypes = fieldSemaTypes
 	layout.llvmType.StructSetBody(fieldTypes, false)
+}
+
+// structLitFieldSlot resolves one struct composite-literal element - elems[i]
+// in declaration order, e itself, keyed reporting whether the whole literal
+// is keyed (see ast.Tree.IsKeyedElement) - to the field index it fills and
+// the value expression node that supplies it: a positional element fills
+// field i directly from e itself; a keyed element's field comes from its own
+// key (already resolved by sema - see Info.Refs), with i unused, and its
+// value from the KeyValueExpr's own value child. Shared by constfold.go's
+// constCompositeLit and expr.go's genCompositeLitInto - the one difference
+// left between those two callers (building a []llvm.Value vs storing into an
+// already-addressed destination) is all that remains once this element-to-
+// field mapping is factored out into one place.
+func (g *Generator) structLitFieldSlot(layout *structLayout, e ast.NodeIndex, i int, keyed bool) (fieldIndex int, valueNode ast.NodeIndex) {
+	if !keyed {
+		return i, e
+	}
+	sym := g.info.Refs[g.tree.Child(e, 0)]
+	return layout.fieldIndex[sym], g.tree.Child(e, 1)
 }
 
 // genGlobalVarDecl lowers one top-level `var` into a real LLVM global. See

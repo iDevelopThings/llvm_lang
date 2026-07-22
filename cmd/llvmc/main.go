@@ -45,11 +45,14 @@
 //     couldn't be resolved to a real file/directory, or its resolved
 //     directory has zero .llx files in it. A short usage message is printed
 //     to stderr; nothing is compiled.
-//   - 1: a compile-time diagnostic - the lexer, parser, sema.ResolvePackage,
-//     sema.CheckPackage, or codegen.GeneratePackage stage reported at least
-//     one error-severity diagnostic in any file. Every diagnostic collected
-//     by whichever stage failed first is printed to stderr via
-//     diag.FormatSnippet (a "file:line:col: severity: message" header plus
+//   - 1: a compile-time diagnostic - the lexer, parser,
+//     sema.ResolvePackage/ResolveProgram, sema.CheckProgram (src/compiler's
+//     finishPipeline always calls CheckProgram, even for a single, import-
+//     less package - treePackage is simply nil then, since CheckPackage is
+//     just CheckProgram(trees, infos, nil)), or codegen.GeneratePackage stage
+//     reported at least one error-severity diagnostic in any file. Every
+//     diagnostic collected by whichever stage failed first is printed to
+//     stderr via diag.FormatSnippet (a "file:line:col: severity: message" header plus
 //     the offending source line and a caret), and no later stage runs. This
 //     also covers the module failing LLVM's own verifier, and the module
 //     JIT-executing but containing no `main` function to run. With

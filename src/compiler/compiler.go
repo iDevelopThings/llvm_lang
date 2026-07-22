@@ -208,10 +208,16 @@ func finishPipeline(trees []*ast.Tree, diags map[*ast.Tree]*diag.Bag, infos map[
 		}
 	}
 
-	// llvm.PrintMessageAction matches this project's other LLVM-verifying
-	// call sites: LLVM prints any verification failure to the real stderr
-	// itself, we just need to know whether to stop here.
-	if err := llvm.VerifyModule(mod.LLVM, llvm.PrintMessageAction); err != nil {
+	// llvm.ReturnStatusAction, not llvm.PrintMessageAction: this package's
+	// own doc comment promises CLI-agnostic behavior (no io.Writer, no
+	// printed side effects - a caller decides how to print, if at all).
+	// PrintMessageAction would make LLVM itself write straight to the real
+	// OS stderr here, bypassing that promise - every other verifying call
+	// site in this codebase (codegen_test.go, imports_test.go,
+	// multifile_test.go) already uses ReturnStatusAction for exactly this
+	// reason. VerifyErr below already carries the error as a return value;
+	// cmd/llvmc's own finish is what actually prints it.
+	if err := llvm.VerifyModule(mod.LLVM, llvm.ReturnStatusAction); err != nil {
 		mod.Dispose()
 		return &Result{
 			Trees:     trees,
@@ -255,9 +261,10 @@ func mergeStage(diags map[*ast.Tree]*diag.Bag, trees []*ast.Tree, stageDiags map
 // Always goes through the *Label variants (with Label simply "" for a
 // diagnostic that never had one) so a span/label produced by an earlier
 // stage survives the merge instead of collapsing back to a single-point
-// caret.
+// caret. Uses src.Seq() rather than src.All() - this only ever ranges over
+// src once and discards it, so there's no need for All()'s defensive copy.
 func mergeBag(dst *diag.Bag, src *diag.Bag) {
-	for _, d := range src.All() {
+	for d := range src.Seq() {
 		if d.Severity == diag.SeverityWarning {
 			dst.WarnfLabel(d.Pos, d.End, d.Label, "%s", d.Msg)
 		} else {

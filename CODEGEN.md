@@ -299,6 +299,16 @@ return type for it: a bare `return`/falling off its end becomes `ret i32 0`
 section below), and `return expr` returns `expr` directly (typed `int` ==
 `i32`, so no cast is ever needed - see above).
 
+Codegen doesn't validate this itself: `main` declaring anything other than
+no return type or `int` is a real semantic rule (see `LANGUAGE.md`'s "The
+`main` function's return type" section), enforced by `sema.checkFuncDecl`
+before codegen ever runs - `declareFuncSignature` (`src/codegen/func.go`)
+simply forces `main`'s LLVM return type to `i32` unconditionally, trusting
+that whatever declared return type sema already accepted is one of those two
+(this used to be a codegen-level `g.errorAt` check instead, which was real
+type-checking logic living at the wrong layer - see `AGENTS.md`'s
+Architecture section).
+
 ## Local variables: entry-block allocas
 
 Every `var`/short-var-decl/parameter gets a stack slot via `alloca`, always
@@ -612,16 +622,23 @@ directory's own doc comments).
   zero `.llx` files in it, an imported package directory couldn't be found,
   or a real import cycle was detected (see `src/loader`'s `Load`/
   `LoadProgram`). A short message goes to stderr; nothing is compiled.
-- **1** - a compile-time diagnostic from the lexer, parser, `sema.Resolve`,
-  `sema.Check`, or `codegen.Generate` stage (the pipeline stops at the first
-  stage reporting an error-severity diagnostic, exactly like every other
-  driver of this pipeline in this codebase) - or the module failing LLVM's
-  own verifier, or a module with no `main` function to JIT-execute. Every
-  diagnostic from whichever stage failed is printed to stderr via
-  `diag.FormatSnippet` (a `file:line:col: severity: message` header plus the
-  offending source line and a caret). With `-emit-llvm`, this is the only
-  non-zero exit code reachable at all - a verified module's IR is always
-  printed and the process always exits 0 afterward (see below).
+- **1** - a compile-time diagnostic from the lexer, parser stage, or from
+  `src/compiler`'s `finishPipeline` (see this file's own "`src/compiler`:
+  pipeline orchestration" section above): `sema.ResolveProgram` (or
+  `ResolvePackage`, for an import-less package - `cmd/llvmc` always goes
+  through `loader.LoadProgram` -> `compiler.CompileProgram` regardless of
+  whether the compiled path is a single file or spans several packages, so
+  this is the one path actually reachable, not the older single-file
+  `sema.Resolve`/`sema.Check`/`codegen.Generate` entry points this section
+  used to describe here), `sema.CheckProgram`, or `codegen.GeneratePackage`
+  (the pipeline stops at the first stage reporting an error-severity
+  diagnostic in any file) - or the module failing LLVM's own verifier, or a
+  module with no `main` function to JIT-execute. Every diagnostic from
+  whichever stage failed is printed to stderr via `diag.FormatSnippet` (a
+  `file:line:col: severity: message` header plus the offending source line
+  and a caret). With `-emit-llvm`, this is the only non-zero exit code
+  reachable at all - a verified module's IR is always printed and the
+  process always exits 0 afterward (see below).
 - **otherwise** - the language program's own exit code. `func main()` always
   lowers to a real, parameterless `i32 @main()` regardless of whether the
   source declares a return type for it (see the "`main` is the real entry

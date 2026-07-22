@@ -8,6 +8,7 @@ package diag
 
 import (
 	"fmt"
+	"iter"
 	"sort"
 	"strings"
 
@@ -114,11 +115,28 @@ func (b *Bag) HasErrors() bool { return b.errN > 0 }
 // Len returns the total number of diagnostics, errors and warnings alike.
 func (b *Bag) Len() int { return len(b.diags) }
 
-// All returns every diagnostic in encounter order.
+// All returns every diagnostic in encounter order, as a defensive copy - safe
+// for a caller to hold onto or mutate independently of b. A caller that only
+// ever needs a single forward pass (e.g. merging every diagnostic into
+// another Bag - see compiler.mergeBag) should use Seq instead, which needs no
+// copy at all.
 func (b *Bag) All() []Diagnostic {
 	out := make([]Diagnostic, len(b.diags))
 	copy(out, b.diags)
 	return out
+}
+
+// Seq returns every diagnostic in encounter order as an iter.Seq, with no
+// defensive copy - use this instead of All() whenever a caller only ranges
+// over the result once and discards it.
+func (b *Bag) Seq() iter.Seq[Diagnostic] {
+	return func(yield func(Diagnostic) bool) {
+		for _, d := range b.diags {
+			if !yield(d) {
+				return
+			}
+		}
+	}
 }
 
 // Sorted returns diagnostics ordered by source position. Encounter order can

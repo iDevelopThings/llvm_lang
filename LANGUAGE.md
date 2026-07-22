@@ -105,6 +105,33 @@ x++
 
 `return` supports a single value only - no `return a, b` tuple returns, at least for now.
 
+### The `main` function's return type
+
+The function literally named `main` (no receiver) is special: it may declare
+no return type at all, or exactly `int` - any other declared return type
+(`func main() f64 { ... }`, `func main() string { ... }`, ...) is a compile
+error ("main must return either nothing or int"), enforced by
+`sema.checkFuncDecl`'s `checkMainReturnType` (`src/sema/typecheck.go`). This
+is a real, user-visible language rule, not just an internal implementation
+detail: `main` must ultimately hand a real process exit code back to the
+OS (a plain `i32` - see `CODEGEN.md`'s "`main` is the real entry point"
+section for how a declared-or-omitted `int` return type actually lowers),
+so no other return type could ever be a meaningful value there.
+
+```go
+func main() {
+    // fine - no declared return type, falls off the end with exit code 0
+}
+
+func main() int {
+    return 0 // fine
+}
+
+func main() f64 {
+    return 1.5 // error: main must return either nothing or int, got f64
+}
+```
+
 ## Types
 
 Primitive types: signed integers `i8`, `i16`, `i32`, `i64`; floats `f32`,

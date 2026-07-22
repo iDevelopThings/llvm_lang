@@ -281,10 +281,8 @@ func (c *checker) errorAtNodes(nodes []ast.NodeIndex, fallback ast.NodeIndex, fo
 func (c *checker) checkPackage(trees []*ast.Tree) {
 	for _, tree := range trees {
 		c.enter(tree)
-		for _, decl := range tree.Children(tree.Root) {
-			if tree.Nodes[decl].Kind == enums.NodeKinds.StructDecl {
-				c.checkStructDecl(decl)
-			}
+		for decl := range tree.TopLevelDeclsOfKind(enums.NodeKinds.StructDecl) {
+			c.checkStructDecl(decl)
 		}
 	}
 	for _, tree := range trees {
@@ -301,18 +299,19 @@ func (c *checker) checkPackage(trees []*ast.Tree) {
 }
 
 func (c *checker) checkStructDecl(decl ast.NodeIndex) {
-	for _, field := range c.tree.Children(decl)[1:] {
+	for _, field := range c.tree.StructFields(decl) {
 		c.typeFromNode(c.tree.Child(field, 1))
 	}
 }
 
 func (c *checker) checkFuncDecl(decl ast.NodeIndex) {
 	sig := c.funcSigForDecl(decl) // also checks params/return type exactly once
-	body := c.tree.Child(decl, 4)
+	c.checkMainReturnType(decl, sig)
+	body := c.tree.FuncBody(decl)
 
 	prevFunc := c.curFunc
 	c.curFunc = &enclosingFunc{
-		hasReturn: c.tree.Child(decl, 3) != ast.InvalidNode,
+		hasReturn: c.tree.FuncReturnType(decl) != ast.InvalidNode,
 		ret:       sig.Return,
 	}
 	c.checkBlock(body)
@@ -320,6 +319,27 @@ func (c *checker) checkFuncDecl(decl ast.NodeIndex) {
 		c.errorAt(decl, "missing return")
 	}
 	c.curFunc = prevFunc
+}
+
+// checkMainReturnType enforces LANGUAGE.md's rule for the function literally
+// named `main` (no receiver): it may declare no return type at all, or
+// exactly `int` - any other declared return type is a compile error. This
+// used to live in codegen (declareFuncSignature, src/codegen/func.go) as a
+// g.errorAt call, which was real type-checking logic living at the wrong
+// layer (see AGENTS.md's Architecture section) - codegen now trusts main's
+// return type is already valid by the time it lowers it, the same way it
+// trusts every other already-checked construct.
+func (c *checker) checkMainReturnType(decl ast.NodeIndex, sig funcSignature) {
+	if c.tree.FuncReceiver(decl) != ast.InvalidNode {
+		return
+	}
+	if c.tree.Text(c.tree.FuncName(decl)) != "main" {
+		return
+	}
+	if sig.Return.IsInvalid() || sig.Return.Kind == TypeVoid || sig.Return.Kind == TypeInt {
+		return
+	}
+	c.errorAt(c.tree.FuncReturnType(decl), "main must return either nothing or int, got %s", sig.Return)
 }
 
 // funcSigForDecl returns decl's (a FuncDecl's) signature, computing and
@@ -335,8 +355,8 @@ func (c *checker) funcSigForDecl(decl ast.NodeIndex) funcSignature {
 }
 
 func (c *checker) computeFuncSig(decl ast.NodeIndex) funcSignature {
-	paramList := c.tree.Child(decl, 2)
-	returnTypeNode := c.tree.Child(decl, 3)
+	paramList := c.tree.FuncParamList(decl)
+	returnTypeNode := c.tree.FuncReturnType(decl)
 
 	paramNodes := c.tree.Children(paramList)
 	params := make([]Type, len(paramNodes))
@@ -1450,11 +1470,16 @@ func (c *checker) crossPackageStructConstruction(info *StructInfo) bool {
 // firstUnexportedField returns the name of the first (in declaration order)
 // unexported field among fields - Field nodes belonging to tree, which may
 // differ from whichever tree is currently active in the checker (see
-// checkStructCompositeLit) - and whether one was found at all.
-func firstUnexportedField(tree *ast.Tree, fields []ast.NodeIndex) (string, bool) {
+// checkStructCompositeLit) - and whether one was found at all. Reads each
+// field's already-resolved Symbol.Exported bit (via info.Fields) rather than
+// re-deriving it from the field's source text a second time - isExportedName
+// is only ever meant to be called once, at declaration time (see its own doc
+// comment on scope.go: "so Exported never needs recomputing later"), and this
+// used to violate that.
+func firstUnexportedField(tree *ast.Tree, info *StructInfo, fields []ast.NodeIndex) (string, bool) {
 	for _, f := range fields {
 		name := tree.Text(tree.Child(f, 0))
-		if !isExportedName(name) {
+		if sym, ok := info.Fields[name]; ok && !sym.Exported {
 			return name, true
 		}
 	}
@@ -1689,8 +1714,7 @@ func (c *checker) methodSigForCallee(callee ast.NodeIndex) (funcSignature, bool)
 // element's field name (the work Resolve deferred; see resolveCompositeLit
 // in resolve.go).
 func (c *checker) checkCompositeLit(n ast.NodeIndex) Type {
-	children := c.tree.Children(n)
-	typeNode, elems := children[0], children[1:]
+	typeNode, elems := c.tree.CompositeLitElems(n)
 
 	target := c.typeFromNode(typeNode)
 	if target.IsInvalid() {
@@ -1720,7 +1744,7 @@ func (c *checker) checkCompositeLit(n ast.NodeIndex) Type {
 // type couldn't be determined - there's nothing to validate elem against,
 // but the value expression inside it is still real code worth checking.
 func (c *checker) checkCompositeLitElemFallback(elem ast.NodeIndex) {
-	if c.tree.Nodes[elem].Kind == enums.NodeKinds.KeyValueExpr {
+	if c.tree.IsKeyedElement(elem) {
 		c.checkValueExpr(c.tree.Child(elem, 1))
 		return
 	}
@@ -1739,9 +1763,9 @@ func (c *checker) checkStructCompositeLit(n ast.NodeIndex, target Type, elems []
 	// declared elsewhere in the package - see LANGUAGE.md's "Multi-file
 	// packages" section).
 	restore := c.pushTree(info.Symbol.Tree)
-	fields := c.tree.Children(info.Symbol.Decl)[1:] // Field nodes, declaration order
+	fields := c.tree.StructFields(info.Symbol.Decl) // Field nodes, declaration order
 	restore()
-	keyed := len(elems) > 0 && c.tree.Nodes[elems[0]].Kind == enums.NodeKinds.KeyValueExpr
+	keyed := len(elems) > 0 && c.tree.IsKeyedElement(elems[0])
 
 	// Go's own stricter rule for a *positional* literal constructing a
 	// struct from another package: reject it if the struct has ANY
@@ -1756,7 +1780,7 @@ func (c *checker) checkStructCompositeLit(n ast.NodeIndex, target Type, elems []
 	// ever matters across a package boundary - see
 	// crossPackageStructConstruction).
 	if !keyed && c.crossPackageStructConstruction(info) {
-		if name, ok := firstUnexportedField(info.Symbol.Tree, fields); ok {
+		if name, ok := firstUnexportedField(info.Symbol.Tree, info, fields); ok {
 			c.errorAt(n, "cannot use a positional literal to construct %s from another package: field %s is unexported", info.Symbol.Name, name)
 		}
 	}
@@ -1764,7 +1788,7 @@ func (c *checker) checkStructCompositeLit(n ast.NodeIndex, target Type, elems []
 	seen := make(map[string]bool)
 
 	for i, elem := range elems {
-		isKV := c.tree.Nodes[elem].Kind == enums.NodeKinds.KeyValueExpr
+		isKV := c.tree.IsKeyedElement(elem)
 		if isKV != keyed {
 			c.errorAt(elem, "cannot mix keyed and positional elements in a composite literal")
 			c.checkCompositeLitElemFallback(elem)
@@ -1842,7 +1866,7 @@ func (c *checker) checkKeyedStructElem(elem ast.NodeIndex, info *StructInfo, see
 // language's grammar's semantics yet (see BLOCKERS.md).
 func (c *checker) checkArrayCompositeLit(n ast.NodeIndex, target Type, elems []ast.NodeIndex) {
 	for _, elem := range elems {
-		if c.tree.Nodes[elem].Kind == enums.NodeKinds.KeyValueExpr {
+		if c.tree.IsKeyedElement(elem) {
 			c.errorAt(elem, "keyed elements are not supported in array literals")
 			c.checkValueExpr(c.tree.Child(elem, 1))
 			continue
