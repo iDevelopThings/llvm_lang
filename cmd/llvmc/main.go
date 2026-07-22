@@ -4,13 +4,18 @@
 // containing directory, so both forms compile the identical set of files) -
 // it resolves the package's full file list (src/loader), drives every file
 // through the full compiler pipeline (lexer -> parser per file, then
-// sema.ResolvePackage -> sema.CheckPackage -> codegen.GeneratePackage across
-// all of them together), and, on full success, JIT-executes the resulting
+// sema.ResolvePackage/ResolveProgram -> sema.CheckProgram ->
+// codegen.GeneratePackage across all of them together - the actual pipeline
+// orchestration lives in src/compiler, not this package; see that package's
+// own doc comment for why), and, on full success, JIT-executes the resulting
 // shared module's `func main()` directly in this process - so the program's
 // own `print` calls (which lower to real libc `printf` calls, see
 // AGENTS.md's codegen section) write to this process's real stdout,
 // something a `go test`-hosted JIT call can't easily show (see BLOCKERS.md's
-// codegen-phase entry 7).
+// codegen-phase entry 7). This package itself is now the thinnest possible
+// CLI shell on top of src/loader and src/compiler: flag parsing, printing
+// diagnostics/IR, exit codes, and JIT execution - no pipeline logic of its
+// own.
 //
 // Usage:
 //
@@ -72,13 +77,11 @@ import (
 	"sync"
 	"syscall"
 
-	"llvm_lang/src/ast"
 	"llvm_lang/src/codegen"
+	"llvm_lang/src/compiler"
 	"llvm_lang/src/diag"
 	"llvm_lang/src/lexer"
 	"llvm_lang/src/loader"
-	"llvm_lang/src/parser"
-	"llvm_lang/src/sema"
 
 	"github.com/spf13/afero"
 	"tinygo.org/x/go-llvm"
@@ -145,188 +148,76 @@ func compileAndRun(name, src string, stderr io.Writer, emitLLVM bool) int {
 
 // compileAndRunPackage drives the full pipeline for every file in files, as
 // one package with no imports of its own (see LANGUAGE.md's "Multi-file
-// packages" section): lexer.NewFile -> parser.ParseFile per file, then
-// sema.ResolvePackage -> runPipeline. Kept as its own entry point (rather
-// than routing through loader.LoadProgram/compileAndRunProgram) purely so
-// this package's existing in-process tests, which build source strings
-// directly with no real file/directory on disk, don't need one - see
-// compileAndRunProgram for the real multi-*package* (import-aware) driver
-// run actually uses.
+// packages" section) - the actual pipeline orchestration lives in
+// src/compiler (compiler.CompilePackage); this is just that call plus this
+// CLI's own diagnostic-printing/JIT-or-emit tail (finish). Kept as its own
+// entry point (rather than routing through loader.LoadProgram/
+// compileAndRunProgram) purely so this package's existing in-process tests,
+// which build source strings directly with no real file/directory on disk,
+// don't need one - see compileAndRunProgram for the real multi-*package*
+// (import-aware) driver run actually uses.
 func compileAndRunPackage(files []loader.SourceFile, stderr io.Writer, emitLLVM bool) int {
-	trees := make([]*ast.Tree, len(files))
-	anyParseErrors := false
-
-	for i, f := range files {
-		lf := lexer.NewFile(f.Name, f.Src)
-		tree, pdiags := parser.ParseFile(lf)
-		if pdiags.Len() > 0 {
-			printDiags(stderr, lf, pdiags)
-		}
-		if pdiags.HasErrors() {
-			anyParseErrors = true
-		}
-		trees[i] = tree
-	}
-	if anyParseErrors {
-		return exitCompile
-	}
-
-	infos, rdiags := sema.ResolvePackage(trees)
-	// moduleName matches this driver's own single-file convention of using
-	// the compiled path as the module's name - the package's first file is
-	// as reasonable a choice as any for a multi-file package. treePackage is
-	// nil - a single package has no cross-package export enforcement to do
-	// at all (see sema.CheckProgram's own doc comment).
-	return runPipeline(trees, infos, rdiags, nil, files[0].Name, stderr, emitLLVM)
+	return finish(compiler.CompilePackage(files), stderr, emitLLVM)
 }
 
 // compileAndRunProgram drives the full pipeline for prog - a whole program,
 // potentially spanning several packages linked by `import` declarations
 // (see loader.LoadProgram, which discovers/parses/dedups/cycle-checks the
 // entire transitive import graph up front - every file's own parse
-// diagnostics were already collected then, not here).
-//
-// prog.Order already lists every package in dependency order (see its own
-// doc comment), which is exactly the order sema.ResolveProgram needs: each
-// package's own PackageUnit is built and resolved before any package that
-// imports it, so a FileImport's TargetKey (this driver uses each package's
-// own resolved Dir as that key) always names an already-resolved unit.
-//
-// Every package's trees are then flattened into one slice and driven through
-// the exact same sema.CheckProgram/codegen.GeneratePackage/verify/execute
-// tail every other entry point in this file shares (runPipeline) - see
-// CODEGEN.md's "Multi-file packages" section for why one shared Module needs
-// no package-boundary awareness at all, the same reasoning extended one
-// level up unchanged.
+// diagnostics were already collected then, not here) - via
+// compiler.CompileProgram, then this CLI's own diagnostic-printing/
+// JIT-or-emit tail (finish), exactly like compileAndRunPackage.
 func compileAndRunProgram(prog *loader.Program, stderr io.Writer, emitLLVM bool) int {
-	var trees []*ast.Tree
-	units := make([]*sema.PackageUnit, 0, len(prog.Order))
-	anyParseErrors := false
-
-	for _, pkg := range prog.Order {
-		unitTrees := make([]*ast.Tree, len(pkg.Files))
-		var fileImports map[*ast.Tree][]sema.FileImport
-
-		for i, f := range pkg.Files {
-			unitTrees[i] = f.Tree
-			trees = append(trees, f.Tree)
-
-			if f.Diags.Len() > 0 {
-				printDiags(stderr, f.Tree.File, f.Diags)
-			}
-			if f.Diags.HasErrors() {
-				anyParseErrors = true
-			}
-
-			if len(f.Imports) == 0 {
-				continue
-			}
-			if fileImports == nil {
-				fileImports = make(map[*ast.Tree][]sema.FileImport, len(pkg.Files))
-			}
-			imps := make([]sema.FileImport, len(f.Imports))
-			for j, imp := range f.Imports {
-				imps[j] = sema.FileImport{
-					LocalName: imp.LocalName,
-					TargetKey: imp.Package.Dir,
-				}
-			}
-			fileImports[f.Tree] = imps
-		}
-
-		units = append(units, &sema.PackageUnit{
-			Key:         pkg.Dir,
-			Name:        pkg.Name,
-			Trees:       unitTrees,
-			FileImports: fileImports,
-		})
-	}
-	if anyParseErrors {
-		return exitCompile
-	}
-
-	infos, rdiags, _, treePackage := sema.ResolveProgram(units)
-	// moduleName matches compileAndRunPackage's own convention: the entry
-	// package's first file is as reasonable a choice as any for the whole
-	// program's module name.
-	moduleName := prog.Entry.Files[0].Name
-	return runPipeline(trees, infos, rdiags, treePackage, moduleName, stderr, emitLLVM)
+	return finish(compiler.CompileProgram(prog), stderr, emitLLVM)
 }
 
-// runPipeline drives the shared tail of the compiler pipeline, once trees
-// have already been resolved (infos/rdiags) by whichever of
-// compileAndRunPackage/compileAndRunProgram's own sema entry point:
-// sema.CheckProgram (treePackage nil disables its cross-package export
-// enforcement entirely - see its own doc comment - exactly right for
-// compileAndRunPackage's plain single, import-less package) ->
-// codegen.GeneratePackage -> LLVM's own module verifier -> either
-// JIT-execution (the default) or -emit-llvm's IR dump, stopping at the
-// first stage that reports an error-severity diagnostic in any file (any
-// diagnostics from a stage - warnings included - are printed even when that
-// stage doesn't itself report an error, so nothing collected along the way
-// is silently dropped).
-func runPipeline(trees []*ast.Tree, infos map[*ast.Tree]*sema.Info, rdiags map[*ast.Tree]*diag.Bag, treePackage map[*ast.Tree]*sema.Scope, moduleName string, stderr io.Writer, emitLLVM bool) int {
-	if printAnyDiags(stderr, trees, rdiags) {
-		return exitCompile
+// finish is this CLI's own tail shared by compileAndRunPackage/
+// compileAndRunProgram, once src/compiler has already driven res's trees
+// through the whole resolve/check/codegen/verify pipeline: print every
+// tree's diagnostics (any diagnostics collected along the way - warnings
+// included - are printed even when the pipeline ultimately succeeded, so
+// nothing collected is silently dropped), then, if res.Module is nil,
+// report why (a real diagnostic, or - more rarely - res.VerifyErr) and
+// return the compile-error exit code; otherwise either dump the verified
+// module's LLVM IR text (-emit-llvm) or JIT-execute its `main` (the
+// default).
+//
+// This is the only place left in this package that's CLI-specific rather
+// than pipeline orchestration: printing (io.Writer/diag.FormatSnippet),
+// exit codes, -emit-llvm's stdout dump, and JIT execution (jitRunMain) all
+// belong here, not in src/compiler.
+func finish(res *compiler.Result, stderr io.Writer, emitLLVM bool) int {
+	for _, tree := range res.Trees {
+		b := res.Diags[tree]
+		if b.Len() > 0 {
+			printDiags(stderr, tree.File, b)
+		}
 	}
 
-	cdiags := sema.CheckProgram(trees, infos, treePackage)
-	if printAnyDiags(stderr, trees, cdiags) {
-		return exitCompile
-	}
-
-	mod, gdiags := codegen.GeneratePackage(trees, infos, moduleName)
-	if printAnyDiags(stderr, trees, gdiags) {
-		mod.Dispose()
-		return exitCompile
-	}
-
-	// llvm.PrintMessageAction matches main.go's own smoke-test usage exactly
-	// (see that file): LLVM prints any verification failure to stderr itself,
-	// we just need to know whether to stop here.
-	if err := llvm.VerifyModule(mod.LLVM, llvm.PrintMessageAction); err != nil {
-		fmt.Fprintf(stderr, "llvmc: module verification failed: %v\n", err)
-		mod.Dispose()
+	if res.Module == nil {
+		if res.VerifyErr != nil {
+			fmt.Fprintf(stderr, "llvmc: %v\n", res.VerifyErr)
+		}
 		return exitCompile
 	}
 
 	// -emit-llvm: dump the verified module's IR text and stop here - this
-	// path never reaches llvm.NewExecutionEngine, so a plain mod.Dispose()
-	// (rather than the engine/context dance jitRunMain does below) is
-	// correct, same as the diagnostic/verification-failure paths above.
+	// path never reaches llvm.NewExecutionEngine, so a plain
+	// res.Module.Dispose() (rather than the engine/context dance jitRunMain
+	// does below) is correct, same as the diagnostic/verification-failure
+	// paths above.
 	if emitLLVM {
-		fmt.Print(mod.LLVM.String())
-		mod.Dispose()
+		fmt.Print(res.Module.LLVM.String())
+		res.Module.Dispose()
 		return 0
 	}
 
-	code, err := jitRunMain(mod)
+	code, err := jitRunMain(res.Module)
 	if err != nil {
 		fmt.Fprintf(stderr, "llvmc: %v\n", err)
 		return exitCompile
 	}
 	return code
-}
-
-// printAnyDiags prints every file's diagnostics (see printDiags) from a
-// per-tree diagnostic map, using each tree's own *lexer.File (ast.Tree.File)
-// to decode its diagnostics' Pos values into a line/column (see diag.Bag's
-// own doc comment: a diagnostic's position is only meaningful relative to
-// the file it was reported against). Reports whether any file had at least
-// one error-severity diagnostic, so the caller knows whether to stop the
-// pipeline.
-func printAnyDiags(w io.Writer, trees []*ast.Tree, diags map[*ast.Tree]*diag.Bag) bool {
-	hasErrors := false
-	for _, tree := range trees {
-		b := diags[tree]
-		if b.Len() > 0 {
-			printDiags(w, tree.File, b)
-		}
-		if b.HasErrors() {
-			hasErrors = true
-		}
-	}
-	return hasErrors
 }
 
 // printDiags renders every diagnostic in b (sorted by source position) via

@@ -416,10 +416,12 @@ See `LANGUAGE.md`'s "Imports" section for the language-level model
 file, exported-only cross-package access). Nothing above changes at all:
 `GeneratePackage` is simply called with *every package's* trees/infos in the
 whole program flattened into one `[]*ast.Tree`/`map[*ast.Tree]*sema.Info`
-(built by `cmd/llvmc`'s `compileAndRunProgram` from `loader.LoadProgram`'s
+(built by `src/compiler`'s `CompileProgram` from `loader.LoadProgram`'s
 already-resolved import graph, via `sema.ResolveProgram`/`CheckProgram` -
-see their own doc comments) - there is still only ever **one shared
-`llvm.Module` for the entire program**, never one Module per package linked
+see their own doc comments, and the "`src/compiler`: pipeline orchestration"
+section below for where that call now actually lives) - there is still only
+ever **one shared `llvm.Module` for the entire program**, never one Module
+per package linked
 together, for exactly the same reason multi-file support already gave for
 one Module per *file*: every `*sema.Symbol`/`*sema.StructInfo` lookup
 (`Generator.funcs`/`globals`/`structLayouts`) is already keyed by pointer
@@ -450,6 +452,44 @@ into it resolve to that one declaration via the same pointer-keyed maps
 above. There is no separate-compilation/linking concept for this project to
 get right here at all (see `DECISIONS.md`).
 
+# `src/compiler`: pipeline orchestration
+
+Sits directly above `src/loader` in this project's own layering: `loader`
+owns "given a path, discover/parse/resolve the file/package/program
+structure" (pure I/O + discovery, per its own doc comment); `compiler` is
+the next layer up - "given that loaded structure, actually run it through
+the semantic/codegen pipeline". It exposes exactly two entry points:
+
+- `CompilePackage(files []loader.SourceFile) *Result` - the flat-file-list
+  case (no real filesystem/`loader.Program` needed): `lexer.NewFile` ->
+  `parser.ParseFile` per file, then `sema.ResolvePackage` -> the shared
+  tail below. `treePackage` is nil going into `sema.CheckProgram` - a
+  single, import-less package has no cross-package export enforcement to
+  do at all (see `sema.CheckProgram`'s own doc comment).
+- `CompileProgram(prog *loader.Program) *Result` - the real,
+  potentially-multi-package case: every package in `prog.Order` (already in
+  dependency order - see that field's own doc comment) becomes one
+  `sema.PackageUnit`, and every package's trees are flattened into one
+  slice, driven through `sema.ResolveProgram` -> the same shared tail.
+
+Both funnel into one unexported tail (`finishPipeline`) that mirrors this
+file's own `GeneratePackage`/multi-file writeup exactly: `sema.CheckProgram`
+-> `codegen.GeneratePackage` -> LLVM's own module verifier, stopping at the
+first stage that reports an error-severity diagnostic in any file. A
+`Result` carries every tree, every tree's own merged diagnostics (`Diags`),
+and - only on full success - the generated, verified `*codegen.Module`
+(`nil` on any failure; a rarer verifier-only failure with no source
+position to attribute it to is `Result.VerifyErr` instead, `Diags` in that
+case being otherwise empty). Disposal of a returned `Module` is the caller's
+job, same as `codegen.GeneratePackage`'s own `Module.Dispose()` contract.
+
+This package is deliberately **pure orchestration and CLI-agnostic**: no
+`io.Writer`/stderr, no exit codes, no flag handling, and no lexer/parser/
+sema/codegen *logic* of its own beyond calling those packages' existing
+entry points in the right order - a `Result` is data a caller decides what
+to do with (print how it wants, choose an exit code, feed it to a JIT, feed
+it to an LSP), not something this package prints or exits on its own behalf.
+
 # The `llvmc` CLI driver (`cmd/llvmc`)
 
 The first way to actually *run* an llvm_lang program as a human, rather than
@@ -459,14 +499,21 @@ it resolves the whole program's transitive import graph
 (`src/loader`'s `LoadProgram`, backed by `afero.NewOsFs()` - see
 `LANGUAGE.md`'s "Imports" section for the path-resolution/dedup/cycle rules
 this implements, and `src/loader`'s own package doc comment for why file
-*parsing* now lives there too, not just discovery), drives every package's
-files through the rest of the pipeline (`sema.ResolveProgram` ->
-`sema.CheckProgram` -> `codegen.GeneratePackage` across the whole program's
-trees flattened together - `compileAndRunProgram`/`runPipeline`), and on
-full success JIT-executes the resulting module's `main` directly in this
-process - so the program's own `print` calls (real libc `printf` calls under
-the hood) write to this process's real stdout, which a `go test`-hosted JIT
-call can't easily show.
+*parsing* now lives there too, not just discovery), hands the result to
+`src/compiler`'s `CompileProgram` (see above) to drive it through the rest
+of the pipeline, and on full success JIT-executes the resulting module's
+`main` directly in this process - so the program's own `print` calls (real
+libc `printf` calls under the hood) write to this process's real stdout,
+which a `go test`-hosted JIT call can't easily show.
+
+`cmd/llvmc` itself is now the thinnest possible CLI shell on top of
+`src/loader` and `src/compiler`: flag parsing, printing every tree's
+diagnostics from a `compiler.Result` (still via `diag.FormatSnippet` -
+unchanged, see below), translating `Result.Module == nil` into the
+compile-error exit code, and - on success - either dumping the verified
+module's IR text (`-emit-llvm`) or JIT-executing it and propagating its
+`i32` result as this process's own exit code. None of the actual
+resolve/check/codegen/verify orchestration lives in this package anymore.
 
 A single-package, single-file program (a directory containing exactly one
 `.llx` file, or a file whose sibling directory has no other `.llx` files,
@@ -475,13 +522,14 @@ there's no separate single-file/single-package code path in `llvmc` itself,
 only `compileAndRun`/`compileAndRunPackage` (used by this package's own
 in-process tests that build source strings directly, with no real
 file/directory on disk and so no need to go through `loader.LoadProgram` at
-all) staying as thin wrappers that call the same shared `runPipeline` tail
-`compileAndRunProgram` does, just fed by `sema.ResolvePackage` instead of
-`sema.ResolveProgram` (and so with no cross-package export enforcement to
-do - `runPipeline`'s own `treePackage` argument is simply nil in that case,
-see `sema.CheckProgram`'s doc comment) - the same relationship
-`codegen.Generate`/`sema.Resolve`/`sema.Check` each have to their own
-multi-file counterpart, one level further up.
+all) staying as thin wrappers that call `src/compiler`'s `CompilePackage`
+instead of `CompileProgram` (and so, transitively, `sema.ResolvePackage`
+instead of `sema.ResolveProgram`, with no cross-package export enforcement -
+see `CompilePackage`'s own doc comment) followed by the exact same
+diagnostic-printing/JIT-or-emit tail (`finish`) `compileAndRunProgram`
+shares - the same relationship `codegen.Generate`/`sema.Resolve`/
+`sema.Check` each have to their own multi-file counterpart, one level
+further up.
 
 ## Building and running
 
@@ -592,8 +640,16 @@ Once a `codegen.Module`'s `LLVM` field is handed to
 `llvm.NewExecutionEngine`, the engine takes ownership of it - calling
 `Module.Dispose()` afterward would double-free it (this exact pitfall is
 already documented on `src/codegen/codegen_test.go`'s `compileAndJIT`
-helper). So `llvmc` only calls `Module.Dispose()` on the paths that never
-reach a live execution engine (a codegen diagnostic, or a failed
-`llvm.VerifyModule`); once JIT execution is about to happen, disposal goes
-through the engine (`engine.Dispose()`) and then the module's owning
-`Context` (`mod.Ctx.Dispose()`), in that order, instead.
+helper). So the two paths that never reach a live execution engine - a
+codegen diagnostic, or a failed `llvm.VerifyModule` - already call
+`Module.Dispose()` themselves, inside `src/compiler`'s `finishPipeline`,
+before ever handing a `Result` back (a `Result.Module` is always nil on
+either path - see `src/compiler`'s own doc comment - so `cmd/llvmc` never
+gets a live `*codegen.Module` for either of these two cases at all, let
+alone a chance to double-dispose one). Once JIT execution is about to
+happen (a `Result.Module` came back non-nil), disposal goes through the
+engine (`engine.Dispose()`) and then the module's owning `Context`
+(`mod.Ctx.Dispose()`), in that order, instead - `cmd/llvmc`'s `jitRunMain`,
+unchanged. The one remaining case `cmd/llvmc` itself still calls
+`Module.Dispose()` directly is `-emit-llvm`'s own success path (`finish`) -
+a verified module that's never handed to `llvm.NewExecutionEngine` at all.
