@@ -329,8 +329,16 @@ func (g *Generator) isConstFoldable(n ast.NodeIndex) bool {
 	switch g.tree.Nodes[n].Kind {
 	case enums.NodeKinds.NumberLit, enums.NodeKinds.BoolLit:
 		return true
-	case enums.NodeKinds.ParenExpr, enums.NodeKinds.UnaryExpr:
+	case enums.NodeKinds.ParenExpr:
 		return g.isConstFoldable(g.tree.Child(n, 0))
+	case enums.NodeKinds.UnaryExpr:
+		// Mirror constUnaryExpr's own operator gate: only "-"/"!" ever fold.
+		// "&"/"*" (address-of/deref) are also UnaryExpr, but sema already
+		// restricts their operands to shapes (Ident/MemberExpr/IndexExpr/
+		// UnaryExpr("*")) this function never marks foldable anyway - this
+		// check makes that guarantee local instead of incidental.
+		text := g.tree.Text(n)
+		return (text == "-" || text == "!") && g.isConstFoldable(g.tree.Child(n, 0))
 	case enums.NodeKinds.BinaryExpr:
 		return g.isConstFoldable(g.tree.Child(n, 0)) && g.isConstFoldable(g.tree.Child(n, 1))
 	case enums.NodeKinds.CompositeLit:
