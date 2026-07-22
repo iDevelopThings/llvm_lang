@@ -159,7 +159,7 @@ func (l *Lexer) skipTrivia() (Token, bool) {
 	wsStart := l.pos
 	flushWS := func() {
 		if l.pos > wsStart {
-			l.file.addTrivia(TriviaWhitespace, wsStart, l.pos)
+			l.file.addTrivia(TriviaKindWhitespace, wsStart, l.pos)
 		}
 		wsStart = l.pos
 	}
@@ -188,13 +188,13 @@ func (l *Lexer) skipTrivia() (Token, bool) {
 			flushWS()
 			start := l.pos
 			l.skipLineComment()
-			l.file.addTrivia(TriviaLineComment, start, l.pos)
+			l.file.addTrivia(TriviaKindLineComment, start, l.pos)
 			wsStart = l.pos
 		case c == '/' && l.peek2() == '*':
 			flushWS()
 			start := l.pos
 			sawNewline := l.skipBlockComment()
-			l.file.addTrivia(TriviaBlockComment, start, l.pos)
+			l.file.addTrivia(TriviaKindBlockComment, start, l.pos)
 			wsStart = l.pos
 			if sawNewline && l.insertSemi {
 				l.insertSemi = false

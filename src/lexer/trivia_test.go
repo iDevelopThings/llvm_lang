@@ -54,7 +54,7 @@ func TestCommentsRecordedAsTrivia(t *testing.T) {
 	trivia := file.Trivia(tok.LeadingTrivia)
 	var sawComment bool
 	for _, tr := range trivia {
-		if tr.Kind == TriviaLineComment {
+		if tr.Kind == TriviaKindLineComment {
 			sawComment = true
 			if file.TriviaText(tr) != "// hello" {
 				t.Errorf("comment text = %q, want %q", file.TriviaText(tr), "// hello")
@@ -109,7 +109,7 @@ func TestEOFCarriesTrailingTrivia(t *testing.T) {
 	trivia := file.Trivia(semi.LeadingTrivia)
 	var found bool
 	for _, tr := range trivia {
-		if tr.Kind == TriviaLineComment {
+		if tr.Kind == TriviaKindLineComment {
 			found = true
 		}
 	}

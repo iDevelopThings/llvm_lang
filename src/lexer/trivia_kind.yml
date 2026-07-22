@@ -1,0 +1,13 @@
+package: lexer
+type: TriviaKind
+underlying: uint8
+marshalText: false
+out: .
+
+fields:
+
+
+values:
+  - name: Whitespace
+  - name: LineComment
+  - name: BlockComment

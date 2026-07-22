@@ -1,29 +1,6 @@
 package lexer
 
-// TriviaKind classifies a run of skipped source text: whitespace/newlines,
-// or a comment. It's a small lexer-internal classification (not a
-// cross-cutting language enum like Lexeme/Keyword), so it stays a plain Go
-// type rather than going through enum_codegen.
-type TriviaKind uint8
-
-const (
-	TriviaWhitespace TriviaKind = iota
-	TriviaLineComment
-	TriviaBlockComment
-)
-
-func (k TriviaKind) String() string {
-	switch k {
-	case TriviaWhitespace:
-		return "Whitespace"
-	case TriviaLineComment:
-		return "LineComment"
-	case TriviaBlockComment:
-		return "BlockComment"
-	default:
-		return "Unknown"
-	}
-}
+//go:generate go run ../../cmd/enum_codegen -in ./trivia_kind.yml
 
 // Trivia is one contiguous run of skipped source text - whitespace or a
 // comment - kept so the exact source can be reconstructed from tokens, and
