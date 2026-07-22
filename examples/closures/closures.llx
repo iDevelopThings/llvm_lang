@@ -1,0 +1,28 @@
+// closures.llx - demonstrates lambda/closure expressions with by-reference
+// capture (see LANGUAGE.md's "Lambdas" section): makeCounter declares a local
+// (count) and returns a function literal that closes over it - every call to
+// the returned closure mutates the exact same shared storage, not a fresh
+// snapshot, exactly like Go's own closures.
+//
+// Run with:
+//   .\llvmc.exe examples\closures\closures.llx
+//   echo $LASTEXITCODE   # (PowerShell) -> 3
+// Expected stdout:
+//   1
+//   2
+
+func makeCounter() func() int {
+	count := 0
+	increment := func() int {
+		count = count + 1
+		return count
+	}
+	return increment
+}
+
+func main() int {
+	next := makeCounter()
+	print(next()) // 1
+	print(next()) // 2
+	return next() // 3
+}

@@ -332,3 +332,52 @@ workload ever demonstrates it matters.
 **Status:** shipped. See `CODEGEN.md`'s "Dynamic arrays" section for
 `genAppendCall`'s exact lowering (`newcap = max(1, cap*2)`, built via a
 `select` on `cap*2 < 1`).
+
+---
+
+## 2026-07-22 - Lambdas: a uniform, `ctxPtr`-first ABI for every indirectly-called function value
+
+**Decision:** once genuine closures (function-literal expressions with
+by-reference capture - see `LANGUAGE.md`'s "Lambdas" section) exist, a free
+function referenced as a bare value no longer puts its own real function
+address into the `{fnPtr, ctxPtr}` fat pointer's `fnPtr` field - it puts the
+address of a small, per-function, memoized adapter ("thunk") instead, whose
+real signature has an extra leading `ctxPtr` parameter it simply ignores
+before calling straight through to the real function. Every genuine lambda's
+own synthesized function already has this same `ctxPtr`-first shape natively
+(it needs to actually dereference `ctxPtr` to reach its captures). Every
+*indirect* call now unconditionally extracts and passes `ctxPtr` along as
+the real callee's first argument; a *direct* call to a statically-known
+function name is completely unaffected either way - it never touches the fat
+pointer at all.
+
+**Why:** a single `func(T1, T2) R`-typed variable can hold either kind of
+function value at runtime - a plain free-function reference or a genuine
+closure - and an indirect call through it has no way to tell which, at the
+call site, before it emits its one call instruction. But the two kinds'
+*real* underlying LLVM functions have genuinely different natural
+signatures: a free function's has no `ctxPtr` at all (necessary to keep a
+*direct* call to it zero-overhead - see the "First-class functions" entry
+above), while a lambda's real function must take a real, dereferenced
+`ctxPtr` to reach its own captures. Calling through a function pointer whose
+real callee has a different real parameter list than the call site built is
+not "probably fine" - it's invalid, UB-risking IR that can silently corrupt
+the stack/registers at runtime rather than fail cleanly, exactly the kind of
+subtle miscompilation this project's rigor (see e.g. the `i64` printf-format-
+specifier entry, verified empirically rather than assumed) treats as
+unacceptable to leave unresolved. A per-free-function thunk, built lazily
+and memoized rather than reused-if-possible-else-regenerated, is the
+standard technique real closure-supporting language implementations use for
+exactly this "uniform calling convention across heterogeneous callees"
+problem - it costs nothing at all for a direct call (the thunk isn't even
+built unless some code actually takes that function's address as a bare
+value) and only a single small adapter call for an indirect one, which
+already had fat-pointer overhead anyway.
+
+**Status:** shipped. See `CODEGEN.md`'s "Lambdas" section (the "uniform-ABI
+thunk" subsection) for the exact mechanism (`genFuncThunk`/`genFuncLit`/
+`genIndirectCall`, `src/codegen/expr.go`), and
+`TestUniformAbiAcrossPlainFunctionAndLambda` (`src/codegen/lambda_test.go`)
+for the regression test that exercises a single func-typed variable holding
+each kind of value in turn, calling it indirectly both times - the test that
+would have caught this exact class of bug had the fix been wrong or missing.

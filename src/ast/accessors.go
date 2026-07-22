@@ -79,6 +79,24 @@ func (t *Tree) ConstructorBody(ctor NodeIndex) NodeIndex {
 	return t.Child(ctor, 1)
 }
 
+// FuncLitParamList returns lit's (a FuncLit's) ParamList child - see Node's
+// own FuncLit doc comment for the [paramList, returnType, body] shape these
+// three accessors index into.
+func (t *Tree) FuncLitParamList(lit NodeIndex) NodeIndex {
+	return t.Child(lit, 0)
+}
+
+// FuncLitReturnType returns lit's (a FuncLit's) return-type child -
+// InvalidNode when the literal declares no return type.
+func (t *Tree) FuncLitReturnType(lit NodeIndex) NodeIndex {
+	return t.Child(lit, 1)
+}
+
+// FuncLitBody returns lit's (a FuncLit's) body child.
+func (t *Tree) FuncLitBody(lit NodeIndex) NodeIndex {
+	return t.Child(lit, 2)
+}
+
 // CompositeLitElems splits n's (a CompositeLit's) children into its leading
 // type-expr child and its remaining elements - see Node's own CompositeLit
 // doc comment for the [typeExpr, elem0, elem1, ...] shape. elems is a plain

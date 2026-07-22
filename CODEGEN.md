@@ -341,25 +341,29 @@ finished rendering.
 
 See `LANGUAGE.md`'s "First-class functions" section for the language-level
 feature (a free function's name is now a value) and `DECISIONS.md` for why
-the representation below was chosen the way it was.
+the representation below was chosen the way it was. **This section describes
+the representation as it shipped in that first round; the "Lambdas" section
+below documents the uniform-ABI thunk mechanism a later round added on top of
+it** - in particular, the "`ctxPtr` is extracted but never passed along"
+claim this section originally made is no longer accurate (see "Lambdas"'s
+own note on this) once a genuine closure exists that actually needs `ctxPtr`
+passed through an indirect call.
 
 **Representation.** `sema.TypeFunc` maps to the literal (unnamed) LLVM
 struct `{ ptr, ptr }` - a "fat pointer" of `{ fnPtr, ctxPtr }` (`llvmType`,
 `src/codegen/types.go`). A bare, uncalled reference to a declared free
-function (`add`, not `add(...)`) builds this struct directly
-(`genFuncValue`, `src/codegen/expr.go`): `fnPtr` is the function's real LLVM
-value, `ctxPtr` is always `llvm.ConstNull(g.ptrTy)`. That null is
-deliberate, not a placeholder to fill in later by accident - every function
-value this round is a free-function reference, so there's never a receiver
-to close over yet. `genFuncValue` is the *one and only* construction site
-for this struct, and is commented as the exact extension point a future
-bound-method value (`p.move` referenced without a call) will use instead -
-closing over the receiver's own address as `ctxPtr` rather than null - so
-the representation and calling convention need no redesign when that
-lands. Passing/returning/storing a function value moves this two-field
-struct like any other small aggregate value, the same convention already
-used for structs/arrays/strings (see "Structs/arrays/strings are passed and
-returned as real LLVM aggregate types" below).
+function (`add`, not `add(...)`) builds this struct (`genFuncValue`,
+`src/codegen/expr.go`); `ctxPtr` is always `llvm.ConstNull(g.ptrTy)` for this
+case specifically - a free-function reference never closes over anything, so
+there's nothing to put there. `genFuncValue` is commented as the exact
+extension point a future bound-method value (`p.move` referenced without a
+call) could use instead - closing over the receiver's own address as
+`ctxPtr` rather than null - so the representation and calling convention
+need no redesign for that, either, if it's ever built. Passing/returning/
+storing a function value moves this two-field struct like any other small
+aggregate value, the same convention already used for structs/arrays/strings
+(see "Structs/arrays/strings are passed and returned as real LLVM aggregate
+types" below).
 
 **Direct vs. indirect calls.** `genCallExpr`'s dispatch (`src/codegen/expr.go`)
 mirrors sema's own (`funcSigForCall`, `src/sema/typecheck.go`) exactly, so
@@ -370,34 +374,238 @@ of the two a given call is:
   to an actual declared free function (`sema.SymFunc` with a real `FuncDecl`,
   i.e. `Decl != InvalidNode` - `isDirectFuncCall`) - compiles to a plain,
   ordinary `call` instruction (`genFuncCall`), exactly as before this round:
-  looks the callee's LLVM function straight up in `g.funcs` and calls it.
-  The fat-pointer representation is never constructed or touched for this
-  case at all - zero indirection overhead for the common case of calling a
-  function by its own name.
+  looks the callee's LLVM function straight up in `g.funcs` and calls it,
+  by its own real signature - no `ctxPtr` involved at all. The fat-pointer
+  representation is never constructed or touched for this case at all - zero
+  indirection overhead for the common case of calling a function by its own
+  name. **This is completely unaffected by the "Lambdas" section below** -
+  a lambda is never reachable through a direct call in the first place (see
+  that section), so this path needed no changes when lambdas were added.
 - An **indirect** call - anything else that type-checked as callable: a
   function-typed variable/parameter, or any other expression whose value is
   itself a function (e.g. a call whose own result is a function, so
   `getAdder()(x)` chains straight through) - goes through `genIndirectCall`:
   evaluate the callee as an ordinary value expression to get its fat-pointer
-  struct, `ExtractValue` out `fnPtr`, build the `llvm.FunctionType` to call
-  through directly from the callee's own `sema.Type` (`Params`/`Return` -
-  there's no `FuncDecl` node backing an indirect callee the way a direct
-  call's `g.funcs` lookup has), and `CreateCall` through that raw pointer.
-  `ctxPtr` is extracted from the struct but never passed along as a hidden
-  argument - there's nothing yet that consumes it.
+  struct, `ExtractValue` out both `fnPtr` and `ctxPtr`, build the
+  `llvm.FunctionType` to call through directly from the callee's own
+  `sema.Type` (`Params`/`Return`, plus a leading `ctxPtr` parameter - see
+  "Lambdas" below for why - there's no `FuncDecl` node backing an indirect
+  callee the way a direct call's `g.funcs` lookup has), and `CreateCall`
+  through that raw pointer with `ctxPtr` passed as the real first argument.
 
 ```llvm
 ; func apply(fn func(int) int, x int) int { return fn(x) }
 define i32 @apply({ ptr, ptr } %0, i32 %1) {
   %3 = extractvalue { ptr, ptr } %2, 0
-  %5 = call i32 %3(i32 %4)
+  %4 = extractvalue { ptr, ptr } %2, 1
+  %6 = call i32 %3(ptr %4, i32 %5)
   ...
 }
 
 ; apply(double, 5) - a direct call passes a literal fat-pointer constant,
-; ctxPtr always null:
-%4 = call i32 @apply({ ptr, ptr } { ptr @double, ptr null }, i32 5)
+; ctxPtr always null for a free-function reference - but fnPtr is now
+; double's own uniform-ABI thunk (double.thunk), not double's own real
+; address (see "Lambdas" below):
+%4 = call i32 @apply({ ptr, ptr } { ptr @double.thunk, ptr null }, i32 5)
 ```
+
+## Lambdas
+
+See `LANGUAGE.md`'s "Lambdas" section for the language-level feature (a real
+function-literal expression, `FuncLit`, capturing an enclosing local/
+parameter by reference) and `DECISIONS.md`'s dated entry for the uniform-ABI
+thunk resolution this section documents in detail. This is the one feature
+this round that's a real, deliberate consumer of the arena allocator (see
+"The arena allocator" above) beyond string concatenation/dynamic arrays -
+every captured variable's storage, and every closure's own capture context,
+is arena-allocated, per that section's already-stated default for any new
+heap-needing feature.
+
+### Capture analysis and heap promotion (sema decides, codegen executes)
+
+`sema.Check`'s capture analysis (`src/sema/capture.go`) computes, for every
+`FuncLit` node, the ordered list of enclosing-scope symbols it captures by
+reference (`Info.Captures[lit]`), and marks each captured `*sema.Symbol`
+(`Symbol.Captured`). Codegen makes exactly one decision based on this, at
+exactly one call site (`allocLocalSlot`, `src/codegen/func.go`), shared by
+every place a local variable/parameter's storage is allocated
+(`genVarDecl`/`genShortVarDecl`, `src/codegen/stmt.go`; the param loops in
+`genFuncBody`/`genConstructorBody`/`genLambdaFunc`, `src/codegen/func.go`
+and `expr.go`): a captured symbol's storage comes from the arena
+(`genArenaAlloc`) instead of `createEntryAlloca`'s ordinary stack alloca -
+this is necessary, not an optimization choice, since a captured variable's
+*address* is stored inside a lambda's own capture context, and that lambda's
+value can outlive its declaring function's own stack frame the moment it's
+returned, stored, or passed onward (exactly the `makeCounter` example in
+`LANGUAGE.md`). Both paths return the identical `ptr`-typed `llvm.Value`
+shape (this project already treats every pointer as opaque - see
+`codegen.go`'s `ptrTy` field comment) - every reader (`genAddr`'s `Ident`
+case, now routed through the shared `addrOfSymbol` helper described below)
+treats the result identically regardless of which one it turned out to be. A
+non-captured local is completely unaffected, unchanged from before this
+round.
+
+### Representation: the exact same fat pointer, `ctxPtr` finally does real work
+
+A lambda value is still exactly `{ fnPtr, ctxPtr }` - the identical
+two-field struct type `sema.TypeFunc` already lowered to for a bare
+free-function reference (see "First-class functions" above) - there is no
+second, parallel representation. For a genuine lambda, `ctxPtr` points to a
+freshly arena-allocated **capture-context struct**: a synthesized, anonymous
+LLVM struct (`g.ctx.StructType`, built fresh per literal in `genFuncLit`,
+`src/codegen/expr.go`) with one `ptr`-typed field per captured symbol, in
+`Info.Captures[lit]`'s own order - each field holds that variable's own
+already-arena'd *address*, not a copy of its value, since capture is by
+reference. `genFuncLit` resolves every captured symbol's address (via
+`addrOfSymbol`, see below) *before* switching into the literal's own
+function-generation state - it's still running in the *enclosing* function's
+own context at that point, exactly where those addresses are directly
+reachable.
+
+`genFuncLit` builds the closure value itself as a real runtime aggregate
+(`llvm.Undef(g.funcValTy)` + two `CreateInsertValue`s), not a `ConstStruct`
+the way a bare free-function reference's fat pointer is (`genFuncValue`) -
+`ctxPtr` here is a genuine runtime value (an `arena_alloc` call's result),
+and LLVM's `ConstStruct` requires every field to itself already be a
+constant; embedding a non-constant SSA value into a literal constant
+aggregate is invalid IR that only surfaces as a verifier failure ("Use of
+instruction is not an instruction!"), not a Go-level type error - a real
+mistake hit and fixed while building this feature, not a hypothetical
+concern. A capture-free literal's `ctxPtr` is still a genuine `ConstNull`, so
+that case keeps the cheaper `ConstStruct` path unchanged.
+
+Each `FuncLit`, wherever it lexically appears (even nested inside another
+function or another lambda), becomes its own independent, real, top-level
+LLVM function (`genLambdaFunc`) with a synthesized name -
+`llvm_lang.lambda.N`, `N` a plain per-module monotonically increasing
+counter (`Generator.lambdaCounter`) - simpler than deriving a name from
+"whichever function lexically encloses this literal" and equally guaranteed
+collision-free, since every lambda gets its own fresh number regardless of
+nesting depth or which function contains it.
+
+**Generating a nested literal's body without disturbing the enclosing
+function.** `genLambdaFunc` temporarily replaces every one of `Generator`'s
+per-function-frame fields (`curFn`/`entryBlock`/`locals`/`loopStack`/
+`curFunc`/`curReceiver`, plus the three lambda-specific ones below) with the
+literal's own fresh state - and the builder's own current insert block with
+the literal's own entry block - saving each in a plain local variable first
+and restoring all of them once the literal's body is fully generated. This
+is the same save-in-a-local/restore-after-recursing shape
+`sema/typecheck.go`'s `checkFuncLit` already uses for its own `curFunc`, one
+layer up: since this is an ordinary (non-reentrant) function call, Go's own
+call stack already handles arbitrary nesting depth for free - a `FuncLit`
+nested inside another simply recurses into `genLambdaFunc` again, one level
+deeper, saving/restoring the identical fields around its own body.
+
+**Reading a captured variable from inside a lambda: one more indirection
+than an ordinary local.** Three new `Generator` fields describe the function
+*currently being generated*, when (and only when) it's itself a lambda's own
+synthesized function - the zero value/nil for an ordinary function, method,
+or constructor, none of which ever receives a `ctxPtr` parameter at all:
+`curCtxPtr` (that function's own real first parameter), `curCaptureIndex`
+(each captured symbol's field index within `curCaptureTy`, its own
+capture-context struct type - needed as `CreateStructGEP`'s aggregate-type
+argument). `genAddr`'s `Ident` case and `genFuncLit`'s own capture-context-
+building lookup both now go through one shared helper, `addrOfSymbol`: check
+`g.locals` first (a symbol owned directly by the function currently being
+generated - works identically whether its storage is a stack alloca or an
+arena allocation), then `g.globals` (a top-level var), and only then
+`curCaptureIndex`/`curCtxPtr` - load the function's own `ctxPtr` parameter,
+`CreateStructGEP` to the matching field (a pointer), `CreateLoad` *that*
+(getting the captured variable's real address), then the caller
+loads/stores through *that* address exactly like any other lvalue.
+
+Routing *both* call sites through this one shared lookup is what makes a
+variable captured **two or more enclosing function levels down** work with
+no special relaying code anywhere: sema's own capture analysis
+(`sema/capture.go`) already marks a doubly-nested lambda's outer variable as
+captured by *every* enclosing lambda between it and the variable's own
+owning function, not just the innermost one (see that file's own doc
+comment for why walking straight through a nested `FuncLit`'s subtree,
+rather than stopping at its boundary, produces exactly this). So when
+`genFuncLit` is asked for some symbol's address while generating an
+*enclosing* lambda's own body (to relay it into a `FuncLit` nested inside
+that lambda), and that enclosing lambda doesn't own the symbol directly
+either, `addrOfSymbol`'s third branch already knows how to fetch it - through
+that enclosing lambda's *own* `ctxPtr` - with zero additional bookkeeping.
+`TestTwoLevelNestedClosureCapture`/`TestTwoLevelNestedCaptureRelaysThroughBothLambdas`
+(`src/codegen/lambda_test.go`, `src/sema/lambda_test.go`) exercise exactly
+this shape end to end.
+
+### The uniform-ABI thunk: resolving the direct-vs-indirect calling-convention conflict
+
+A free-function reference and a genuine lambda can both flow through the
+identical `func(T1, T2) R`-typed variable/parameter at the language level -
+an indirect call through that variable can't know statically which of the
+two it's holding at runtime, yet it has to emit one single, valid call-
+instruction shape. This is a real conflict, not just an inconvenience: a free
+function's own real declared LLVM signature (`g.funcs[sym]`) has **no**
+`ctxPtr` parameter at all (so a *direct* call stays genuinely zero-overhead -
+see "First-class functions" above, completely unchanged), but a genuine
+lambda's own real underlying function (`genLambdaFunc`) **must** take
+`ctxPtr` as a real, dereferenced first parameter - it needs to actually read
+through it to reach its captures. Calling through a function pointer whose
+real underlying function has a different real parameter list than the call
+site expects isn't "probably fine on this target's ABI" - it's genuinely
+invalid, UB-risking IR that can silently corrupt the stack/registers rather
+than crash cleanly.
+
+**Resolved the standard way real closure implementations do: every
+function-value's real, underlying LLVM function - whichever kind it turns
+out to be - shares one uniform, `ctxPtr`-first calling convention the moment
+it's called *indirectly* through a fat pointer.** Concretely:
+
+- A **direct** call to a statically-known free function (`add(1, 2)`) is
+  completely untouched - it bypasses the fat pointer entirely and calls
+  `add`'s own real, natural (`ctxPtr`-less) signature, exactly as before this
+  round (see "First-class functions" above).
+- A **bare reference to a free function used as a value** (`fn := add`, not
+  `add(...)`) no longer puts `add`'s own real address into the fat pointer's
+  `fnPtr` field. `genFuncValue` now calls `genFuncThunk(sym)` instead, which
+  builds (once, memoized in `Generator.thunks` - not regenerated per
+  reference) a small adapter function named `add.thunk`: real signature
+  `R add.thunk(ptr ignoredCtx, T1, T2, ...)`, whose entire body ignores its
+  own `ctxPtr` parameter and calls straight through to `add`'s own real
+  function with the rest, returning its result unchanged. `fnPtr` in the fat
+  pointer is the thunk's address, not `add`'s own.
+- A **genuine lambda's** own synthesized function (`genLambdaFunc`) already
+  has this uniform shape natively - it needs a real `ctxPtr` regardless of
+  whether it actually captures anything (every lambda is always called
+  indirectly, never directly - see below - so every one gets a `ctxPtr`
+  parameter unconditionally, for uniformity, even one that never reads it) -
+  so it needs no thunk of its own; its own address goes directly into the
+  fat pointer.
+- **Every indirect call** (`genIndirectCall`) now always extracts *both*
+  `fnPtr` and `ctxPtr` from the fat pointer and passes `ctxPtr` along as the
+  callee's real first argument, unconditionally - whether `fnPtr` turns out
+  to be a free function's thunk or a genuine lambda's own function, the call
+  site's own built `llvm.FunctionType` (`ctxPtr`'s type, then the callee's
+  ordinary declared parameter types) now always matches the real callee's
+  own real signature, since both kinds of real callee share the identical
+  shape.
+
+A `FuncLit` is *never* reachable through a direct call at all, by
+construction: `isDirectFuncCall` only ever matches a plain `Ident` resolving
+to a declared `sema.SymFunc`, and a function-literal expression is neither an
+`Ident` nor a declared symbol - so every lambda value, immediately-invoked or
+otherwise, always goes through `genIndirectCall`, and so always gets the
+uniform `ctxPtr`-first treatment automatically, with no separate dispatch
+case needed for it in `genCallExpr` at all.
+
+This preserves "First-class functions"'s explicit, verified "direct calls
+are genuinely zero-overhead" property completely untouched (confirmed
+concretely, not just by inspection - `TestDirectCallStillCompilesToPlainCall`,
+already in `src/codegen/firstclass_func_test.go`, still passes unchanged,
+and a fresh `-emit-llvm` inspection of a plain `add(2, 3)` call shows exactly
+`call i32 @add(i32 2, i32 3)`, no thunk generated at all since `add` is never
+referenced as a bare value in that program), while making indirect calls
+correctly polymorphic over "was this a plain function or a real closure" -
+exactly the property a `func(T) R`-typed variable needs, since it can hold
+either one. `TestUniformAbiAcrossPlainFunctionAndLambda`
+(`src/codegen/lambda_test.go`) is the test that would catch a regression
+here directly: a single `func(int, int) int`-typed variable holds a plain
+free-function reference first, then a genuine lambda, calling it indirectly
+both times through the identical variable.
 
 ## `main` is the real entry point
 

@@ -549,10 +549,84 @@ element type, or nested inside another function type (a function type can
 take or return another function type - `func(func(int) int) int` parses and
 type-checks the same way `[5][3]int` does for arrays).
 
-See `CODEGEN.md`'s "First-class functions" section for how a function value
-actually lowers to LLVM IR (the fat-pointer representation, and the direct-
-vs-indirect call distinction) - that's an implementation concern, not a
-language-spec one, so it lives there instead of here.
+See `CODEGEN.md`'s "First-class functions"/"Lambdas" sections for how a
+function value actually lowers to LLVM IR (the fat-pointer representation,
+and the direct-vs-indirect call distinction) - that's an implementation
+concern, not a language-spec one, so it lives there instead of here.
+
+## Lambdas (function-literal expressions)
+
+A function value doesn't have to be a *reference* to an already-declared
+free function (see "First-class functions" above) - `func(params)
+[returnType] { body }` is also a real, value-producing *expression* in its
+own right, usable anywhere any other expression is legal: an argument, a
+`var`'s initializer, a `return` value, even called immediately. This is a
+genuinely new grammar rule (`FuncLit`), not just a new use for the existing
+`func(T1, T2) R` *type* syntax - today, a `func` keyword followed by a body
+only ever appeared at top level (`FuncDecl`) or as a method declaration;
+`func(params) { ... }` used as an expression didn't parse before this round
+at all.
+
+```go
+func makeCounter() func() int {
+    count := 0
+    increment := func() int {
+        count = count + 1
+        return count
+    }
+    return increment
+}
+
+func main() int {
+    next := makeCounter()
+    print(next())   // 1
+    print(next())   // 2
+    return next()   // 3
+}
+```
+
+**Capture is by reference, matching Go's own closures exactly** - not by
+value. A lambda that reads or writes a variable/parameter declared in an
+*enclosing* function (`count` above, closed over by `increment`) shares that
+variable's real storage, not a snapshot taken at the moment the lambda was
+created: `count`'s mutations are visible both inside and outside the lambda,
+and multiple lambdas capturing the same variable observe each other's
+writes, exactly like the example above (`count` keeps incrementing across
+three separate calls to the one `increment` value `makeCounter` returned,
+because it closes over `count`'s real storage). This crosses arbitrarily many
+enclosing function levels, not just one - a lambda nested inside another
+lambda can still capture a variable declared in the outermost function, the
+same way Go allows.
+
+An immediately-invoked lambda works too, since a `FuncLit` is an ordinary
+expression and calling it is just the ordinary call grammar applied to
+whatever expression comes before `(`:
+
+```go
+result := (func() int {
+    return 42
+})()
+```
+
+**What's captured, exactly**: any variable or parameter a lambda's body
+reads or writes that isn't declared inside the lambda itself (or a lambda
+nested inside it) - including a variable declared in a lambda *two or more*
+function levels up. Referencing an enclosing method's `this` from inside a
+lambda is explicitly rejected ("cannot capture `this` inside a function
+literal") - method-receiver capture isn't supported this round, the same
+"scoped narrower than it might eventually be" precedent "First-class
+functions" above already set for bound method values.
+
+A lambda's own exposed *type* is indistinguishable from a plain function
+reference's - both are simply `func(paramTypes) returnType` (see
+"First-class functions" above) - the capture mechanism is purely a
+representation/lowering concern, invisible at the type-checking level. See
+`CODEGEN.md`'s "Lambdas" section for the fat-pointer representation this
+reuses verbatim (the same `{fnPtr, ctxPtr}` shape "First-class functions"
+above already introduced, forward-compatible with exactly this feature from
+the start - `ctxPtr` finally does real work here, instead of always being
+null), the heap-promotion of a captured variable's storage, and the
+uniform-calling-convention fix a genuine closure's `ctxPtr` needed.
 
 ## Multi-file packages
 

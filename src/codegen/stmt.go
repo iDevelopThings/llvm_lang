@@ -73,7 +73,7 @@ func (g *Generator) genVarDecl(n ast.NodeIndex) {
 	sym := g.info.Refs[nameNode]
 
 	llt := g.llvmType(g.info.Types[n])
-	addr := g.createEntryAlloca(llt, sym.Name)
+	addr := g.allocLocalSlot(sym, llt, sym.Name)
 	g.locals[sym] = addr
 
 	if initNode == ast.InvalidNode {
@@ -91,7 +91,7 @@ func (g *Generator) genShortVarDecl(n ast.NodeIndex) {
 	sym := g.info.Refs[nameNode]
 
 	llt := g.llvmType(g.info.Types[n])
-	addr := g.createEntryAlloca(llt, sym.Name)
+	addr := g.allocLocalSlot(sym, llt, sym.Name)
 	g.locals[sym] = addr
 	g.storeValueInto(addr, initNode)
 }

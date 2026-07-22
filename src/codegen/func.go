@@ -97,7 +97,7 @@ func (g *Generator) genFuncBody(decl ast.NodeIndex) {
 	for i, paramNode := range g.tree.Children(paramListNode) {
 		psym := g.info.Refs[g.tree.Child(paramNode, 0)]
 		pllt := g.llvmType(g.info.Types[g.tree.Child(paramNode, 1)])
-		addr := g.createEntryAlloca(pllt, psym.Name)
+		addr := g.allocLocalSlot(psym, pllt, psym.Name)
 		g.builder.CreateStore(g.curFn.Param(offset+i), addr)
 		g.locals[psym] = addr
 	}
@@ -223,7 +223,7 @@ func (g *Generator) genConstructorBody(ctor ast.NodeIndex) {
 	for i, paramNode := range g.tree.Children(paramListNode) {
 		psym := g.info.Refs[g.tree.Child(paramNode, 0)]
 		pllt := g.llvmType(g.info.Types[g.tree.Child(paramNode, 1)])
-		addr := g.createEntryAlloca(pllt, psym.Name)
+		addr := g.allocLocalSlot(psym, pllt, psym.Name)
 		g.builder.CreateStore(g.curFn.Param(1+i), addr)
 		g.locals[psym] = addr
 	}
@@ -237,6 +237,31 @@ func (g *Generator) genConstructorBody(ctor ast.NodeIndex) {
 		g.emitFallbackTerminator()
 	}
 	g.curFunc = nil
+}
+
+// allocLocalSlot returns the storage address to use for sym - a var/
+// short-var-decl/parameter declaration's own Symbol - deciding between a real
+// stack alloca (createEntryAlloca, unchanged default) and an arena-heap
+// allocation (genArenaAlloc, see CODEGEN.md's "Lambdas" section) based on
+// sym.Captured, sema's own capture-analysis verdict (see sema/capture.go):
+// a variable/parameter some FuncLit anywhere captures by reference needs
+// storage that can safely outlive this function's own stack frame - that
+// lambda's value may be returned, stored, or passed onward, well past the
+// point this function itself returns - which a stack address cannot survive,
+// but the arena's process-lifetime allocation always does (a real,
+// intentional leak, exactly consistent with this project's already-
+// documented arena philosophy - see BLOCKERS.md). Both paths return the
+// identical `ptr`-typed llvm.Value shape (this project already uses LLVM's
+// opaque pointers everywhere - see codegen.go's ptrTy field comment), so
+// every caller (genVarDecl, genShortVarDecl, genFuncBody/
+// genConstructorBody/genLambdaFunc's own param loops) treats the result
+// exactly the same regardless of which one it turned out to be - loaded from
+// and stored to exactly like any other local's address.
+func (g *Generator) allocLocalSlot(sym *sema.Symbol, t llvm.Type, name string) llvm.Value {
+	if sym.Captured {
+		return g.genArenaAlloc(llvm.SizeOf(t))
+	}
+	return g.createEntryAlloca(t, name)
 }
 
 // createEntryAlloca allocates a stack slot of type t in the current

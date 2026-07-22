@@ -41,9 +41,15 @@ func funcType(sig funcSignature) Type {
 }
 
 // enclosingFunc is the return-type context checkReturnStmt checks against -
-// pushed once per FuncDecl. Functions never nest in this grammar (no
-// closures, no nested func literals), so a single field on checker holds it;
-// there's nothing to stack.
+// pushed once per FuncDecl, or, now that a function literal (FuncLit - see
+// LANGUAGE.md's "Lambdas" section) can nest arbitrarily deep inside another
+// function or another literal, once per FuncLit too (checkFuncLit). curFunc
+// itself is still just a single checker field, not an explicit stack - each
+// of checkFuncDecl/checkFuncLit saves the previous value in a local, sets its
+// own, recurses into checkBlock, and restores the saved value afterward, so
+// Go's own call stack does the actual nesting for free (checkFuncLit calling
+// into a doubly-nested FuncLit's own checkFuncLit recurses the identical way,
+// one level deeper) - there's nothing here that needs a real stack slice.
 type enclosingFunc struct {
 	hasReturn bool // whether the function declared a return type at all
 	ret       Type // meaningful only when hasReturn is true
@@ -430,6 +436,53 @@ func (c *checker) computeFuncSig(decl ast.NodeIndex) funcSignature {
 		Params: params,
 		Return: ret,
 	}
+}
+
+// checkFuncLit type-checks a function-literal expression (`func(params)
+// [returnType] { body }` - see LANGUAGE.md's "Lambdas" section) and returns
+// its Type - a TypeFunc built from its own signature, exactly like a bare
+// free-function reference's own Type (checkIdentExpr/typeOfSymbolValue's
+// SymFunc case) - a lambda's exposed type is indistinguishable from an
+// ordinary function value's at the type level; only codegen's own
+// representation differs (see CODEGEN.md), never anything sema exposes.
+//
+// Unlike checkFuncDecl (funcSigForDecl memoizes a FuncDecl's signature by its
+// own node, since the same declaration can be referenced from many call
+// sites), a literal's signature is computed once, directly - it's evaluated
+// at exactly the one expression position it appears in, never looked up by
+// some other node pointing back at it, so there's nothing to memoize.
+// Reuses c.declType(param) for each param exactly like computeFuncSig does -
+// declType has no FuncDecl-specific assumption baked in, it just reads a
+// Param node's own type-annotation child, which a FuncLit's ParamList
+// supplies in the identical shape a FuncDecl's does.
+func (c *checker) checkFuncLit(n ast.NodeIndex) Type {
+	paramListNode := c.tree.FuncLitParamList(n)
+	returnTypeNode := c.tree.FuncLitReturnType(n)
+	body := c.tree.FuncLitBody(n)
+
+	paramNodes := c.tree.Children(paramListNode)
+	params := make([]Type, len(paramNodes))
+	for i, param := range paramNodes {
+		params[i] = c.declType(param)
+	}
+
+	ret := voidType
+	if returnTypeNode != ast.InvalidNode {
+		ret = c.typeFromNode(returnTypeNode)
+	}
+
+	prevFunc := c.curFunc
+	c.curFunc = &enclosingFunc{
+		hasReturn: returnTypeNode != ast.InvalidNode,
+		ret:       ret,
+	}
+	c.checkBlock(body)
+	if c.curFunc.hasReturn && !isTerminatingStmt(c.tree, body) {
+		c.errorAt(n, "missing return")
+	}
+	c.curFunc = prevFunc
+
+	return funcType(funcSignature{Params: params, Return: ret})
 }
 
 // declType returns the type of a VarDecl, ShortVarDecl, or Param
@@ -1043,6 +1096,8 @@ func (c *checker) inferExpr(n ast.NodeIndex) Type {
 		return c.checkMemberExpr(n)
 	case enums.NodeKinds.CompositeLit:
 		return c.checkCompositeLit(n)
+	case enums.NodeKinds.FuncLit:
+		return c.checkFuncLit(n)
 	case enums.NodeKinds.ArrayType:
 		// Reachable two ways (see resolve.go's resolveExpr, which documents
 		// the same two paths for its own ArrayType case): a bare array type

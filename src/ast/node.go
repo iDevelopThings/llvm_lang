@@ -42,9 +42,15 @@ type Span struct {
 //     (=, +=, -=, *=, /=, ++, --)
 //   - ShortVarDecl: the `:=` token
 //   - VarDecl, FuncDecl, StructDecl, IfStmt, ForStmt, ReturnStmt, BreakStmt,
-//     ContinueStmt, FuncType, ConstructorDecl: the leading keyword token
-//     (FuncType's is the `func` that introduces a function-type expression,
-//     e.g. `func(int) int`, see LANGUAGE.md's Types section)
+//     ContinueStmt, FuncType, ConstructorDecl, FuncLit: the leading keyword
+//     token (FuncType's is the `func` that introduces a function-type
+//     expression, e.g. `func(int) int`, see LANGUAGE.md's Types section;
+//     FuncLit's is the `func` that introduces a function-literal expression,
+//     e.g. `func(x int) int { return x }`, see LANGUAGE.md's "Lambdas"
+//     section - the same keyword, disambiguated from FuncType purely by
+//     whether a `{` body follows the parameter list/return type, exactly the
+//     same way FuncDecl's own body already disambiguates it from a bare
+//     declaration)
 //   - everything else (File, Block, ParamList, Param, Field, CallExpr,
 //     ParenExpr, IndexExpr, ArrayType, CompositeLit, KeyValueExpr, ExprStmt,
 //     ParamTypeList): unused, left as the zero Token
@@ -118,6 +124,16 @@ type Span struct {
 //     type over a function taking one int and returning nothing). See
 //     LANGUAGE.md's "First-class functions" section for the language-level
 //     feature this represents, and CODEGEN.md for how it's lowered.
+//   - FuncLit: [paramList, returnType, body] - fixed arity; paramList is
+//     always a ParamList node (empty for a no-parameter literal, same as
+//     FuncDecl's own); returnType may be InvalidNode (an implicitly-void
+//     literal, same optional-return-type rule FuncDecl/FuncType both already
+//     have). Exactly FuncDecl's own [receiver, name, paramList, returnType,
+//     body] shape minus the two slots a literal has no use for - it's
+//     anonymous (no name) and never has a receiver (see LANGUAGE.md's
+//     "Lambdas" section: a lambda closes over its enclosing scope by
+//     reference instead, which is a sema/codegen-level concern, not a
+//     grammar one - the AST shape itself carries no capture information).
 //   - a fixed-arity kind may reserve a positional slot as InvalidNode for an
 //     omitted optional child (e.g. VarDecl's type annotation); a
 //     variable-arity kind (Block's statements, CallExpr's arguments) is

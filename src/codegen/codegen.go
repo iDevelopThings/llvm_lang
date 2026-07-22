@@ -53,9 +53,14 @@ type loopCtx struct {
 
 // funcCtx is pushed once per function body being generated - the state
 // genReturnStmt and the function's final fallback-terminator logic need
-// about the function currently being built. Functions never nest in this
-// grammar (no closures, no nested func literals), so a single field on
-// Generator holds it, mirroring sema/typecheck.go's enclosingFunc.
+// about the function currently being built. A function literal (FuncLit -
+// see LANGUAGE.md's "Lambdas" section) can now nest arbitrarily deep inside
+// another function or another literal; Generator still only needs a single
+// field for this (not an explicit stack), the same save-in-a-local/restore
+// shape sema/typecheck.go's curFunc uses one layer up - see genLambdaFunc,
+// which saves every one of Generator's per-function-frame fields (this one
+// included) before switching to a nested literal's own fresh state, and
+// restores them once that literal's body is fully generated.
 type funcCtx struct {
 	isMain    bool
 	hasReturn bool
@@ -185,12 +190,46 @@ type Generator struct {
 	// curFn/entryBlock/curFunc/loopStack/curReceiver are all per-function
 	// generation state, set at the start of genFuncBody (and, for
 	// curReceiver, cleared for a non-method) and read by whatever's being
-	// generated inside that function's body.
+	// generated inside that function's body. genLambdaFunc saves and
+	// restores every one of these (plus curCtxPtr/curCaptureIndex/
+	// curCaptureTy just below) around generating a nested FuncLit's own
+	// body, so a lambda's own frame never bleeds into its enclosing
+	// function's once control returns to it - see its own doc comment.
 	curFn       llvm.Value
 	entryBlock  llvm.BasicBlock
 	curFunc     *funcCtx
 	loopStack   []loopCtx
 	curReceiver llvm.Value
+
+	// curCtxPtr/curCaptureIndex/curCaptureTy describe the function currently
+	// being generated only when it's itself a lambda's own synthesized
+	// function (see genLambdaFunc) - the zero value/nil for an ordinary
+	// function, method, or constructor, none of which ever receives a ctxPtr
+	// parameter at all (see CODEGEN.md's "Lambdas" section: only a genuine
+	// lambda's real underlying function does). curCtxPtr is that function's
+	// own real first parameter; curCaptureIndex maps each symbol it captures
+	// (info.Captures of the FuncLit genLambdaFunc is generating) to that
+	// value's own field index within curCaptureTy, its capture-context
+	// struct type (needed as CreateStructGEP's aggregate-type argument) -
+	// see addrOfSymbol, the one place both are read.
+	curCtxPtr       llvm.Value
+	curCaptureIndex map[*sema.Symbol]int
+	curCaptureTy    llvm.Type
+
+	// thunks memoizes, per free-function Symbol, the small uniform-ABI thunk
+	// genFuncValue builds the first time that function is ever referenced
+	// bare (as a value, not called) - see genFuncThunk's own doc comment for
+	// why this exists at all (CODEGEN.md's "Lambdas" section: a direct call
+	// bypasses this entirely and stays genuinely zero-overhead).
+	thunks map[*sema.Symbol]llvm.Value
+
+	// lambdaCounter synthesizes each FuncLit's own unique, collision-free LLVM
+	// function name (genLambdaFunc) - a plain monotonically increasing
+	// counter shared across the whole module is simpler than deriving a name
+	// from "whichever function lexically encloses this literal" and equally
+	// guaranteed collision-free, since every lambda gets its own fresh number
+	// regardless of nesting depth or which function contains it.
+	lambdaCounter int
 
 	// Runtime externs and cached format-string globals - see runtime.go.
 	printfType llvm.Type
@@ -285,6 +324,7 @@ func GeneratePackage(trees []*ast.Tree, infos map[*ast.Tree]*sema.Info, moduleNa
 		funcs:         make(map[*sema.Symbol]funcEntry),
 		ctors:         make(map[*sema.Symbol]funcEntry),
 		strLiterals:   make(map[string]llvm.Value),
+		thunks:        make(map[*sema.Symbol]llvm.Value),
 	}
 	for _, tree := range trees {
 		g.allDiags[tree] = diag.NewBag()

@@ -36,11 +36,21 @@ import (
 //
 // Types is nil until Check runs - Resolve alone has no type information to
 // populate it with.
+// Captures maps each FuncLit node anywhere in the tree (see LANGUAGE.md's
+// "Lambdas" section) to the ordered list of enclosing-scope symbols it
+// captures by reference - built by Resolve's own tail pass (computeCaptures,
+// capture.go), once every file's ordinary lexical resolution has already run.
+// Order matters (not just membership): codegen builds each literal's own
+// capture-context struct type field-by-field in this exact order (see
+// CODEGEN.md's "Lambdas" section), so this is a slice, not a set, even though
+// membership is also all analyzeFuncLitCaptures itself needs to decide -
+// nil/missing for a FuncLit that captures nothing.
 type Info struct {
-	Refs    map[ast.NodeIndex]*Symbol
-	Scopes  map[ast.NodeIndex]*Scope
-	Structs map[string]*StructInfo
-	Types   map[ast.NodeIndex]Type
+	Refs     map[ast.NodeIndex]*Symbol
+	Scopes   map[ast.NodeIndex]*Scope
+	Structs  map[string]*StructInfo
+	Types    map[ast.NodeIndex]Type
+	Captures map[ast.NodeIndex][]*Symbol
 }
 
 // boundImport is one file's own import binding with its target already
@@ -160,14 +170,25 @@ func resolveOnePackage(name string, trees []*ast.Tree, fileImports map[*ast.Tree
 
 	for _, tree := range trees {
 		r.infos[tree] = &Info{
-			Refs:    make(map[ast.NodeIndex]*Symbol),
-			Scopes:  make(map[ast.NodeIndex]*Scope),
-			Structs: r.structs,
+			Refs:     make(map[ast.NodeIndex]*Symbol),
+			Scopes:   make(map[ast.NodeIndex]*Scope),
+			Structs:  r.structs,
+			Captures: make(map[ast.NodeIndex][]*Symbol),
 		}
 		r.bags[tree] = diag.NewBag()
 	}
 
 	r.resolvePackage(trees)
+
+	// Capture analysis (see capture.go) runs after every file's ordinary
+	// lexical resolution above - a FuncLit anywhere in one file can only
+	// reference a same-file enclosing local/param (see LANGUAGE.md's
+	// "Lambdas" section: capture never crosses a file, only nested function
+	// scopes within it), but it still needs every FuncLit in that file
+	// resolved first, including ones nested arbitrarily deep inside others.
+	for _, tree := range trees {
+		computeCaptures(tree, r.infos[tree], r.bags[tree])
+	}
 
 	out := make(map[*ast.Tree]*Info, len(trees))
 	diags := make(map[*ast.Tree]*diag.Bag, len(trees))
@@ -744,7 +765,50 @@ func (r *resolver) resolveExpr(scope *Scope, n ast.NodeIndex) {
 		r.resolveType(scope, n)
 	case enums.NodeKinds.CompositeLit:
 		r.resolveCompositeLit(scope, n)
+	case enums.NodeKinds.FuncLit:
+		r.resolveFuncLit(scope, n)
 	}
+}
+
+// resolveFuncLit resolves a function-literal expression (`func(params)
+// [returnType] { body }` - see LANGUAGE.md's "Lambdas" section): its own
+// params/return type/body get a fresh nested ScopeFunc, parented under
+// whatever scope the literal lexically appears in - exactly the same
+// resolveFuncBody shape a FuncDecl's body already gets, just parented under
+// an arbitrary enclosing scope (parent) instead of always the package scope,
+// since a literal can appear anywhere an expression can, including nested
+// inside another function or another literal. This is what makes the
+// existing scope-parent-chain machinery (Scope.Lookup already walks
+// outward through Parent, regardless of how many function scopes it has to
+// cross) resolve a captured outer variable correctly with no new resolution
+// mechanism at all - only capture.go's later pass needs to know the crossing
+// happened.
+//
+// A literal has no receiver clause (see ast.Node's own FuncLit doc comment),
+// so fnScope.Receiver is left nil - a `this` reference inside a literal still
+// resolves via nearestFunc (see resolveExpr's ThisExpr case), which simply
+// keeps walking past this scope (whose Receiver is nil) until it reaches the
+// nearest *enclosing* method's own receiver, if any - capture.go's own pass
+// is what actually rejects that case (capturing `this` is out of scope this
+// round - see LANGUAGE.md), not anything here.
+func (r *resolver) resolveFuncLit(parent *Scope, lit ast.NodeIndex) {
+	paramList := r.tree.FuncLitParamList(lit)
+	returnType := r.tree.FuncLitReturnType(lit)
+	body := r.tree.FuncLitBody(lit)
+
+	fnScope := newScope(ScopeFunc, parent, lit)
+	r.info.Scopes[lit] = fnScope
+
+	for _, param := range r.tree.Children(paramList) {
+		r.declareLocal(fnScope, param, r.tree.Child(param, 0), SymParam)
+		r.resolveType(fnScope, r.tree.Child(param, 1))
+	}
+
+	if returnType != ast.InvalidNode {
+		r.resolveType(fnScope, returnType)
+	}
+
+	r.resolveBlock(fnScope, body)
 }
 
 // resolvePackageMemberExpr resolves a package-qualified value reference

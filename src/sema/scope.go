@@ -247,6 +247,22 @@ type Symbol struct {
 	// package's file than the call site.
 	StructInfo *StructInfo
 
+	// Captured reports whether some function-literal expression (a FuncLit -
+	// see LANGUAGE.md's "Lambdas" section) anywhere in the program captures
+	// this symbol by reference from an enclosing function scope - only ever
+	// set true for a SymVar/SymParam symbol (see capture.go's
+	// analyzeFuncLitCaptures; a lambda referencing an enclosing method's
+	// `this` is rejected outright rather than supported, so SymReceiver never
+	// sets this). Computed once, by Resolve's own tail pass
+	// (computeCaptures), after every file's ordinary lexical resolution has
+	// already run - a symbol can only be known to be captured once every
+	// FuncLit anywhere that might reference it has actually been visited.
+	// codegen reads this to decide a local's storage: captured means arena-
+	// allocated (so its address can safely outlive its declaring function's
+	// own stack frame - see CODEGEN.md), not the ordinary entry-block alloca
+	// every non-captured local still gets.
+	Captured bool
+
 	// Package is set only for a SymPackage symbol (an import binding) - the
 	// imported package's own resolved surface (its shared top-level Scope
 	// and struct catalog), already built by the time this binding is

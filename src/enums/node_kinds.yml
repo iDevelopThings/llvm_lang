@@ -44,3 +44,4 @@ values:
   - name: ThisExpr
   - name: FuncType
   - name: ParamTypeList
+  - name: FuncLit

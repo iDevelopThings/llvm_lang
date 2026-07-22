@@ -49,6 +49,7 @@ const (
 	NodeKindThisExpr        NodeKind = 33
 	NodeKindFuncType        NodeKind = 34
 	NodeKindParamTypeList   NodeKind = 35
+	NodeKindFuncLit         NodeKind = 36
 )
 
 type NodeKindContainer struct {
@@ -88,6 +89,7 @@ type NodeKindContainer struct {
 	ThisExpr        NodeKind
 	FuncType        NodeKind
 	ParamTypeList   NodeKind
+	FuncLit         NodeKind
 }
 
 // NodeKinds is the entry point for the NodeKind enum.
@@ -128,6 +130,7 @@ var NodeKinds = NodeKindContainer{
 	ThisExpr:        NodeKindThisExpr,
 	FuncType:        NodeKindFuncType,
 	ParamTypeList:   NodeKindParamTypeList,
+	FuncLit:         NodeKindFuncLit,
 }
 
 // NodeKindInfo is the static metadata attached to a NodeKind.
@@ -281,6 +284,10 @@ var nodeKindInfos = map[NodeKind]NodeKindInfo{
 		NodeKind: NodeKindParamTypeList,
 		Name:     "ParamTypeList",
 	},
+	NodeKindFuncLit: {
+		NodeKind: NodeKindFuncLit,
+		Name:     "FuncLit",
+	},
 }
 
 var nodeKindValues = []NodeKind{
@@ -320,6 +327,7 @@ var nodeKindValues = []NodeKind{
 	NodeKindThisExpr,
 	NodeKindFuncType,
 	NodeKindParamTypeList,
+	NodeKindFuncLit,
 }
 
 var nodeKindByName = map[string]NodeKind{
@@ -359,6 +367,7 @@ var nodeKindByName = map[string]NodeKind{
 	"thisexpr":        NodeKindThisExpr,
 	"functype":        NodeKindFuncType,
 	"paramtypelist":   NodeKindParamTypeList,
+	"funclit":         NodeKindFuncLit,
 }
 
 // Values returns every declared value in declaration order.

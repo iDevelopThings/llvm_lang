@@ -133,14 +133,18 @@ func TestLexErrorFlowsThroughCleanlyIntoStmt(t *testing.T) {
 }
 
 func TestBadShortVarDeclTargetReportsOnce(t *testing.T) {
-	// `func` isn't dispatched as its own statement yet (that's decl.go's
+	// `struct` isn't dispatched as its own statement yet (that's decl.go's
 	// job, not built), so it falls through to parseSimpleStmt and is
 	// rejected in expression position (parseIdentExpr), producing a Bad
 	// node; finishShortVarDecl must not pile a second "left side of :=
 	// must be an identifier" error on top of that same root cause. (`if`
 	// doesn't work for this test: it's dispatched straight to parseIfStmt
-	// before ever reaching parseSimpleStmt.)
-	p := New(lexer.NewFile("t.ll", "func := 5"))
+	// before ever reaching parseSimpleStmt. `func` doesn't work for this
+	// test either, not anymore: it's now a legal expression prefix in its
+	// own right - a function-literal expression, see parseFuncLit/
+	// LANGUAGE.md's "Lambdas" section - so `func := 5` no longer exercises
+	// this "unhandled keyword in expression position" path at all.)
+	p := New(lexer.NewFile("t.ll", "struct := 5"))
 	p.parseStmt()
 	if p.diags.ErrorCount() != 1 {
 		t.Fatalf("ErrorCount = %d, want 1 (no duplicate diagnostic): %v", p.diags.ErrorCount(), p.diags.All())

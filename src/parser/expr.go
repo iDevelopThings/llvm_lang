@@ -170,6 +170,8 @@ func parseIdentExpr(p *Parser) ast.NodeIndex {
 	case enums.Keywords.This:
 		p.advance()
 		return p.tree.NewNode(enums.NodeKinds.ThisExpr, tok, tokenSpan(tok))
+	case enums.Keywords.Func:
+		return p.parseFuncLit()
 	case "":
 		p.advance()
 		ident := p.tree.NewNode(enums.NodeKinds.Ident, tok, tokenSpan(tok))
@@ -186,6 +188,36 @@ func parseIdentExpr(p *Parser) ast.NodeIndex {
 		p.advance()
 		return p.badNode(tok)
 	}
+}
+
+// parseFuncLit parses a function-literal expression: `func(params)
+// [returnType] { body }` - a real, value-producing expression, not just the
+// bare `func(T1, T2) R` *type* syntax parseFuncType already handles (see
+// ast.Node's own FuncLit doc comment for the [paramList, returnType, body]
+// shape - FuncDecl's own shape minus the receiver/name slots a literal has no
+// use for). Reuses parseParamList/parseBlock verbatim - a literal's own
+// params are named, exactly like a FuncDecl's, unlike a bare function type's
+// unnamed ParamTypeList - so this is really just parseFuncDecl with no
+// receiver clause and no name to parse. See LANGUAGE.md's "Lambdas" section
+// for the language-level feature and CODEGEN.md for how capture-by-reference
+// actually lowers.
+func (p *Parser) parseFuncLit() ast.NodeIndex {
+	kwTok := p.expectKeyword(enums.Keywords.Func)
+
+	params := p.parseParamList()
+
+	returnType := ast.InvalidNode
+	if !p.at(enums.Lexemes.LeftBrace) {
+		returnType = p.parseTypeExpr()
+	}
+
+	body := p.parseBlock()
+
+	span := ast.Span{
+		Start: kwTok.Start,
+		End:   p.tree.SpanOf(body).End,
+	}
+	return p.tree.NewNode(enums.NodeKinds.FuncLit, kwTok, span, params, returnType, body)
 }
 
 func parseNumberExpr(p *Parser) ast.NodeIndex {

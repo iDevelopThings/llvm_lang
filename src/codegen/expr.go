@@ -1,6 +1,7 @@
 package codegen
 
 import (
+	"fmt"
 	"strconv"
 
 	"llvm_lang/src/ast"
@@ -9,6 +10,45 @@ import (
 
 	"tinygo.org/x/go-llvm"
 )
+
+// addrOfSymbol resolves the address backing sym - a declared var/param
+// Symbol - by asking, in order: is it a local declared directly in the
+// function currently being generated (g.locals - works identically whether
+// that local's own storage is an ordinary stack alloca or an arena
+// allocation, see allocLocalSlot, func.go); is it a top-level global
+// (g.globals); or - only reachable when the function currently being
+// generated is itself a lambda's own synthesized function (see
+// genLambdaFunc) - is it one of *that* lambda's own captured symbols, reached
+// by loading the matching field out of its own ctxPtr parameter
+// (g.curCaptureIndex/g.curCtxPtr/g.curCaptureTy - see CODEGEN.md's "Lambdas"
+// section).
+//
+// This one function serves two call sites: genAddr's own Ident case (an
+// ordinary identifier reference anywhere in a function body), and
+// genFuncLit's own capture-context-building lookup, resolving each captured
+// symbol's address from the *enclosing* function's perspective before
+// switching into the literal's own generation state. Routing both through
+// the identical lookup is what makes a doubly-nested lambda's transitive
+// capture relay (see sema/capture.go's own doc comment) fall out for free
+// here too, with no special-casing: if the function currently being
+// generated is itself a lambda relaying some symbol it doesn't own directly
+// (sema's capture analysis already decided it must, since something nested
+// inside it needs it), this same third branch is exactly what finds it,
+// whether the caller is an ordinary Ident reference or another, deeper
+// FuncLit's own capture-context construction.
+func (g *Generator) addrOfSymbol(sym *sema.Symbol) llvm.Value {
+	if addr, ok := g.locals[sym]; ok {
+		return addr
+	}
+	if addr, ok := g.globals[sym]; ok {
+		return addr
+	}
+	if idx, ok := g.curCaptureIndex[sym]; ok {
+		fieldAddr := g.builder.CreateStructGEP(g.curCaptureTy, g.curCtxPtr, idx, "")
+		return g.builder.CreateLoad(g.ptrTy, fieldAddr, "")
+	}
+	panic("codegen: identifier " + sym.Name + " has no storage")
+}
 
 // genAddr computes the address of an lvalue expression - an Ident, `this`,
 // a MemberExpr (struct field), an IndexExpr (array element), or (through
@@ -22,14 +62,7 @@ import (
 func (g *Generator) genAddr(n ast.NodeIndex) llvm.Value {
 	switch g.tree.Nodes[n].Kind {
 	case enums.NodeKinds.Ident:
-		sym := g.info.Refs[n]
-		if addr, ok := g.locals[sym]; ok {
-			return addr
-		}
-		if addr, ok := g.globals[sym]; ok {
-			return addr
-		}
-		panic("codegen: identifier " + sym.Name + " has no storage")
+		return g.addrOfSymbol(g.info.Refs[n])
 
 	case enums.NodeKinds.ThisExpr:
 		// The receiver is already a pointer parameter (see
@@ -103,25 +136,254 @@ func (g *Generator) genLoad(n ast.NodeIndex) llvm.Value {
 
 // genFuncValue builds the fat-pointer value {fnPtr, ctxPtr} for a bare,
 // uncalled reference to a free function (`add`, not `add(...)`) - see
-// CODEGEN.md's "First-class functions" section for the representation this
-// implements.
+// CODEGEN.md's "Lambdas" section (which supersedes the plain-null-ctxPtr
+// description the "First-class functions" section originally shipped with)
+// for the representation this implements and why it changed.
 //
-// ctxPtr is always a null pointer constant here: every function value this
-// round is a free-function reference, so there is no receiver to close
-// over. This is the exact extension point a future bound-method value
-// (`p.move` referenced without a call) will fill in instead - constructing
-// this same two-field struct but with the receiver's own address as ctxPtr
-// rather than null - so the representation and calling convention need no
-// redesign when that lands.
+// fnPtr is no longer sym's own real function address directly. A genuine
+// lambda's real underlying function (see genLambdaFunc) must take its own
+// ctxPtr as a real first parameter - it needs to actually dereference it to
+// reach its captures - but a free function's real declared signature
+// (g.funcs[sym]) still has no such parameter at all, so that a *direct* call
+// (genFuncCall/isDirectFuncCall) stays genuinely zero-overhead, completely
+// unchanged from before this round. Both kinds of function value can flow
+// through the exact same func(...)-typed variable, and an *indirect* call
+// (genIndirectCall) has no way to tell which one it's holding at the call
+// site - so both must present the identical, uniform ctxPtr-first calling
+// convention the moment they're called through that fat pointer. genFuncThunk
+// builds (and memoizes) a tiny adapter function for sym that does exactly
+// that: takes (and ignores) a ctxPtr parameter, then calls straight through
+// to sym's own real function with the rest - fnPtr here is that thunk's
+// address, not sym's own.
+//
+// ctxPtr itself is still always a null pointer constant - a free-function
+// reference never captures anything (there's nothing to close over), unlike
+// a genuine lambda's own real, non-null capture context (see genFuncLit).
 func (g *Generator) genFuncValue(sym *sema.Symbol) llvm.Value {
-	entry := g.funcs[sym]
+	thunk := g.genFuncThunk(sym)
 	ctxPtr := llvm.ConstNull(g.ptrTy)
 	// Must go through g.ctx (not the package-level llvm.ConstStruct), same
 	// reasoning as constStringValue: otherwise the result's type is a
 	// structurally-identical but distinct anonymous struct type from
 	// g.funcValTy, and LLVM's verifier rejects assigning it to anything
 	// actually typed g.funcValTy (a local's alloca, a param, a return slot).
-	return g.ctx.ConstStruct([]llvm.Value{entry.fn, ctxPtr}, false)
+	return g.ctx.ConstStruct([]llvm.Value{thunk, ctxPtr}, false)
+}
+
+// genFuncThunk returns sym's (a declared free function's) uniform-ABI thunk,
+// building and memoizing it (g.thunks) on first use - however many separate
+// bare references to the same function exist in the program, each one reuses
+// the identical thunk rather than synthesizing a new one. See genFuncValue's
+// own doc comment for why this exists: the thunk's real LLVM signature is
+// sym's own real signature with one extra leading ctxPtr parameter, which its
+// body simply ignores before calling straight through to sym's own actual
+// function and returning its result unchanged - it exists purely so
+// genIndirectCall's own uniform "always pass ctxPtr first" calling
+// convention has something valid to call through no matter which kind of
+// function value it's holding (see CODEGEN.md's "Lambdas" section).
+func (g *Generator) genFuncThunk(sym *sema.Symbol) llvm.Value {
+	if thunk, ok := g.thunks[sym]; ok {
+		return thunk
+	}
+
+	entry := g.funcs[sym]
+	realParamTypes := entry.fnType.ParamTypes()
+	thunkParamTypes := make([]llvm.Type, len(realParamTypes)+1)
+	thunkParamTypes[0] = g.ptrTy
+	copy(thunkParamTypes[1:], realParamTypes)
+	thunkType := llvm.FunctionType(entry.fnType.ReturnType(), thunkParamTypes, false)
+
+	thunk := llvm.AddFunction(g.mod, sym.Name+".thunk", thunkType)
+	thunk.SetLinkage(llvm.PrivateLinkage)
+	g.thunks[sym] = thunk
+
+	// A thunk is only ever synthesized while generating some other
+	// function's body (a bare function reference is always an expression
+	// inside a function - see genExpr's Ident case, the only caller of
+	// genFuncValue) - the builder always has a valid current block to
+	// restore once the thunk's own tiny body is done.
+	savedBB := g.builder.GetInsertBlock()
+	entryBB := g.ctx.AddBasicBlock(thunk, "entry")
+	g.builder.SetInsertPointAtEnd(entryBB)
+
+	args := make([]llvm.Value, len(realParamTypes))
+	for i := range realParamTypes {
+		args[i] = thunk.Param(i + 1)
+	}
+	result := g.builder.CreateCall(entry.fnType, entry.fn, args, "")
+	if entry.retType.Kind == sema.TypeVoid {
+		g.builder.CreateRetVoid()
+	} else {
+		g.builder.CreateRet(result)
+	}
+
+	g.builder.SetInsertPointAtEnd(savedBB)
+	return thunk
+}
+
+// genFuncLit builds a genuine closure value {fnPtr, ctxPtr} for a
+// function-literal expression (see LANGUAGE.md's "Lambdas" section) - the
+// counterpart to genFuncValue's bare-free-function-reference case, this time
+// with a real, non-null ctxPtr: a fresh arena-allocated capture-context
+// struct, one pointer field per symbol the literal captures by reference
+// (info.Captures[n] - sema's capture analysis, sema/capture.go), each field
+// holding that captured symbol's own real address (addrOfSymbol) rather than
+// a copy of its value - Go-style closures capture by reference, not by
+// value, so a later mutation through either the lambda or the original
+// variable is visible to both.
+//
+// Every captured symbol's address is resolved right here, still in the
+// *enclosing* function's own generation state (addrOfSymbol reads whatever
+// g.locals/g.globals/g.curCaptureIndex currently describe, i.e. wherever
+// this genFuncLit call itself is running from) - genLambdaFunc only switches
+// Generator over to the literal's own fresh function-generation state
+// afterward, to lower its body. This ordering is what makes a doubly-nested
+// literal's own transitive capture relay work correctly with no special
+// handling here: if the *enclosing* function is itself a lambda relaying a
+// symbol it doesn't own directly, addrOfSymbol's own third branch already
+// knows how to fetch it (through the enclosing lambda's own ctxPtr) - see
+// addrOfSymbol's doc comment.
+func (g *Generator) genFuncLit(n ast.NodeIndex) llvm.Value {
+	captures := g.info.Captures[n]
+
+	if len(captures) == 0 {
+		// No capture context to allocate at all - both fields of the fat
+		// pointer are genuine LLVM constants (a function's own address, and
+		// a null pointer), so this can stay a real ConstStruct, exactly like
+		// genFuncValue's own free-function case.
+		fn := g.genLambdaFunc(n, nil, llvm.Type{})
+		return g.ctx.ConstStruct([]llvm.Value{fn, llvm.ConstNull(g.ptrTy)}, false)
+	}
+
+	fieldTypes := make([]llvm.Type, len(captures))
+	for i := range captures {
+		fieldTypes[i] = g.ptrTy
+	}
+	ctxTy := g.ctx.StructType(fieldTypes, false)
+
+	// Every captured symbol's address must be computed before the arena
+	// allocation below writes anything - genArenaAlloc/genAddr calls don't
+	// nest safely with an in-progress, not-yet-fully-stored struct.
+	addrs := make([]llvm.Value, len(captures))
+	for i, sym := range captures {
+		addrs[i] = g.addrOfSymbol(sym)
+	}
+
+	raw := g.genArenaAlloc(llvm.SizeOf(ctxTy))
+	for i, addr := range addrs {
+		fieldAddr := g.builder.CreateStructGEP(ctxTy, raw, i, "")
+		g.builder.CreateStore(addr, fieldAddr)
+	}
+
+	fn := g.genLambdaFunc(n, captures, ctxTy)
+
+	// Unlike the no-capture case above, ctxPtr here (raw) is a genuine
+	// runtime value (an arena_alloc call's result), not a compile-time
+	// constant - LLVM's ConstStruct requires every field to itself be a
+	// constant, so a real closure's fat pointer has to be built as a real
+	// runtime aggregate instead (llvm.Undef + CreateInsertValue), the same
+	// approach genStringConcat/genMakeCall already use for their own
+	// multi-field runtime-computed aggregate results.
+	result := llvm.Undef(g.funcValTy)
+	result = g.builder.CreateInsertValue(result, fn, 0, "")
+	result = g.builder.CreateInsertValue(result, raw, 1, "")
+	return result
+}
+
+// genLambdaFunc lowers n's (a FuncLit's) own body as a real, independent,
+// top-level LLVM function with a synthesized, collision-free name
+// ("llvm_lang.lambda.N", g.lambdaCounter - see CODEGEN.md's "Lambdas"
+// section), and returns that function's own address.
+//
+// Its real LLVM signature always takes ctxPtr as a genuine first parameter,
+// regardless of whether captures is empty - unlike an ordinary free
+// function's signature (declareFuncSignature), which never has one at all -
+// because a lambda is always called *indirectly*, through the fat-pointer
+// representation (there's no way to call a FuncLit "directly" the way a
+// statically-named free function can be - see isDirectFuncCall, which a
+// FuncLit callee never matches), and every indirect call
+// (genIndirectCall) now uniformly passes ctxPtr as a real argument no matter
+// which kind of function value it's calling through (see genFuncThunk's own
+// doc comment for the other half of this uniform-ABI design).
+//
+// Generating this literal's own body means temporarily replacing every one
+// of Generator's per-function-frame fields (curFn/entryBlock/locals/
+// loopStack/curFunc/curReceiver/curCtxPtr/curCaptureIndex/curCaptureTy) with
+// this literal's own fresh state, and the builder's own current insert
+// block with this literal's own entry block - saved in plain local
+// variables and restored once this literal's body is fully generated, the
+// same save-in-a-local/restore-after-recursing shape sema/typecheck.go's
+// checkFuncLit already uses for curFunc, one layer up. Since this is an
+// ordinary (non-reentrant-within-itself) function call, Go's own call stack
+// already handles arbitrary nesting depth for free - a FuncLit nested inside
+// this one simply recurses into genLambdaFunc again, one level deeper,
+// saving and restoring the exact same fields around its own body in turn.
+func (g *Generator) genLambdaFunc(n ast.NodeIndex, captures []*sema.Symbol, ctxTy llvm.Type) llvm.Value {
+	paramListNode := g.tree.FuncLitParamList(n)
+	returnTypeNode := g.tree.FuncLitReturnType(n)
+	body := g.tree.FuncLitBody(n)
+	paramNodes := g.tree.Children(paramListNode)
+
+	retType := sema.Type{Kind: sema.TypeVoid}
+	if returnTypeNode != ast.InvalidNode {
+		retType = g.info.Types[returnTypeNode]
+	}
+
+	paramTypes := make([]llvm.Type, len(paramNodes)+1)
+	paramTypes[0] = g.ptrTy
+	for i, paramNode := range paramNodes {
+		paramTypes[i+1] = g.llvmType(g.info.Types[g.tree.Child(paramNode, 1)])
+	}
+	fnType := llvm.FunctionType(g.llvmType(retType), paramTypes, false)
+
+	name := fmt.Sprintf("llvm_lang.lambda.%d", g.lambdaCounter)
+	g.lambdaCounter++
+	fn := llvm.AddFunction(g.mod, name, fnType)
+	fn.SetLinkage(llvm.PrivateLinkage)
+
+	savedFn, savedEntry, savedLocals := g.curFn, g.entryBlock, g.locals
+	savedLoopStack, savedFunc, savedReceiver := g.loopStack, g.curFunc, g.curReceiver
+	savedCtxPtr, savedCaptureIndex, savedCaptureTy := g.curCtxPtr, g.curCaptureIndex, g.curCaptureTy
+	savedBB := g.builder.GetInsertBlock()
+
+	g.curFn = fn
+	g.entryBlock = g.ctx.AddBasicBlock(fn, "entry")
+	g.builder.SetInsertPointAtEnd(g.entryBlock)
+	g.locals = make(map[*sema.Symbol]llvm.Value)
+	g.loopStack = nil
+	g.curReceiver = llvm.Value{}
+
+	g.curCtxPtr = fn.Param(0)
+	g.curCaptureTy = ctxTy
+	captureIndex := make(map[*sema.Symbol]int, len(captures))
+	for i, sym := range captures {
+		captureIndex[sym] = i
+	}
+	g.curCaptureIndex = captureIndex
+
+	for i, paramNode := range paramNodes {
+		psym := g.info.Refs[g.tree.Child(paramNode, 0)]
+		pllt := g.llvmType(g.info.Types[g.tree.Child(paramNode, 1)])
+		addr := g.allocLocalSlot(psym, pllt, psym.Name)
+		g.builder.CreateStore(fn.Param(i+1), addr)
+		g.locals[psym] = addr
+	}
+
+	g.curFunc = &funcCtx{
+		isMain:    false,
+		hasReturn: returnTypeNode != ast.InvalidNode,
+	}
+
+	if !g.genBlock(body) {
+		g.emitFallbackTerminator()
+	}
+
+	g.curFn, g.entryBlock, g.locals = savedFn, savedEntry, savedLocals
+	g.loopStack, g.curFunc, g.curReceiver = savedLoopStack, savedFunc, savedReceiver
+	g.curCtxPtr, g.curCaptureIndex, g.curCaptureTy = savedCtxPtr, savedCaptureIndex, savedCaptureTy
+	g.builder.SetInsertPointAtEnd(savedBB)
+
+	return fn
 }
 
 // genBoundsCheck emits a real runtime check that idx (an i32) satisfies
@@ -196,6 +458,8 @@ func (g *Generator) genExpr(n ast.NodeIndex) llvm.Value {
 		tmp := g.createEntryAlloca(t, "lit")
 		g.genCompositeLitInto(tmp, n)
 		return g.builder.CreateLoad(t, tmp, "")
+	case enums.NodeKinds.FuncLit:
+		return g.genFuncLit(n)
 	default:
 		panic("codegen: cannot generate an expression of kind " + g.tree.Nodes[n].Kind.String())
 	}
@@ -595,26 +859,40 @@ func (g *Generator) isDirectFuncCall(calleeNode ast.NodeIndex) bool {
 // Unlike a direct call (genFuncCall, which looks the callee's LLVM function
 // straight up in g.funcs), this actually evaluates calleeNode as an
 // ordinary value expression to get its fat-pointer {fnPtr, ctxPtr}
-// representation (see genFuncValue and CODEGEN.md), extracts fnPtr, and builds
-// the llvm.FunctionType to call through it directly from the callee's own
-// sema.Type (Params/Return) - there's no FuncDecl node backing an indirect
-// callee the way genFuncCall's funcEntry lookup relies on. ctxPtr is
-// unused this round - every function value is a free-function reference
-// (see genFuncValue) - so it's never passed along as a hidden argument.
+// representation (see genFuncValue/genFuncLit and CODEGEN.md's "Lambdas"
+// section), extracts both fnPtr and ctxPtr, and builds the llvm.FunctionType
+// to call through fnPtr directly from the callee's own sema.Type (Params/
+// Return) - there's no FuncDecl node backing an indirect callee the way
+// genFuncCall's funcEntry lookup relies on.
+//
+// ctxPtr is now always passed along as fnPtr's own real first argument -
+// this is the one change this round made to this function, and it's what
+// makes an indirect call correctly polymorphic over which of the two kinds
+// of function value it's actually holding at runtime: fnPtr is always either
+// a free function's own memoized thunk (genFuncThunk) or a genuine lambda's
+// own synthesized function (genLambdaFunc), and both now share the exact
+// same real, uniform ctxPtr-first signature - so calling through either one
+// this same way is always valid, well-typed IR, never a mismatched-signature
+// call. A *direct* call (genFuncCall) never reaches this function at all and
+// is completely unaffected - it keeps calling a statically-known function's
+// own real (ctxPtr-less) signature directly, exactly as before.
 func (g *Generator) genIndirectCall(calleeNode ast.NodeIndex, argNodes []ast.NodeIndex) llvm.Value {
 	fnVal := g.genExpr(calleeNode)
 	fnPtr := g.builder.CreateExtractValue(fnVal, 0, "")
+	ctxPtr := g.builder.CreateExtractValue(fnVal, 1, "")
 
 	calleeType := g.info.Types[calleeNode]
-	paramTypes := make([]llvm.Type, len(calleeType.Params))
+	paramTypes := make([]llvm.Type, len(calleeType.Params)+1)
+	paramTypes[0] = g.ptrTy
 	for i, pt := range calleeType.Params {
-		paramTypes[i] = g.llvmType(pt)
+		paramTypes[i+1] = g.llvmType(pt)
 	}
 	fnType := llvm.FunctionType(g.llvmType(*calleeType.Return), paramTypes, false)
 
-	args := make([]llvm.Value, len(argNodes))
+	args := make([]llvm.Value, len(argNodes)+1)
+	args[0] = ctxPtr
 	for i, a := range argNodes {
-		args[i] = g.genExpr(a)
+		args[i+1] = g.genExpr(a)
 	}
 	return g.builder.CreateCall(fnType, fnPtr, args, "")
 }
