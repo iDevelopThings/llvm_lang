@@ -23,6 +23,12 @@ when actually relevant to the task at hand:
 - **`BLOCKERS.md`** - currently-open questions needing a human judgment
   call, actively pruned once answered (see that file's own header for the
   exact convention - it is not a changelog or archive).
+- **`BENCHMARKS.md`** - dated `testing.B` baseline numbers (ns/op, B/op,
+  allocs/op) for each pipeline stage - lexer, parser, sema, codegen, and the
+  end-to-end `src/compiler` entry point - measured against a shared fixture
+  in `src/bench`. Read this (and update it) whenever a change might
+  meaningfully move performance/allocations in one of those stages, per the
+  `## Standards` section below.
 
 # Compiling
 

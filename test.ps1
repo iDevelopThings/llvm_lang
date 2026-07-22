@@ -12,11 +12,15 @@
 #   .\test.ps1 -Verbose          # add -v
 #   .\test.ps1 -Run TestFoo      # add -run=TestFoo
 #   .\test.ps1 -Verbose -Run TestFoo ./src/codegen/...
+#   .\test.ps1 -Bench .          # go test -tags=llvm22 -run=^$ -bench=. -benchmem ./...
+#   .\test.ps1 -Bench BenchmarkLex -Package ./src/lexer/...
 
 param(
     [switch]$Verbose,
     [string]$Run,
-    [string]$Package = "./..."
+    [string]$Package = "./...",
+    [string]$Bench,
+    [string]$BenchTime
 )
 $ErrorActionPreference = "Stop"
 
@@ -26,9 +30,23 @@ if ($env:Path -notlike "*$mingw*") { $env:Path = "$mingw;$env:Path" }
 
 $goArgs = @("test", "-tags=llvm22")
 if ($Verbose) { $goArgs += "-v" }
-if ($Run) { $goArgs += "-run=$Run" }
+if ($Bench) {
+    # -run=^$ skips every ordinary Test, matching `go test`'s own documented
+    # way to run benchmarks only - otherwise every package's real test suite
+    # would run first and pad the reported numbers with unrelated wall time.
+    $goArgs += "-run=^$"
+    $goArgs += "-bench=$Bench"
+    $goArgs += "-benchmem"
+    if ($BenchTime) { $goArgs += "-benchtime=$BenchTime" }
+} elseif ($Run) {
+    $goArgs += "-run=$Run"
+}
 $goArgs += $Package
 
 go @goArgs
 if ($LASTEXITCODE -ne 0) { throw "go test failed ($LASTEXITCODE)" }
-Write-Host "Tests passed (LLVM 22)" -ForegroundColor Green
+if ($Bench) {
+    Write-Host "Benchmarks passed (LLVM 22)" -ForegroundColor Green
+} else {
+    Write-Host "Tests passed (LLVM 22)" -ForegroundColor Green
+}
