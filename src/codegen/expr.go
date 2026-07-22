@@ -369,6 +369,7 @@ func (g *Generator) genLambdaFunc(n ast.NodeIndex, captures []*sema.Symbol, ctxT
 	savedFn, savedEntry, savedLocals := g.curFn, g.entryBlock, g.locals
 	savedLoopStack, savedFunc, savedReceiver := g.loopStack, g.curFunc, g.curReceiver
 	savedCtxPtr, savedCaptureIndex, savedCaptureTy := g.curCtxPtr, g.curCaptureIndex, g.curCaptureTy
+	savedDestructors := g.destructors
 	savedBB := g.builder.GetInsertBlock()
 
 	g.curFn = fn
@@ -376,6 +377,7 @@ func (g *Generator) genLambdaFunc(n ast.NodeIndex, captures []*sema.Symbol, ctxT
 	g.builder.SetInsertPointAtEnd(g.entryBlock)
 	g.locals = make(map[*sema.Symbol]llvm.Value)
 	g.loopStack = nil
+	g.destructors = nil
 	g.curReceiver = llvm.Value{}
 
 	g.curCtxPtr = fn.Param(0)
@@ -388,10 +390,11 @@ func (g *Generator) genLambdaFunc(n ast.NodeIndex, captures []*sema.Symbol, ctxT
 
 	for i, paramNode := range paramNodes {
 		psym := g.info.Refs[g.tree.Child(paramNode, 0)]
-		pllt := g.llvmType(g.info.Types[g.tree.Child(paramNode, 1)])
-		addr := g.allocLocalSlot(psym, pllt, psym.Name)
+		ptype := g.info.Types[g.tree.Child(paramNode, 1)]
+		addr := g.allocLocalSlot(psym, g.llvmType(ptype), psym.Name)
 		g.builder.CreateStore(fn.Param(i+1), addr)
 		g.locals[psym] = addr
+		g.pushDestructorEntry(psym, ptype)
 	}
 
 	g.curFunc = &funcCtx{
@@ -399,13 +402,12 @@ func (g *Generator) genLambdaFunc(n ast.NodeIndex, captures []*sema.Symbol, ctxT
 		hasReturn: returnTypeNode != ast.InvalidNode,
 	}
 
-	if !g.genBlock(body) {
-		g.emitFallbackTerminator()
-	}
+	g.finishBody(body)
 
 	g.curFn, g.entryBlock, g.locals = savedFn, savedEntry, savedLocals
 	g.loopStack, g.curFunc, g.curReceiver = savedLoopStack, savedFunc, savedReceiver
 	g.curCtxPtr, g.curCaptureIndex, g.curCaptureTy = savedCtxPtr, savedCaptureIndex, savedCaptureTy
+	g.destructors = savedDestructors
 	g.builder.SetInsertPointAtEnd(savedBB)
 
 	return fn

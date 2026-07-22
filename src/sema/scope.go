@@ -171,6 +171,15 @@ const (
 	// resolved to" idea an ordinary method call's Info.Refs entry already
 	// captures.
 	SymConstructor
+	// SymDestructor names a struct's own `destructor() {...}` block (see
+	// LANGUAGE.md's "Destructors" section) - the destructor-kind counterpart
+	// to SymConstructor, and, like it, never itself bound into any lexical
+	// Scope: a destructor has no name and no call syntax of its own at all
+	// (unlike a constructor, which is at least reachable via `Name(args)`) -
+	// it's invoked purely implicitly, by codegen, at a local's scope exit or
+	// by `delete` against a pointer to it. Recorded once per struct on
+	// StructInfo.Destructor.
+	SymDestructor
 	// SymBuiltinValue names a predeclared value with no declaration of its
 	// own - currently only `nil` (see universeScope and LANGUAGE.md's
 	// "Pointers" section) - a value, deliberately distinct from
@@ -201,6 +210,8 @@ func (k SymbolKind) String() string {
 		return "package"
 	case SymConstructor:
 		return "constructor"
+	case SymDestructor:
+		return "destructor"
 	case SymBuiltinValue:
 		return "builtin value"
 	default:
@@ -339,6 +350,35 @@ type StructInfo struct {
 	// whether either is ever called. May be empty (most structs have no
 	// constructors at all).
 	Constructors map[int]*Symbol
+
+	// Destructor is this struct's own `destructor() {...}` block (see
+	// LANGUAGE.md's "Destructors" section), or nil if it declares none - at
+	// most one is ever legal; a second is rejected right at struct-
+	// declaration time (declareDestructor, resolve.go), the same "a
+	// structural problem regardless of whether it's ever used" reasoning
+	// Constructors' own arity-collision check already uses.
+	Destructor *Symbol
+
+	// Copyable reports whether a value of this struct type may be freely
+	// duplicated - false iff this struct declares its own Destructor, or
+	// (transitively) embeds any field whose own type is itself non-copyable,
+	// directly or through a fixed-size array (see LANGUAGE.md's "Destructors"
+	// section for the full rule, and why no move semantics or last-use
+	// analysis is needed to keep this sound: a non-copyable value can only
+	// ever have one live instance, so "when does it destruct" is never
+	// ambiguous). Computed lazily and memoized on first use, since one
+	// struct's copyability can depend on another struct declared later in
+	// the same file, in a different file, or (a struct's constructors are
+	// usable cross-package the moment the struct itself is exported - same
+	// rule this feature follows) a different package entirely - see
+	// checker.structCopyable, typecheck.go.
+	Copyable bool
+
+	// copyableComputed reports whether Copyable already holds a real,
+	// computed answer - distinct from Copyable's own zero value (false)
+	// specifically so "not computed yet" and "computed, and it's false" are
+	// never confused (see checker.structCopyable).
+	copyableComputed bool
 }
 
 // universeScope holds the language's predeclared names - built-in

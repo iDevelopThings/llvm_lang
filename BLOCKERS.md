@@ -40,6 +40,9 @@ real, separate, already-answered exception to this specific question - a
 plain individually-`malloc`'d/`free`'d block per `new`, deliberately never
 routed through the arena (see `DECISIONS.md`) - not a general answer to *this*
 entry: they don't help a program that leaks via string concatenation or
-dynamic-array growth in a loop, and destructors/RAII (automatic cleanup at
-`delete` time) remain unimplemented and out of scope. The arena's own
-question above is still open.
+dynamic-array growth in a loop. Struct destructors (`LANGUAGE.md`'s
+"Destructors" section) now exist and cover one narrow slice of "automatic
+cleanup" - a non-copyable type's own scope-exit/`delete`-time cleanup - but
+deliberately don't attempt anything like a general GC/refcounting scheme (no
+recursive cascading through embedded fields, no move semantics); the arena's
+own question above is still open regardless.

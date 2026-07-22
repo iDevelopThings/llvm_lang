@@ -87,6 +87,7 @@ func (g *Generator) genFuncBody(decl ast.NodeIndex) {
 	g.builder.SetInsertPointAtEnd(g.entryBlock)
 	g.locals = make(map[*sema.Symbol]llvm.Value)
 	g.loopStack = nil
+	g.destructors = nil
 
 	offset := 0
 	g.curReceiver = llvm.Value{}
@@ -96,10 +97,11 @@ func (g *Generator) genFuncBody(decl ast.NodeIndex) {
 	}
 	for i, paramNode := range g.tree.Children(paramListNode) {
 		psym := g.info.Refs[g.tree.Child(paramNode, 0)]
-		pllt := g.llvmType(g.info.Types[g.tree.Child(paramNode, 1)])
-		addr := g.allocLocalSlot(psym, pllt, psym.Name)
+		ptype := g.info.Types[g.tree.Child(paramNode, 1)]
+		addr := g.allocLocalSlot(psym, g.llvmType(ptype), psym.Name)
 		g.builder.CreateStore(g.curFn.Param(offset+i), addr)
 		g.locals[psym] = addr
+		g.pushDestructorEntry(psym, ptype)
 	}
 
 	g.curFunc = &funcCtx{
@@ -107,9 +109,7 @@ func (g *Generator) genFuncBody(decl ast.NodeIndex) {
 		hasReturn: returnTypeNode != ast.InvalidNode,
 	}
 
-	if !g.genBlock(body) {
-		g.emitFallbackTerminator()
-	}
+	g.finishBody(body)
 	g.curFunc = nil
 }
 
@@ -148,6 +148,38 @@ func (g *Generator) emitFallbackTerminator() {
 	default:
 		g.builder.CreateUnreachable()
 	}
+}
+
+// finishBody generates body - a function/constructor/destructor/lambda's own
+// top-level block - and, only if it fell off its own end normally rather
+// than already ending in a real `return` somewhere inside it, unwinds
+// whatever's left on Generator.destructors before falling back to
+// emitFallbackTerminator: an explicit return already unwinds every entry
+// itself (see genReturnStmt, stmt.go, and LANGUAGE.md's "Destructors"
+// section), but genBlock's own fall-through case only ever unwinds body's
+// own directly-declared locals (see unwindDestructorsTo, stmt.go) - so
+// whatever's left here is exactly this function/constructor/destructor's own
+// by-value parameters, pushed by pushDestructorEntry before body ever started
+// generating.
+func (g *Generator) finishBody(body ast.NodeIndex) {
+	if !g.genBlock(body) {
+		g.unwindDestructorsTo(0)
+		g.emitFallbackTerminator()
+	}
+}
+
+// pushDestructorEntry records sym (a local var/short-var-decl/parameter
+// declaration whose storage - g.locals[sym] - was just initialized) onto the
+// current function's destructor stack if, and only if, its own declared
+// type t is a struct that declares its own destructor() directly - see
+// LANGUAGE.md's "Destructors" section: a type that's merely non-copyable
+// via a field never cascades into an automatic call by itself, only a
+// type's own destructor ever does.
+func (g *Generator) pushDestructorEntry(sym *sema.Symbol, t sema.Type) {
+	if t.Kind != sema.TypeStruct || t.Struct == nil || t.Struct.Destructor == nil {
+		return
+	}
+	g.destructors = append(g.destructors, destructorEntry{sym: sym, info: t.Struct})
 }
 
 // declareConstructorSignature declares ctor's (a ConstructorDecl's) LLVM
@@ -218,14 +250,16 @@ func (g *Generator) genConstructorBody(ctor ast.NodeIndex) {
 	g.builder.SetInsertPointAtEnd(g.entryBlock)
 	g.locals = make(map[*sema.Symbol]llvm.Value)
 	g.loopStack = nil
+	g.destructors = nil
 	g.curReceiver = g.curFn.Param(0)
 
 	for i, paramNode := range g.tree.Children(paramListNode) {
 		psym := g.info.Refs[g.tree.Child(paramNode, 0)]
-		pllt := g.llvmType(g.info.Types[g.tree.Child(paramNode, 1)])
-		addr := g.allocLocalSlot(psym, pllt, psym.Name)
+		ptype := g.info.Types[g.tree.Child(paramNode, 1)]
+		addr := g.allocLocalSlot(psym, g.llvmType(ptype), psym.Name)
 		g.builder.CreateStore(g.curFn.Param(1+i), addr)
 		g.locals[psym] = addr
+		g.pushDestructorEntry(psym, ptype)
 	}
 
 	g.curFunc = &funcCtx{
@@ -233,9 +267,61 @@ func (g *Generator) genConstructorBody(ctor ast.NodeIndex) {
 		hasReturn: false,
 	}
 
-	if !g.genBlock(body) {
-		g.emitFallbackTerminator()
+	g.finishBody(body)
+	g.curFunc = nil
+}
+
+// declareDestructorSignature declares dtor's (a DestructorDecl's) LLVM
+// function signature, with no body yet - the destructor-kind counterpart to
+// declareConstructorSignature, mirroring it closely: the same implicit-
+// first-pointer-parameter convention (the struct instance being destructed,
+// addressed, never loaded), no parameters of its own (sema.checkDestructorDecl
+// already guarantees an empty paramList), and always void, since a
+// destructor is never called with call-expression syntax at all (see
+// LANGUAGE.md's "Destructors" section) - only ever invoked implicitly, by
+// this package itself, at a local's scope exit or by `delete`.
+//
+// Named "Struct.destructor" (no arity suffix needed - unlike a constructor,
+// a struct declares at most one), the same "Type.MethodName" convention
+// declareConstructorSignature already uses.
+func (g *Generator) declareDestructorSignature(dtor ast.NodeIndex) {
+	sym := g.info.Refs[dtor]
+	structInfo := sym.StructInfo
+	layout := g.structLayouts[structInfo]
+
+	paramTypes := []llvm.Type{llvm.PointerType(layout.llvmType, 0)}
+	fnType := llvm.FunctionType(g.voidTy, paramTypes, false)
+	name := fmt.Sprintf("%s.destructor", structInfo.Symbol.Name)
+	g.dtors[structInfo] = funcEntry{
+		fn:       llvm.AddFunction(g.mod, name, fnType),
+		fnType:   fnType,
+		retType:  sema.Type{Kind: sema.TypeVoid},
+		isMethod: true,
 	}
+}
+
+// genDestructorBody lowers dtor's body, given its signature already declared
+// (see declareDestructorSignature) - mirrors genConstructorBody, minus the
+// parameter loop (a destructor never has any of its own).
+func (g *Generator) genDestructorBody(dtor ast.NodeIndex) {
+	sym := g.info.Refs[dtor]
+	entry := g.dtors[sym.StructInfo]
+	body := g.tree.DestructorBody(dtor)
+
+	g.curFn = entry.fn
+	g.entryBlock = g.ctx.AddBasicBlock(g.curFn, "entry")
+	g.builder.SetInsertPointAtEnd(g.entryBlock)
+	g.locals = make(map[*sema.Symbol]llvm.Value)
+	g.loopStack = nil
+	g.destructors = nil
+	g.curReceiver = g.curFn.Param(0)
+
+	g.curFunc = &funcCtx{
+		isMain:    false,
+		hasReturn: false,
+	}
+
+	g.finishBody(body)
 	g.curFunc = nil
 }
 

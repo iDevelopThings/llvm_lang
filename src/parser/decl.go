@@ -153,10 +153,11 @@ func (p *Parser) parseParam() ast.NodeIndex {
 }
 
 // parseStructDecl parses `struct Name { field Type ... }` - data-only aside
-// from one narrow, deliberate exception: a `constructor(params) { body }`
-// block may also appear directly inside the braces (see LANGUAGE.md's
-// "Constructors" section) - everything else (an ordinary method) is still
-// declared separately via `func (Name) method() {...}`, to keep multi-file
+// from two narrow, deliberate exceptions: a `constructor(params) { body }`
+// block (see LANGUAGE.md's "Constructors" section) or a `destructor() { body
+// }` block (see LANGUAGE.md's "Destructors" section) may also appear directly
+// inside the braces - everything else (an ordinary method) is still declared
+// separately via `func (Name) method() {...}`, to keep multi-file
 // organization like Go's receiver methods, and to keep this grammar rule
 // from ever needing to parse a full method's signature (name, receiver,
 // return type).
@@ -177,14 +178,18 @@ func (p *Parser) parseStructDecl() ast.NodeIndex {
 }
 
 // parseStructMember parses one element of a struct body - either an
-// ordinary field, or (the one exception - see parseStructDecl) a
-// constructor block, disambiguated by whether the element starts with the
-// `constructor` keyword.
+// ordinary field, or (the two exceptions - see parseStructDecl) a
+// constructor or destructor block, disambiguated by whether the element
+// starts with the `constructor`/`destructor` keyword.
 func (p *Parser) parseStructMember() ast.NodeIndex {
-	if p.atKeyword(enums.Keywords.Constructor) {
+	switch {
+	case p.atKeyword(enums.Keywords.Constructor):
 		return p.parseConstructorDecl()
+	case p.atKeyword(enums.Keywords.Destructor):
+		return p.parseDestructorDecl()
+	default:
+		return p.parseField()
 	}
-	return p.parseField()
 }
 
 func (p *Parser) parseField() ast.NodeIndex {
@@ -213,4 +218,25 @@ func (p *Parser) parseConstructorDecl() ast.NodeIndex {
 		End:   p.tree.SpanOf(body).End,
 	}
 	return p.tree.NewNode(enums.NodeKinds.ConstructorDecl, kwTok, span, params, body)
+}
+
+// parseDestructorDecl parses `destructor() { body }` - see ast.Node's own
+// DestructorDecl doc comment for the [paramList, body] shape, identical to
+// parseConstructorDecl's own: no name, no receiver clause, and no return
+// type. Unlike a constructor, a destructor's own paramList is always
+// semantically required to be empty - sema, not this grammar rule, rejects a
+// non-empty one (see sema.checkDestructorDecl), the same division of labor
+// duplicate-arity constructor rejection already uses (grammar accepts the
+// general shape, sema enforces the feature's own narrower rule on top of
+// it).
+func (p *Parser) parseDestructorDecl() ast.NodeIndex {
+	kwTok := p.expectKeyword(enums.Keywords.Destructor)
+	params := p.parseParamList()
+	body := p.parseBlock()
+
+	span := ast.Span{
+		Start: kwTok.Start,
+		End:   p.tree.SpanOf(body).End,
+	}
+	return p.tree.NewNode(enums.NodeKinds.DestructorDecl, kwTok, span, params, body)
 }

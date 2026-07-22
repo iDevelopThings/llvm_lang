@@ -79,6 +79,41 @@ func (t *Tree) ConstructorBody(ctor NodeIndex) NodeIndex {
 	return t.Child(ctor, 1)
 }
 
+// StructDestructors yields decl's (a StructDecl's) DestructorDecl children,
+// in declaration order - the destructor-kind counterpart to
+// StructConstructors (see LANGUAGE.md's "Destructors" section). A struct is
+// meant to declare at most one - a second is a compile-time error (see
+// sema.declareDestructor) - but this still yields every one found rather than
+// just the first, so a duplicate is still visited (and its own body still
+// type-checked/lowered) exactly like a duplicate-arity constructor is, not
+// silently dropped.
+func (t *Tree) StructDestructors(decl NodeIndex) iter.Seq[NodeIndex] {
+	return func(yield func(NodeIndex) bool) {
+		for _, c := range t.Children(decl)[1:] {
+			if t.Nodes[c].Kind != enums.NodeKinds.DestructorDecl {
+				continue
+			}
+			if !yield(c) {
+				return
+			}
+		}
+	}
+}
+
+// DestructorParamList returns dtor's (a DestructorDecl's) ParamList child -
+// see Node's own DestructorDecl doc comment for the [paramList, body] shape
+// these two accessors index into. Always semantically empty (sema rejects a
+// non-empty one), but still a real ParamList node, exactly like
+// ConstructorParamList's own shape.
+func (t *Tree) DestructorParamList(dtor NodeIndex) NodeIndex {
+	return t.Child(dtor, 0)
+}
+
+// DestructorBody returns dtor's (a DestructorDecl's) body child.
+func (t *Tree) DestructorBody(dtor NodeIndex) NodeIndex {
+	return t.Child(dtor, 1)
+}
+
 // FuncLitParamList returns lit's (a FuncLit's) ParamList child - see Node's
 // own FuncLit doc comment for the [paramList, returnType, body] shape these
 // three accessors index into.

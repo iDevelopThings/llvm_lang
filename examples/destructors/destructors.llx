@@ -1,0 +1,81 @@
+// destructors.llx - a struct's own destructor() { body } (see LANGUAGE.md's
+// "Destructors" section), demonstrated two ways: the FileHandle-shaped
+// resource-owning pattern (own a *T via `new` in the constructor, `delete`
+// it in the destructor, itself triggered by an explicit `delete` against a
+// pointer to the owning struct), and a plain local variable whose own
+// destructor fires automatically at ordinary scope exit, with no `new`/
+// `delete` involved at all. Returns an int, which becomes this process's own
+// exit code (see cmd/llvmc's package doc comment).
+//
+// Run with:
+//   .\llvmc.exe examples\destructors\destructors.llx
+//   echo $LASTEXITCODE   # (PowerShell) -> 30
+
+struct RawHandle {
+    id int
+
+    constructor(v int) {
+        this.id = v
+    }
+}
+
+// FileHandle owns a *RawHandle - the recommended pattern for a resource-
+// owning, destructor-having type: hold a *pointer* field to what it owns and
+// manually `delete` it in its own destructor body, rather than embedding a
+// destructor-having value directly as a by-value field (see LANGUAGE.md's
+// "Destructors" section - "known limitation" - for why that embedded case
+// doesn't automatically cascade a destructor call the way this pattern
+// does).
+struct FileHandle {
+    raw *RawHandle
+
+    constructor(id int) {
+        this.raw = new RawHandle(id)
+        print(this.raw.id)   // 1 - constructed
+    }
+    destructor() {
+        print(this.raw.id)   // 1 - this.raw is still valid here, read before free
+        delete this.raw
+    }
+}
+
+func useFileHandle() {
+    f := new FileHandle(1)
+    print(f.raw.id)   // 1
+    delete f          // calls FileHandle's destructor, then frees f itself
+}
+
+// Counter is a second, simpler destructor-having type - no heap allocation
+// of its own at all - used below purely as a plain local, to demonstrate the
+// other real trigger this feature has: falling off the end of (or, via an
+// early return, control leaving) the local's own declaring block.
+struct Counter {
+    id int
+
+    constructor(v int) {
+        this.id = v
+    }
+    destructor() {
+        print(this.id)
+    }
+}
+
+// plainLocalScopeExit declares two plain (non-pointer, non-`new`'d) locals
+// of a destructor-having type directly - legal since a plain local of such a
+// type is still its own sole owner, exactly like a `new`'d pointer is, just
+// on the stack instead of the heap. Both destruct automatically once this
+// function returns, in reverse declaration order (b before a) - the return
+// value itself is computed first, while both are still fully valid, then
+// each destructor fires, then control actually returns to the caller.
+func plainLocalScopeExit() int {
+    a := Counter(10)
+    b := Counter(20)
+    return a.id + b.id   // 30
+}
+
+func main() int {
+    useFileHandle()
+    result := plainLocalScopeExit()
+    print(result)
+    return result
+}

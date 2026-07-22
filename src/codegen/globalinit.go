@@ -63,6 +63,7 @@ func (g *Generator) genGlobalCtors() {
 	g.builder.SetInsertPointAtEnd(g.entryBlock)
 	g.locals = make(map[*sema.Symbol]llvm.Value)
 	g.loopStack = nil
+	g.destructors = nil
 	g.curReceiver = llvm.Value{}
 	g.curFunc = &funcCtx{
 		isMain:    false,

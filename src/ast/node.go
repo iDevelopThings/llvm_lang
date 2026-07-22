@@ -42,16 +42,18 @@ type Span struct {
 //     (=, +=, -=, *=, /=, ++, --)
 //   - ShortVarDecl: the `:=` token
 //   - VarDecl, FuncDecl, StructDecl, IfStmt, ForStmt, ReturnStmt, BreakStmt,
-//     ContinueStmt, FuncType, ConstructorDecl, FuncLit, NewExpr, DeleteStmt:
-//     the leading keyword token (FuncType's is the `func` that introduces a
-//     function-type expression, e.g. `func(int) int`, see LANGUAGE.md's Types
-//     section; FuncLit's is the `func` that introduces a function-literal
-//     expression, e.g. `func(x int) int { return x }`, see LANGUAGE.md's
-//     "Lambdas" section - the same keyword, disambiguated from FuncType
-//     purely by whether a `{` body follows the parameter list/return type,
-//     exactly the same way FuncDecl's own body already disambiguates it from
-//     a bare declaration; NewExpr's is the `new` keyword, DeleteStmt's the
-//     `delete` keyword - see LANGUAGE.md's "Pointers" section)
+//     ContinueStmt, FuncType, ConstructorDecl, DestructorDecl, FuncLit,
+//     NewExpr, DeleteStmt: the leading keyword token (FuncType's is the `func`
+//     that introduces a function-type expression, e.g. `func(int) int`, see
+//     LANGUAGE.md's Types section; FuncLit's is the `func` that introduces a
+//     function-literal expression, e.g. `func(x int) int { return x }`, see
+//     LANGUAGE.md's "Lambdas" section - the same keyword, disambiguated from
+//     FuncType purely by whether a `{` body follows the parameter list/return
+//     type, exactly the same way FuncDecl's own body already disambiguates it
+//     from a bare declaration; NewExpr's is the `new` keyword, DeleteStmt's
+//     the `delete` keyword - see LANGUAGE.md's "Pointers" section;
+//     DestructorDecl's is the `destructor` keyword - see LANGUAGE.md's
+//     "Destructors" section)
 //   - `&`/`*` address-of/dereference are ordinary UnaryExpr nodes - Tok is
 //     the operator token exactly like unary `-`/`!`, distinguished purely by
 //     Tok.Lexeme, no new node kind needed for either (see LANGUAGE.md's
@@ -106,9 +108,10 @@ type Span struct {
 //   - StructDecl: [name, member0, member1, ...] - variable arity, name always
 //     first (same CallExpr-style shape - nothing follows the variable part,
 //     unlike FuncDecl, so no wrapper is needed here). Each member is either a
-//     Field or a ConstructorDecl, interspersed in declaration order - see
-//     ast.Tree's StructFields/StructConstructors, which each filter the full
-//     member list down to their own kind.
+//     Field, a ConstructorDecl, or a DestructorDecl, interspersed in
+//     declaration order - see ast.Tree's StructFields/StructConstructors/
+//     StructDestructors, which each filter the full member list down to
+//     their own kind.
 //   - ConstructorDecl: [paramList, body] - fixed arity. A constructor is a
 //     narrow, deliberate exception to "structs are data-only, methods
 //     declared separately" (see LANGUAGE.md's "Constructors" section): it's
@@ -117,6 +120,17 @@ type Span struct {
 //     (its receiver is always the struct being constructed - `this` inside
 //     its body resolves exactly like inside an ordinary method), and no
 //     return type (it "returns" the struct implicitly by populating `this`).
+//   - DestructorDecl: [paramList, body] - fixed arity, the exact same shape
+//     as ConstructorDecl (see LANGUAGE.md's "Destructors" section) - reused
+//     directly rather than inventing a paramList-less shape, even though a
+//     destructor's own paramList is always semantically required to be empty
+//     (sema, not the grammar, rejects a non-empty one - see
+//     sema.checkDestructorDecl): a destructor is never called with explicit
+//     arguments, only invoked implicitly (at a local's scope exit, or by
+//     `delete` against a pointer to it), so there's no call-site syntax that
+//     would ever need to supply any. At most one per struct - a second one is
+//     a compile-time error, reported at struct-declaration time exactly like
+//     a duplicate-arity constructor (see sema.declareDestructor).
 //   - File: [decl0, decl1, ...] - variable arity (the parse tree root)
 //   - ParamTypeList: [type0, type1, ...] - variable arity, each child a bare
 //     type-position node (an Ident, ArrayType, or another FuncType - no name,

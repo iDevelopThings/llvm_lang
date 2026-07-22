@@ -193,6 +193,91 @@ func TestConstructorDeclShape(t *testing.T) {
 	}
 }
 
+// TestDestructorDeclShape covers a struct with zero and one destructor - see
+// LANGUAGE.md's "Destructors" section for the language feature and
+// ast.Node's own StructDecl/DestructorDecl doc comments for the shapes
+// asserted here: a DestructorDecl is [paramList, body], with an always-empty
+// ParamList (sema, not this grammar, enforces "zero parameters" - see
+// TestDestructorMustTakeNoParametersIsError, typecheck_test.go), no name/
+// receiver/return-type children, interspersed among a StructDecl's ordinary
+// Field/ConstructorDecl children in declaration order.
+func TestDestructorDeclShape(t *testing.T) {
+	tests := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{
+			name: "struct with zero destructors is unaffected",
+			src:  "struct Point {\n\tx int\n}",
+			want: "" +
+				"StructDecl \"struct\"\n" +
+				"  Ident \"Point\"\n" +
+				"  Field\n" +
+				"    Ident \"x\"\n" +
+				"    Ident \"int\"\n",
+		},
+		{
+			name: "struct with one destructor",
+			src:  "struct Point {\n\tx int\n\n\tdestructor() {\n\t\tthis.x = 0\n\t}\n}",
+			want: "" +
+				"StructDecl \"struct\"\n" +
+				"  Ident \"Point\"\n" +
+				"  Field\n" +
+				"    Ident \"x\"\n" +
+				"    Ident \"int\"\n" +
+				"  DestructorDecl \"destructor\"\n" +
+				"    ParamList\n" +
+				"    Block\n" +
+				"      AssignStmt \"=\"\n" +
+				"        MemberExpr \"x\"\n" +
+				"          ThisExpr \"this\"\n" +
+				"        NumberLit \"0\"\n",
+		},
+		{
+			name: "constructor and destructor coexisting on one struct",
+			src: "struct Point {\n" +
+				"\tx int\n\n" +
+				"\tconstructor(v int) {\n\t\tthis.x = v\n\t}\n" +
+				"\tdestructor() {\n\t\tthis.x = 0\n\t}\n" +
+				"}",
+			want: "" +
+				"StructDecl \"struct\"\n" +
+				"  Ident \"Point\"\n" +
+				"  Field\n" +
+				"    Ident \"x\"\n" +
+				"    Ident \"int\"\n" +
+				"  ConstructorDecl \"constructor\"\n" +
+				"    ParamList\n" +
+				"      Param\n" +
+				"        Ident \"v\"\n" +
+				"        Ident \"int\"\n" +
+				"    Block\n" +
+				"      AssignStmt \"=\"\n" +
+				"        MemberExpr \"x\"\n" +
+				"          ThisExpr \"this\"\n" +
+				"        Ident \"v\"\n" +
+				"  DestructorDecl \"destructor\"\n" +
+				"    ParamList\n" +
+				"    Block\n" +
+				"      AssignStmt \"=\"\n" +
+				"        MemberExpr \"x\"\n" +
+				"          ThisExpr \"this\"\n" +
+				"        NumberLit \"0\"\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tree, n := parseDeclSrc(t, tt.src)
+			got := tree.Dump(n)
+			if got != tt.want {
+				t.Errorf("Dump(%q):\n got:\n%s\nwant:\n%s", tt.src, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestArrayTypeAndCompositeLitShape(t *testing.T) {
 	tests := []struct {
 		name string

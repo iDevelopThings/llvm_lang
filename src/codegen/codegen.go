@@ -50,6 +50,27 @@ func (m *Module) Dispose() {
 type loopCtx struct {
 	breakTarget    llvm.BasicBlock
 	continueTarget llvm.BasicBlock
+
+	// destructorBase is len(Generator.destructors) at the point this loop's
+	// own body started generating - see genBreakStmt/genContinueStmt's own
+	// unwindDestructorsTo calls (stmt.go) and LANGUAGE.md's "Destructors"
+	// section: a break/continue only ever unwinds what was declared since
+	// entering the loop, never anything declared in an enclosing scope
+	// outside it (that scope isn't being exited at all).
+	destructorBase int
+}
+
+// destructorEntry is one local variable's or parameter's own symbol, plus
+// the struct type that gave it a destructor - pushed onto
+// Generator.destructors (see pushDestructorEntry, func.go) the moment such a
+// local/parameter's storage is initialized, and popped (with a real
+// destructor call emitted for each entry popped) by unwindDestructorsTo
+// (stmt.go) at every point LANGUAGE.md's "Destructors" section identifies as
+// a real scope exit: a block falling off its own end, a return, or a
+// break/continue exiting an enclosing loop.
+type destructorEntry struct {
+	sym  *sema.Symbol
+	info *sema.StructInfo
 }
 
 // funcCtx is pushed once per function body being generated - the state
@@ -187,6 +208,32 @@ type Generator struct {
 	// by declareConstructorSignature, read by genConstructorCall - see
 	// func.go.
 	ctors map[*sema.Symbol]funcEntry
+
+	// dtors is ctors' destructor-kind counterpart (see LANGUAGE.md's
+	// "Destructors" section) - keyed directly by *sema.StructInfo rather
+	// than by a destructor's own *sema.Symbol (sema.SymDestructor): unlike a
+	// constructor, a destructor is never selected by an arity lookup or any
+	// other call-site resolution - every real caller of this map already
+	// holds the StructInfo it wants the destructor for (a local/parameter's
+	// own declared type, or delete's pointee type), so there's no reason to
+	// go through the Symbol indirection at all. Populated by
+	// declareDestructorSignature, read by genDestructorCall - see func.go.
+	dtors map[*sema.StructInfo]funcEntry
+
+	// destructors is the current function's flat, function-scoped stack of
+	// still-in-scope locals/parameters whose own declared type has its own
+	// destructor - reset at the start of every function/constructor/lambda
+	// body (see genFuncBody/genConstructorBody/genLambdaFunc), pushed onto by
+	// pushDestructorEntry (func.go) the moment such a local/parameter's
+	// storage is initialized, and unwound (see unwindDestructorsTo, stmt.go)
+	// at every real scope exit this feature fires at. A flat slice rather
+	// than a stack of per-block frames: every unwind operation - a block's
+	// own fall-through, a return, or a break/continue - already knows
+	// exactly which index to unwind back down to (a block's own saved
+	// `base`, 0 for a return, or a loopCtx's own destructorBase for a
+	// break/continue), so there's no need for an extra nested-frame layer on
+	// top of the flat slice itself.
+	destructors []destructorEntry
 
 	// locals is reset at the start of every function (see genFuncBody) -
 	// every VarDecl/ShortVarDecl/Param declaration node produces its own
@@ -337,6 +384,7 @@ func GeneratePackage(trees []*ast.Tree, infos map[*ast.Tree]*sema.Info, moduleNa
 		globals:       make(map[*sema.Symbol]llvm.Value),
 		funcs:         make(map[*sema.Symbol]funcEntry),
 		ctors:         make(map[*sema.Symbol]funcEntry),
+		dtors:         make(map[*sema.StructInfo]funcEntry),
 		strLiterals:   make(map[string]llvm.Value),
 		thunks:        make(map[*sema.Symbol]llvm.Value),
 	}
@@ -408,6 +456,9 @@ func (g *Generator) genPackage(trees []*ast.Tree) {
 			for ctor := range tree.StructConstructors(d) {
 				g.declareConstructorSignature(ctor)
 			}
+			for dtor := range tree.StructDestructors(d) {
+				g.declareDestructorSignature(dtor)
+			}
 		}
 	}
 	// genGlobalCtors (globalinit.go) needs every function/constructor
@@ -427,6 +478,9 @@ func (g *Generator) genPackage(trees []*ast.Tree) {
 		for d := range tree.TopLevelDeclsOfKind(enums.NodeKinds.StructDecl) {
 			for ctor := range tree.StructConstructors(d) {
 				g.genConstructorBody(ctor)
+			}
+			for dtor := range tree.StructDestructors(d) {
+				g.genDestructorBody(dtor)
 			}
 		}
 	}

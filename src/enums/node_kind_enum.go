@@ -24,36 +24,37 @@ const (
 	NodeKindStructDecl      NodeKind = 8
 	NodeKindField           NodeKind = 9
 	NodeKindConstructorDecl NodeKind = 10
-	NodeKindBlock           NodeKind = 11
-	NodeKindExprStmt        NodeKind = 12
-	NodeKindReturnStmt      NodeKind = 13
-	NodeKindBreakStmt       NodeKind = 14
-	NodeKindContinueStmt    NodeKind = 15
-	NodeKindIfStmt          NodeKind = 16
-	NodeKindForStmt         NodeKind = 17
-	NodeKindAssignStmt      NodeKind = 18
-	NodeKindIncDecStmt      NodeKind = 19
-	NodeKindIdent           NodeKind = 20
-	NodeKindNumberLit       NodeKind = 21
-	NodeKindStringLit       NodeKind = 22
-	NodeKindBoolLit         NodeKind = 23
-	NodeKindBinaryExpr      NodeKind = 24
-	NodeKindUnaryExpr       NodeKind = 25
-	NodeKindCallExpr        NodeKind = 26
-	NodeKindParenExpr       NodeKind = 27
-	NodeKindIndexExpr       NodeKind = 28
-	NodeKindMemberExpr      NodeKind = 29
-	NodeKindArrayType       NodeKind = 30
-	NodeKindCompositeLit    NodeKind = 31
-	NodeKindKeyValueExpr    NodeKind = 32
-	NodeKindThisExpr        NodeKind = 33
-	NodeKindFuncType        NodeKind = 34
-	NodeKindParamTypeList   NodeKind = 35
-	NodeKindFuncLit         NodeKind = 36
-	NodeKindPointerType     NodeKind = 37
-	NodeKindNewExpr         NodeKind = 38
-	NodeKindDeleteStmt      NodeKind = 39
-	NodeKindSliceExpr       NodeKind = 40
+	NodeKindDestructorDecl  NodeKind = 11
+	NodeKindBlock           NodeKind = 12
+	NodeKindExprStmt        NodeKind = 13
+	NodeKindReturnStmt      NodeKind = 14
+	NodeKindBreakStmt       NodeKind = 15
+	NodeKindContinueStmt    NodeKind = 16
+	NodeKindIfStmt          NodeKind = 17
+	NodeKindForStmt         NodeKind = 18
+	NodeKindAssignStmt      NodeKind = 19
+	NodeKindIncDecStmt      NodeKind = 20
+	NodeKindIdent           NodeKind = 21
+	NodeKindNumberLit       NodeKind = 22
+	NodeKindStringLit       NodeKind = 23
+	NodeKindBoolLit         NodeKind = 24
+	NodeKindBinaryExpr      NodeKind = 25
+	NodeKindUnaryExpr       NodeKind = 26
+	NodeKindCallExpr        NodeKind = 27
+	NodeKindParenExpr       NodeKind = 28
+	NodeKindIndexExpr       NodeKind = 29
+	NodeKindMemberExpr      NodeKind = 30
+	NodeKindArrayType       NodeKind = 31
+	NodeKindCompositeLit    NodeKind = 32
+	NodeKindKeyValueExpr    NodeKind = 33
+	NodeKindThisExpr        NodeKind = 34
+	NodeKindFuncType        NodeKind = 35
+	NodeKindParamTypeList   NodeKind = 36
+	NodeKindFuncLit         NodeKind = 37
+	NodeKindPointerType     NodeKind = 38
+	NodeKindNewExpr         NodeKind = 39
+	NodeKindDeleteStmt      NodeKind = 40
+	NodeKindSliceExpr       NodeKind = 41
 )
 
 type NodeKindContainer struct {
@@ -68,6 +69,7 @@ type NodeKindContainer struct {
 	StructDecl      NodeKind
 	Field           NodeKind
 	ConstructorDecl NodeKind
+	DestructorDecl  NodeKind
 	Block           NodeKind
 	ExprStmt        NodeKind
 	ReturnStmt      NodeKind
@@ -113,6 +115,7 @@ var NodeKinds = NodeKindContainer{
 	StructDecl:      NodeKindStructDecl,
 	Field:           NodeKindField,
 	ConstructorDecl: NodeKindConstructorDecl,
+	DestructorDecl:  NodeKindDestructorDecl,
 	Block:           NodeKindBlock,
 	ExprStmt:        NodeKindExprStmt,
 	ReturnStmt:      NodeKindReturnStmt,
@@ -195,6 +198,10 @@ var nodeKindInfos = map[NodeKind]NodeKindInfo{
 	NodeKindConstructorDecl: {
 		NodeKind: NodeKindConstructorDecl,
 		Name:     "ConstructorDecl",
+	},
+	NodeKindDestructorDecl: {
+		NodeKind: NodeKindDestructorDecl,
+		Name:     "DestructorDecl",
 	},
 	NodeKindBlock: {
 		NodeKind: NodeKindBlock,
@@ -330,6 +337,7 @@ var nodeKindValues = []NodeKind{
 	NodeKindStructDecl,
 	NodeKindField,
 	NodeKindConstructorDecl,
+	NodeKindDestructorDecl,
 	NodeKindBlock,
 	NodeKindExprStmt,
 	NodeKindReturnStmt,
@@ -374,6 +382,7 @@ var nodeKindByName = map[string]NodeKind{
 	"structdecl":      NodeKindStructDecl,
 	"field":           NodeKindField,
 	"constructordecl": NodeKindConstructorDecl,
+	"destructordecl":  NodeKindDestructorDecl,
 	"block":           NodeKindBlock,
 	"exprstmt":        NodeKindExprStmt,
 	"returnstmt":      NodeKindReturnStmt,

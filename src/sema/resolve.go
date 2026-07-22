@@ -272,6 +272,7 @@ func (r *resolver) resolvePackage(trees []*ast.Tree) {
 			case enums.NodeKinds.StructDecl:
 				r.resolveStructFieldTypes(fileScope, decl)
 				r.resolveStructConstructors(fileScope, decl)
+				r.resolveStructDestructors(fileScope, decl)
 			}
 		}
 	}
@@ -370,6 +371,9 @@ func (r *resolver) declareStruct(pkg *Scope, decl ast.NodeIndex) {
 	for ctor := range r.tree.StructConstructors(decl) {
 		r.declareConstructor(info, ctor)
 	}
+	for dtor := range r.tree.StructDestructors(decl) {
+		r.declareDestructor(info, dtor)
+	}
 }
 
 // declareConstructor catalogs one `constructor(params) {...}` block nested
@@ -404,6 +408,36 @@ func (r *resolver) declareConstructor(info *StructInfo, ctor ast.NodeIndex) {
 	info.Constructors[arity] = ctorSym
 }
 
+// declareDestructor catalogs one `destructor() {...}` block nested inside a
+// StructDecl (see LANGUAGE.md's "Destructors" section) - the destructor-kind
+// counterpart to declareConstructor, mirroring it closely: a second
+// destructor on the same struct is rejected right here, at struct-
+// declaration time, the same "structural problem regardless of whether
+// either is ever used" reasoning a duplicate-arity constructor already gets.
+// Unlike a constructor, there's no arity to key by at all - a destructor is
+// singular by construction, so StructInfo just holds a single *Symbol
+// (nil until/unless one is declared).
+func (r *resolver) declareDestructor(info *StructInfo, dtor ast.NodeIndex) {
+	dtorSym := &Symbol{
+		Name: info.Symbol.Name + ".destructor",
+		Kind: SymDestructor,
+		Decl: dtor,
+		Tree: r.tree,
+		// Scope mirrors a constructor's own Symbol.Scope (see
+		// declareConstructor) - kept only for consistency with every other
+		// Symbol, never actually looked up by name.
+		Scope:      info.Symbol.Scope,
+		StructInfo: info,
+	}
+	r.info.Refs[dtor] = dtorSym
+
+	if info.Destructor != nil {
+		r.errorAt(dtor, "struct %s already has a destructor", info.Symbol.Name)
+		return
+	}
+	info.Destructor = dtorSym
+}
+
 func (r *resolver) resolveStructFieldTypes(pkg *Scope, decl ast.NodeIndex) {
 	for _, field := range r.tree.StructFields(decl) {
 		r.resolveType(pkg, r.tree.Child(field, 1))
@@ -432,6 +466,53 @@ func (r *resolver) resolveConstructorBody(pkg *Scope, info *StructInfo, ctor ast
 
 	fnScope := newScope(ScopeFunc, pkg, ctor)
 	r.info.Scopes[ctor] = fnScope
+	fnScope.Receiver = &Symbol{
+		Name:  "this",
+		Kind:  SymReceiver,
+		Decl:  info.Symbol.Decl,
+		Tree:  info.Symbol.Tree,
+		Scope: fnScope,
+	}
+
+	for _, param := range r.tree.Children(paramList) {
+		r.declareLocal(fnScope, param, r.tree.Child(param, 0), SymParam)
+		r.resolveType(fnScope, r.tree.Child(param, 1))
+	}
+
+	r.resolveBlock(fnScope, body)
+}
+
+// resolveStructDestructors resolves every destructor nested inside decl -
+// mirroring resolveStructConstructors exactly, one level down (a struct
+// declares at most one - see declareDestructor - but this still resolves
+// every one found, same "don't silently skip a duplicate" reasoning
+// StructDestructors' own doc comment gives).
+func (r *resolver) resolveStructDestructors(pkg *Scope, decl ast.NodeIndex) {
+	nameNode := r.tree.Child(decl, 0)
+	info, ok := r.info.Structs[r.tree.Text(nameNode)]
+	if !ok {
+		return
+	}
+	for dtor := range r.tree.StructDestructors(decl) {
+		r.resolveDestructorBody(pkg, info, dtor)
+	}
+}
+
+// resolveDestructorBody resolves a destructor's body - mirroring
+// resolveConstructorBody almost exactly. A valid destructor's own paramList
+// is always empty (sema.checkDestructorDecl is what actually rejects a
+// non-empty one, at Check time, not here) - but this still resolves whatever
+// parameters are actually present, exactly like an ordinary constructor's,
+// so a malformed `destructor(v int) { ... v ... }` gets the intended
+// "destructor must take no parameters" diagnostic instead of a confusing,
+// unrelated "undefined: v" one from a body that otherwise refers to a
+// parameter this pass never bothered declaring.
+func (r *resolver) resolveDestructorBody(pkg *Scope, info *StructInfo, dtor ast.NodeIndex) {
+	paramList := r.tree.DestructorParamList(dtor)
+	body := r.tree.DestructorBody(dtor)
+
+	fnScope := newScope(ScopeFunc, pkg, dtor)
+	r.info.Scopes[dtor] = fnScope
 	fnScope.Receiver = &Symbol{
 		Name:  "this",
 		Kind:  SymReceiver,

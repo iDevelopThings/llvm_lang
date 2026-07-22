@@ -36,6 +36,8 @@ values:
     string: "import"
   - name: Constructor
     string: "constructor"
+  - name: Destructor
+    string: "destructor"
   - name: New
     string: "new"
   - name: Delete

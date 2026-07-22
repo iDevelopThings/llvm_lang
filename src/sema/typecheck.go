@@ -138,6 +138,14 @@ type checker struct {
 	// to distinguish *which* enclosing loop (that's codegen's loopStack's
 	// job, once this pass has already guaranteed one exists at all).
 	loopDepth int
+
+	// computingCopyable is structCopyable's own cycle guard - a struct's
+	// Copyable can depend (transitively, through a field) on another
+	// struct's, possibly not computed yet (see structCopyable) - mirroring
+	// computingDecl's identical role for declType, just keyed by *StructInfo
+	// instead of nodeRef, since copyability is a fact about the struct type
+	// itself, not about any one declaration node.
+	computingCopyable map[*StructInfo]bool
 }
 
 // enter switches the checker's current-file bookkeeping to tree
@@ -228,13 +236,14 @@ func CheckPackage(trees []*ast.Tree, infos map[*ast.Tree]*Info) map[*ast.Tree]*d
 // packages" section for the identical reasoning one layer down.
 func CheckProgram(trees []*ast.Tree, infos map[*ast.Tree]*Info, treePackage map[*ast.Tree]*Scope) map[*ast.Tree]*diag.Bag {
 	c := &checker{
-		infos:         infos,
-		allDiags:      make(map[*ast.Tree]*diag.Bag, len(trees)),
-		treePackage:   treePackage,
-		declTypes:     make(map[nodeRef]Type),
-		computingDecl: make(map[nodeRef]bool),
-		typeNodeCache: make(map[nodeRef]Type),
-		funcSigs:      make(map[nodeRef]funcSignature),
+		infos:             infos,
+		allDiags:          make(map[*ast.Tree]*diag.Bag, len(trees)),
+		treePackage:       treePackage,
+		declTypes:         make(map[nodeRef]Type),
+		computingDecl:     make(map[nodeRef]bool),
+		typeNodeCache:     make(map[nodeRef]Type),
+		funcSigs:          make(map[nodeRef]funcSignature),
+		computingCopyable: make(map[*StructInfo]bool),
 	}
 	for _, tree := range trees {
 		c.allDiags[tree] = diag.NewBag()
@@ -311,6 +320,9 @@ func (c *checker) checkStructDecl(decl ast.NodeIndex) {
 	for ctor := range c.tree.StructConstructors(decl) {
 		c.checkConstructorDecl(ctor)
 	}
+	for dtor := range c.tree.StructDestructors(decl) {
+		c.checkDestructorDecl(dtor)
+	}
 }
 
 // checkConstructorDecl type-checks one constructor's params and body -
@@ -366,6 +378,33 @@ func (c *checker) computeConstructorSig(ctor ast.NodeIndex) funcSignature {
 		Params: params,
 		Return: Type{Kind: TypeStruct, Struct: structInfo},
 	}
+}
+
+// checkDestructorDecl type-checks one `destructor() {...}` block - mirroring
+// checkConstructorDecl almost exactly (no declared return type at all, so
+// it's checked like an ordinary void method body: a bare `return` is an
+// early exit, `return expr` is rejected by checkReturnStmt's existing rule,
+// and there's no "missing return" check to run). The one thing genuinely
+// specific to a destructor: its own paramList must actually be empty (see
+// LANGUAGE.md's "Destructors" section - the grammar rule, parseDestructorDecl,
+// accepts the same general `(...)` shape a constructor's own paramList would,
+// so this is what actually enforces "always zero parameters").
+func (c *checker) checkDestructorDecl(dtor ast.NodeIndex) {
+	paramList := c.tree.DestructorParamList(dtor)
+	body := c.tree.DestructorBody(dtor)
+
+	paramNodes := c.tree.Children(paramList)
+	for _, param := range paramNodes {
+		c.declType(param)
+	}
+	if len(paramNodes) > 0 {
+		c.errorAt(paramList, "destructor must take no parameters, got %d", len(paramNodes))
+	}
+
+	prevFunc := c.curFunc
+	c.curFunc = &enclosingFunc{hasReturn: false}
+	c.checkBlock(body)
+	c.curFunc = prevFunc
 }
 
 func (c *checker) checkFuncDecl(decl ast.NodeIndex) {
@@ -552,7 +591,9 @@ func (c *checker) checkVarDeclNode(decl ast.NodeIndex) Type {
 	}
 
 	initType := c.checkValueExpr(initNode)
-	c.checkAssignable(initNode, declared, initType, "variable declaration")
+	if c.checkAssignable(initNode, declared, initType, "variable declaration") {
+		c.checkNoIllegalCopy(initNode, declared, true, "variable declaration")
+	}
 	return declared
 }
 
@@ -560,7 +601,9 @@ func (c *checker) checkShortVarDeclNode(decl ast.NodeIndex) Type {
 	// `:=` never has a declared type (see the grammar) - same untyped
 	// defaulting rule as a type-less `var`, above.
 	initNode := c.tree.Child(decl, 1)
-	return c.defaultIfUntyped(initNode, c.checkValueExpr(initNode))
+	t := c.defaultIfUntyped(initNode, c.checkValueExpr(initNode))
+	c.checkNoIllegalCopy(initNode, t, true, "short variable declaration")
+	return t
 }
 
 // defaultIfUntyped applies Go's own untyped-constant defaulting rule (see
@@ -679,6 +722,144 @@ func (c *checker) checkAssignable(at ast.NodeIndex, want, got Type, context stri
 		return false
 	}
 	return true
+}
+
+// structCopyable computes (and memoizes onto info.Copyable) whether info's
+// struct type may be freely copied - see StructInfo.Copyable's own doc
+// comment for the exact rule. Lazy and memoized, exactly like declType: a
+// struct's own field types may name another struct declared later in the
+// package (any file, this one included, or - since a struct's fields are
+// checked regardless of export - another package entirely once this
+// dependency is itself exported), so this can't simply be computed once,
+// eagerly, in source declaration order the way checkStructDecl's own
+// per-file loop visits structs.
+//
+// computingCopyable guards against a genuinely cyclic struct definition (a
+// struct that, through some chain of by-value fields, contains itself) -
+// not a case this pass otherwise detects or needs to solve; treating it as
+// copyable simply breaks the recursion without a false diagnostic here, on
+// the assumption a cyclic-by-value struct is either impossible to construct
+// in the first place or will surface as a different, unrelated problem
+// elsewhere.
+func (c *checker) structCopyable(info *StructInfo) bool {
+	if info.copyableComputed {
+		return info.Copyable
+	}
+	if c.computingCopyable[info] {
+		return true
+	}
+	c.computingCopyable[info] = true
+	defer delete(c.computingCopyable, info)
+
+	copyable := info.Destructor == nil
+	if copyable {
+		restore := c.pushTree(info.Symbol.Tree)
+		for _, field := range c.tree.StructFields(info.Symbol.Decl) {
+			fieldType := c.typeFromNode(c.tree.Child(field, 1))
+			if c.typeIsNonCopyable(fieldType) {
+				copyable = false
+				break
+			}
+		}
+		restore()
+	}
+
+	info.Copyable = copyable
+	info.copyableComputed = true
+	return copyable
+}
+
+// typeIsNonCopyable reports whether a value of type t can never be freely
+// duplicated (see LANGUAGE.md's "Destructors" section) - a struct that isn't
+// StructInfo.Copyable, or a fixed-size array of a non-copyable element type
+// (propagating the exact same "one field is enough to taint the whole
+// aggregate" rule StructInfo.Copyable itself already applies one level up).
+// A dynamic array element's own copyability is deliberately not consulted
+// here at all - see arrayTypeFromNode's own dedicated diagnostic instead,
+// which rejects a non-copyable dynamic-array element type outright rather
+// than needing this helper to reason about slice growth/aliasing.
+func (c *checker) typeIsNonCopyable(t Type) bool {
+	switch t.Kind {
+	case TypeStruct:
+		if t.Struct == nil {
+			return false
+		}
+		return !c.structCopyable(t.Struct)
+	case TypeArray:
+		if t.Dynamic || t.Elem == nil {
+			return false
+		}
+		return c.typeIsNonCopyable(*t.Elem)
+	default:
+		return false
+	}
+}
+
+// isFreshConstruction reports whether n is an expression that builds a
+// brand-new value in place - a composite literal or a constructor call -
+// rather than referencing an already-existing one. This is exactly what
+// LANGUAGE.md's "Destructors" section calls out as the one thing that's
+// never "a copy" even for a non-copyable type: `f := FileHandle(...)` (or
+// `f := FileHandle{...}`) constructs the one instance `f` now owns, while
+// `g := f` would duplicate an existing live value - checkNoIllegalCopy is
+// what actually tells those two apart at each of this rule's call sites.
+// Unwraps any enclosing ParenExpr first, same as every other "what shape is
+// this expression, structurally" check in this pass (e.g. checkLValue's
+// UnaryExpr("*") case).
+func (c *checker) isFreshConstruction(n ast.NodeIndex) bool {
+	for c.tree.Nodes[n].Kind == enums.NodeKinds.ParenExpr {
+		n = c.tree.Child(n, 0)
+	}
+	switch c.tree.Nodes[n].Kind {
+	case enums.NodeKinds.CompositeLit:
+		return true
+	case enums.NodeKinds.CallExpr:
+		callee := c.tree.Child(n, 0)
+		sym, ok := c.info.Refs[callee]
+		return ok && sym.Kind == SymConstructor
+	default:
+		return false
+	}
+}
+
+// checkNoIllegalCopy enforces LANGUAGE.md's "Destructors" non-copyable rule
+// at one of its four call sites (a var/short-var-decl initializer or a plain
+// assignment's value, a struct/array composite-literal element, a function
+// argument, or a return statement's value) - at is the source expression,
+// want the context's already-matched target type (only meaningful once
+// checkAssignable has already confirmed at's own type actually matches want;
+// callers only call this after that succeeds, so a plain type mismatch
+// never also raises a second, unrelated "illegal copy" diagnostic about the
+// same expression).
+//
+// allowFresh distinguishes the two shapes this rule takes:
+//   - a var decl, assignment, composite-literal element, or function
+//     argument all allow the one deliberate exception - constructing a
+//     fresh value in place (isFreshConstruction) is never "a copy". A fresh
+//     argument is just as sound as a fresh var-decl initializer: the
+//     callee's own parameter (an ordinary local, as far as this feature's
+//     firing rule is concerned - see pushDestructorEntry, codegen/func.go)
+//     becomes that value's one and only owner, destructing it at its own
+//     scope exit, with no other reference to it anywhere else.
+//   - a return statement's value allows no exception at all, fresh
+//     construction included (see LANGUAGE.md: "this is the one that forces
+//     resource-owning types only exist behind a pointer"). This is
+//     genuinely different from argument-passing, not an arbitrary
+//     asymmetry: soundly allowing a fresh *return* would require knowing,
+//     at every call site consuming the result, that "whatever this call
+//     returns is always freshly owned" - a real (if narrow) escape-analysis
+//     question this round deliberately doesn't take on (see DECISIONS.md) -
+//     whereas a fresh *argument*'s soundness is entirely local to the one
+//     call expression itself, nothing further to infer.
+func (c *checker) checkNoIllegalCopy(at ast.NodeIndex, want Type, allowFresh bool, context string) bool {
+	if !c.typeIsNonCopyable(want) {
+		return true
+	}
+	if allowFresh && c.isFreshConstruction(at) {
+		return true
+	}
+	c.errorAt(at, "cannot copy %s in %s: it (or a field of it) has a destructor, so it cannot be copied - only constructed fresh or referenced through a pointer", want, context)
+	return false
 }
 
 // typeFromNode converts a resolved type-position node (an Ident naming a
@@ -828,6 +1009,19 @@ func (c *checker) arrayTypeFromNode(n ast.NodeIndex) Type {
 	elem := c.typeFromNode(elemNode)
 
 	if sizeNode == ast.InvalidNode {
+		// A dynamic array whose element type is non-copyable is explicitly
+		// out of scope for this round (see LANGUAGE.md's "Destructors"
+		// section): `make`/`append`/growth all copy element bytes around
+		// (memcpy on reallocation) with no destructor-cascading concept at
+		// all, so allowing this here would silently mishandle it rather than
+		// give it a real diagnostic. Non-copyable is only ever non-copyable
+		// because some struct in the chain declares its own destructor (see
+		// StructInfo.Copyable), so this one check already covers both "the
+		// element type itself has a destructor" and "the element type embeds
+		// one" uniformly.
+		if c.typeIsNonCopyable(elem) {
+			c.errorAt(elemNode, "dynamic array element type %s is non-copyable (has a destructor); dynamic arrays of a destructor-owning type are not supported", elem)
+		}
 		return Type{
 			Kind:    TypeArray,
 			Elem:    &elem,
@@ -960,7 +1154,9 @@ func (c *checker) checkAssignStmt(n ast.NodeIndex) {
 
 	op := c.tree.Text(n)
 	if op == "=" {
-		c.checkAssignable(value, tt, vt, "assignment")
+		if c.checkAssignable(value, tt, vt, "assignment") {
+			c.checkNoIllegalCopy(value, tt, true, "assignment")
+		}
 		return
 	}
 	c.checkCompoundOp(value, op, tt, vt)
@@ -1073,7 +1269,13 @@ func (c *checker) checkReturnStmt(n ast.NodeIndex) {
 		c.errorAt(value, "function does not return a value")
 		return
 	}
-	c.checkAssignable(value, fn.ret, vt, "return statement")
+	if c.checkAssignable(value, fn.ret, vt, "return statement") {
+		// allowFresh=false: returning a non-copyable type by value is always
+		// rejected, even when the returned expression is itself a fresh
+		// construction - see checkNoIllegalCopy's own doc comment for why
+		// this one context allows no exception at all.
+		c.checkNoIllegalCopy(value, fn.ret, false, "return statement")
+	}
 }
 
 func (c *checker) checkIfStmt(n ast.NodeIndex) {
@@ -2066,7 +2268,18 @@ func (c *checker) checkCallExpr(n ast.NodeIndex) Type {
 
 	for i, a := range args {
 		at := c.checkValueExpr(a)
-		c.checkAssignable(a, sig.Params[i], at, fmt.Sprintf("argument %d", i+1))
+		if c.checkAssignable(a, sig.Params[i], at, fmt.Sprintf("argument %d", i+1)) {
+			// allowFresh=true: passing a freshly-constructed non-copyable
+			// value as an argument is sound with no extra machinery at all -
+			// the callee's own parameter is a plain local exactly like any
+			// other (see pushDestructorEntry, codegen/func.go), and becomes
+			// that fresh value's one and only owner, destructing it at its
+			// own scope exit - only an *existing* value handed in by
+			// reference to another live owner is the real double-destruction
+			// risk (see checkNoIllegalCopy's own doc comment for why return
+			// is different).
+			c.checkNoIllegalCopy(a, sig.Params[i], true, fmt.Sprintf("argument %d", i+1))
+		}
 	}
 	return sig.Return
 }
@@ -2280,7 +2493,9 @@ func (c *checker) checkConstructorCall(n, callee ast.NodeIndex, args []ast.NodeI
 
 	for i, a := range args {
 		at := c.checkValueExpr(a)
-		c.checkAssignable(a, sig.Params[i], at, fmt.Sprintf("argument %d", i+1))
+		if c.checkAssignable(a, sig.Params[i], at, fmt.Sprintf("argument %d", i+1)) {
+			c.checkNoIllegalCopy(a, sig.Params[i], true, fmt.Sprintf("argument %d", i+1))
+		}
 	}
 
 	c.info.Refs[callee] = ctorSym
@@ -2632,7 +2847,9 @@ func (c *checker) checkPositionalStructElem(elem ast.NodeIndex, i int, info *Str
 	fieldType := c.typeFromNode(c.tree.Child(fields[i], 1))
 	fieldName := c.tree.Text(c.tree.Child(fields[i], 0))
 	restore()
-	c.checkAssignable(elem, fieldType, vt, fmt.Sprintf("field %s", fieldName))
+	if c.checkAssignable(elem, fieldType, vt, fmt.Sprintf("field %s", fieldName)) {
+		c.checkNoIllegalCopy(elem, fieldType, true, fmt.Sprintf("field %s", fieldName))
+	}
 }
 
 func (c *checker) checkKeyedStructElem(elem ast.NodeIndex, info *StructInfo, seen map[string]bool) {
@@ -2670,7 +2887,9 @@ func (c *checker) checkKeyedStructElem(elem ast.NodeIndex, info *StructInfo, see
 	restore := c.pushTree(fieldSym.Tree)
 	fieldType := c.typeFromNode(c.tree.Child(fieldSym.Decl, 1))
 	restore()
-	c.checkAssignable(value, fieldType, vt, fmt.Sprintf("field %s", name))
+	if c.checkAssignable(value, fieldType, vt, fmt.Sprintf("field %s", name)) {
+		c.checkNoIllegalCopy(value, fieldType, true, fmt.Sprintf("field %s", name))
+	}
 }
 
 // checkArrayCompositeLit only supports positional elements (`[N]T{a, b}`) -
@@ -2684,7 +2903,9 @@ func (c *checker) checkArrayCompositeLit(n ast.NodeIndex, target Type, elems []a
 			continue
 		}
 		vt := c.checkValueExpr(elem)
-		c.checkAssignable(elem, *target.Elem, vt, "array element")
+		if c.checkAssignable(elem, *target.Elem, vt, "array element") {
+			c.checkNoIllegalCopy(elem, *target.Elem, true, "array element")
+		}
 	}
 	if !target.Dynamic && int64(len(elems)) != target.Size {
 		c.errorAt(n, "array literal has %d elements, want %d", len(elems), target.Size)

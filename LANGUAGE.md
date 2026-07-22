@@ -299,6 +299,79 @@ A bare, uncalled struct type name (not followed by `(` or `{`) still means exact
 
 **Export/visibility.** A constructor doesn't get its own independent export bit - it isn't individually named beyond the `constructor` keyword. A struct's constructors are usable cross-package if and only if the struct type itself is exported, exactly the same rule its fields and methods already follow (see "Imports" below).
 
+## Destructors
+
+A struct may also declare **at most one** `destructor() { body }` block, nested directly inside the struct declaration exactly like a `constructor` - the same narrow exception to "structs are data-only, methods declared separately" constructors already are:
+
+```go
+struct FileHandle {
+    raw *RawHandle
+
+    constructor(path string) {
+        this.raw = new RawHandle(path)
+    }
+    destructor() {
+        delete this.raw
+    }
+}
+```
+
+A destructor **always takes zero parameters** - there's no calling syntax that could ever pass any, since a destructor is never called directly by name at all (unlike a constructor, reachable via `Name(args)`): it only ever fires implicitly, at one of the two triggers below. Declaring more than one `destructor()` on the same struct is a compile-time error, reported at struct-declaration time, the same "a structural problem regardless of whether either is ever used" reasoning a duplicate-arity constructor already gets. `this` inside a destructor body resolves exactly like inside an ordinary method or constructor.
+
+### The non-copyable rule
+
+**A struct that declares a `destructor()` becomes non-copyable, full stop - no exceptions, including no "it happens to be the last use of this variable" leniency.** This is the one rule that makes the whole feature sound without needing move semantics or last-use analysis: if a value can never be duplicated, there is only ever one instance of it, so "when does it destruct" is never ambiguous.
+
+Concretely, for any type that is non-copyable (see "Transitive propagation" below), each of the following is a real compile-time error:
+
+- `b := a` / `b = a` where `a` is an existing value of that type - a short var decl or assignment copying an *existing, already-live* value.
+- Passing such a value **by value** as a function argument - to either a free function/method or a constructor. Unlike the return case below, this needs no exception carved out for a *fresh* value (see the next paragraph): a freshly-constructed argument is exactly as sound as a fresh var-decl initializer, since the callee's own parameter becomes that value's one and only owner, destructing it at its own scope exit, with nothing else anywhere still referencing it.
+- **Returning such a value by value** from a function, **even a freshly-constructed one** - this is the one context that allows no exception at all, and it's what forces "resource-owning types only exist behind a pointer or a plain local of their own," the deliberate, accepted trade-off here: soundly allowing a fresh-value return would require knowing, at every call site consuming the result, that the callee always hands back a freshly-owned instance - a small but real escape-analysis question this round deliberately doesn't take on. A `new`'d `*T` (or constructing the value directly at its actual use site) is always how you get one of these across a function boundary instead.
+- Storing an *existing* value of that type by-value into a struct field or array element - as an assignment/copy, not as fresh construction (see immediately below).
+
+**A composite literal (`T{...}`) or a `new T(...)`/`new T{...}` call constructing a *fresh* instance is NOT a copy and remains completely legal**, even for a non-copyable type, in every context above except a return statement's value - it's creating the one instance, not duplicating an existing one:
+
+```go
+f := FileHandle(path)      // fine - constructs the one instance f now owns
+g := f                     // error - copies an existing value
+useFile(FileHandle(path))  // fine - the parameter becomes the sole owner
+useFile(f)                 // error - f is an existing value, not fresh
+```
+
+Calling a method on a non-copyable value is completely unaffected by any of this - a method receiver is already always an implicit pointer, never a copy, so this was true before this feature and stays true.
+
+### Transitive propagation
+
+A struct containing *any* field whose own type is non-copyable is *itself* non-copyable, even if it declares no destructor of its own - the same reasoning C++ uses to implicitly delete a class's copy constructor when it has a non-copyable member. Likewise, a fixed-size array `[N]T` is non-copyable if `T` is. This is computed once per struct, checked recursively through field types.
+
+```go
+struct Wrapper {
+    f FileHandle   // FileHandle has a destructor - Wrapper is non-copyable too
+}
+```
+
+A **dynamic array (`[]T`) whose element type is non-copyable is rejected outright**, with a real diagnostic, rather than silently mishandled - `make`/`append`/growth all copy element bytes around (a `memcpy` on reallocation) with no destructor-cascading concept at all, so this is explicitly out of scope for this round, not a case this language quietly gets wrong.
+
+### Firing: two triggers only
+
+1. **A plain local variable or parameter of a type that declares its own `destructor()`** - not merely non-copyable via a field; only a type that declares its own destructor actually gets a call - fires that destructor **at every point control can leave its own declaring block**: falling off the end of the block, an early `return` inside it (or inside a block nested within it), or a `break`/`continue` that exits an enclosing loop from within it. This is exactly the same exit-shape enumeration this language's "Missing return" flow analysis already uses (see that section below) - no goto/labels/exceptions exist here, so that's the exhaustive list. At each such exit, every still-in-scope local whose type has a destructor is destructed, **in reverse declaration order**, before control actually transfers.
+
+   A plain local of a destructor-having type needs no `new`/pointer at all to be legal - it's its own sole owner on the stack, exactly like a `new`'d pointer is on the heap, just automatically cleaned up at scope exit instead of needing an explicit `delete`:
+
+   ```go
+   func f() {
+       a := Counter(10)
+       b := Counter(20)
+       // falls off the end here: b destructs, then a - reverse order
+   }
+   ```
+
+2. **`delete p`** (see "Pointers" below, its own dedicated statement for freeing a `new`'d heap allocation) - if `p`'s pointee type declares its own `destructor()`, it's called (`p` itself as `this`) **before** the existing `free(p)` call, not after - the destructor's own body can still safely read/write through `this` one last time.
+
+### Known limitation: no automatic recursive member destruction
+
+Embedding a destructor-having value **by value** as a struct field does **not** automatically cascade a destructor call into that field when the containing struct's own scope ends, if the containing struct declares no `destructor()` of its own - the field's destructor simply never fires in that case. This is a real, documented v1 limitation, not a bug: the intended pattern for a resource-owning type is to hold a `*T` **pointer** field to what it owns and manually `delete` it in its own destructor body (exactly like the `FileHandle` example at the top of this section), not to embed a destructor-having value directly as a field expecting it to clean itself up automatically.
+
 ## Pointers
 
 A real pointer type `*T` - one level of indirection to any other type
@@ -356,9 +429,10 @@ so `delete`ing a `new`'d pointer is a real, individually-freeable
 deallocation, not a no-op against a never-freed arena. `p` must be a real
 pointer type; `delete` itself produces no value, matching `break`/`continue`
 being their own dedicated statement forms rather than call-shaped builtins.
-**Destructors/RAII are explicitly out of scope** for this round - `delete`
-only frees raw memory, it never runs any struct-specific cleanup logic
-(there is no such concept in this language yet).
+If `p`'s pointee type declares its own `destructor()` (see "Destructors"
+above), it's called - `p` itself as `this` - before the free, not after; a
+pointee type with no destructor behaves exactly as before this feature, a
+plain `free` and nothing else.
 
 There is essentially no automatic memory management here - with one narrow,
 deliberate exception: when `delete`'s own operand is a bare local variable or

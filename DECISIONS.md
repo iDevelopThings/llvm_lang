@@ -575,3 +575,76 @@ lowering paths (`genDynArraySlice`/`genStringSlice`/`genFixedArraySlice`,
 comments for the range-check/defaulting mechanics; `TestSliceDynamicArrayReslicePastLenWithinCap`
 (`src/codegen/slice_test.go`) is the regression test that would catch the
 len-vs-cap default direction being flipped.
+
+---
+
+## 2026-07-22 - Destructors: blanket non-copyable rejection instead of move semantics/last-use analysis
+
+**Decision:** a struct may declare one `destructor() { body }`, and declaring
+one makes that struct (and anything transitively embedding it by value)
+**non-copyable, full stop** - every copy of an *existing* live value is
+rejected (`b := a`/`b = a`, a by-value field/array-element store), with
+**no** "this happens to be the last use of the variable, so the copy is
+actually safe" leniency anywhere. A destructor fires at exactly two
+triggers - a plain local/parameter's own scope exit (return/break/continue/
+fall-through, reverse declaration order) and `delete` against a pointer to
+it - and does **not** automatically cascade into a by-value-embedded field
+lacking its own destructor (see the "known limitation" below).
+
+**Why (non-copyable rule):** the alternative that would make full copy-freedom possible - real
+move semantics (a value's ownership transfers on its last use, the source
+binding becoming invalid) or a last-use/liveness analysis deciding exactly
+which copy is "the" final one - is a substantially harder feature: it needs
+a real liveness/escape analysis over the whole function body (not just
+per-statement type-checking, which is all this pass otherwise ever does),
+a way to mark a moved-from binding as unusable afterward, and careful
+interaction with every existing construct that can alias a value (structs,
+arrays, function calls, loops). This was discussed explicitly and scoped
+down on purpose: blanket non-copyable rejection sidesteps the double-
+destruction problem entirely (if a value can never be duplicated, there is
+only ever one instance of it, so "when does it destruct" is never
+ambiguous) without needing any of that machinery. The one deliberate carve-
+out - a *fresh* composite-literal/constructor-call/`new` construction is
+never "a copy," so it stays legal even for a non-copyable type - falls out
+of the same reasoning: constructing the one instance isn't duplicating an
+existing one, so no soundness question is being dodged by allowing it.
+
+Argument-passing gets this same fresh-construction exception (unlike a
+return statement's value, which allows none at all, even a fresh value) for
+a related but distinct reason: a fresh argument's soundness is entirely
+local to the one call expression (the callee's own parameter becomes the
+value's sole owner, with nothing else anywhere still referencing it),
+whereas soundly allowing a fresh *return* would require knowing, at every
+call site consuming the result, that the callee always hands back a freshly
+-owned instance - a small but real escape-analysis question of its own,
+avoided by simply not allowing it. This is what forces "a resource-owning,
+destructor-having type only really moves across a function boundary through
+a `new`'d pointer" - the deliberate, accepted trade-off named directly in
+`LANGUAGE.md`'s "Destructors" section.
+
+The second scoping choice bundled into this same decision: **no automatic
+recursive destruction through an embedded field either** - if struct
+`Outer` embeds a destructor-having `Inner` by value as a plain field, and
+`Outer` declares no `destructor()` of its own, `Inner`'s destructor simply
+never fires when an `Outer` value's own scope ends.
+
+**Why (embedded fields):** cascading destruction through arbitrary by-value-embedded fields
+(and, transitively, through fields-of-fields, arrays of structs, etc.) is
+real, general RAII - a much larger feature than this round's, and the
+harder problem this task was explicitly scoped to avoid taking on. The
+intended, documented pattern for a resource-owning type stays simple
+instead: hold a `*T` **pointer** field to what it owns, and manually
+`delete` it from the containing struct's own `destructor()` body (see the
+`FileHandle` example in `LANGUAGE.md`'s "Destructors" section) - one level
+of manual wiring, not a general cascading mechanism.
+
+**Status:** shipped. See `LANGUAGE.md`'s "Destructors" section for the full
+language-level rule (non-copyable propagation, the two firing triggers, the
+known-limitation callout) and `CODEGEN.md`'s "Destructors" section for the
+lowering - in particular `genIfStmt`'s then/else destructor-stack save/
+restore, the one genuinely subtle part: caught directly by
+`TestDestructorFiresOnFallThroughReturn`/`TestDestructorFiresOnBreak`
+(`src/codegen/destructor_test.go`) failing before that fix existed, since
+`if`/`else` are alternate, mutually-exclusive codegen-time continuations
+from the same starting point, not a sequential continuation of each other
+the way two statements in one `Block` are.

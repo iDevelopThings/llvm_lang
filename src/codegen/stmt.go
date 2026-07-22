@@ -15,13 +15,64 @@ import (
 // so it's simply not generated, rather than built into a dead block. Reports
 // whether the block as a whole terminated, so an enclosing if/for knows
 // whether to branch to what follows it.
+//
+// base records how many entries were already on Generator.destructors before
+// this block started - every VarDecl/ShortVarDecl generated directly inside
+// it (genVarDecl/genShortVarDecl) may push its own entry via
+// pushDestructorEntry (func.go), and this is exactly the range this block
+// itself is responsible for unwinding (see LANGUAGE.md's "Destructors"
+// section - "every point control can leave its own declaring block"):
+//   - if every statement runs without any of them terminating the block
+//     (the ordinary "falls off the end" case), this block's own locals are
+//     destructed here, in reverse declaration order, right as it falls
+//     through to whatever follows it.
+//   - if some statement DID terminate the block (a return/break/continue, or
+//     an if whose every branch terminates), that statement has already
+//     unwound everything relevant itself, at the exact point it emitted its
+//     own terminator (see genReturnStmt/genBreakStmt/genContinueStmt) - to a
+//     target that may sit *below* this block's own base (a break/continue
+//     several blocks deep unwinds all the way back to the enclosing loop's
+//     own destructorBase, not just this block's), so genBlock deliberately
+//     does nothing further to Generator.destructors here: whatever the
+//     terminating statement already left it as is exactly right, and this
+//     block is unreachable from here on anyway (the terminator's own basic
+//     block has already been closed).
 func (g *Generator) genBlock(block ast.NodeIndex) bool {
+	base := len(g.destructors)
 	for _, stmt := range g.tree.Children(block) {
 		if g.genStmt(stmt) {
 			return true
 		}
 	}
+	g.unwindDestructorsTo(base)
 	return false
+}
+
+// unwindDestructorsTo emits a real destructor call - in reverse declaration
+// order, exactly as LANGUAGE.md's "Destructors" section requires - for every
+// entry currently on Generator.destructors above target, then truncates the
+// stack down to it. Shared by every real scope-exit trigger this feature
+// has: a block falling off its own end (genBlock, target = that block's own
+// saved base), a return (genReturnStmt/finishBody, target = 0 - the whole
+// function unwinds), and a break/continue (genBreakStmt/genContinueStmt,
+// target = the enclosing loop's own destructorBase - everything declared
+// since entering the loop, but nothing outside it).
+func (g *Generator) unwindDestructorsTo(target int) {
+	for i := len(g.destructors) - 1; i >= target; i-- {
+		e := g.destructors[i]
+		g.genDestructorCall(g.locals[e.sym], e.info)
+	}
+	g.destructors = g.destructors[:target]
+}
+
+// genDestructorCall calls info's own destructor (declared by
+// declareDestructorSignature, func.go) against addr as its implicit `this` -
+// the same implicit-first-pointer-parameter convention an ordinary method or
+// constructor call already uses (see CODEGEN.md's "Method receivers"
+// section).
+func (g *Generator) genDestructorCall(addr llvm.Value, info *sema.StructInfo) {
+	entry := g.dtors[info]
+	g.builder.CreateCall(entry.fnType, entry.fn, []llvm.Value{addr}, "")
 }
 
 // genStmt lowers one statement, reporting whether it terminated the current
@@ -74,10 +125,12 @@ func (g *Generator) genVarDecl(n ast.NodeIndex) {
 	nameNode := g.tree.Child(n, 0)
 	initNode := g.tree.Child(n, 2)
 	sym := g.info.Refs[nameNode]
+	t := g.info.Types[n]
 
-	llt := g.llvmType(g.info.Types[n])
+	llt := g.llvmType(t)
 	addr := g.allocLocalSlot(sym, llt, sym.Name)
 	g.locals[sym] = addr
+	g.pushDestructorEntry(sym, t)
 
 	if initNode == ast.InvalidNode {
 		g.builder.CreateStore(llvm.ConstNull(llt), addr)
@@ -92,10 +145,12 @@ func (g *Generator) genShortVarDecl(n ast.NodeIndex) {
 	nameNode := g.tree.Child(n, 0)
 	initNode := g.tree.Child(n, 1)
 	sym := g.info.Refs[nameNode]
+	t := g.info.Types[n]
 
-	llt := g.llvmType(g.info.Types[n])
+	llt := g.llvmType(t)
 	addr := g.allocLocalSlot(sym, llt, sym.Name)
 	g.locals[sym] = addr
+	g.pushDestructorEntry(sym, t)
 	g.storeValueInto(addr, initNode)
 }
 
@@ -118,6 +173,13 @@ func (g *Generator) storeValueInto(addr llvm.Value, valueNode ast.NodeIndex) {
 // separate heap `new` mallocs from (runtime.go's setupRuntime), never the
 // bump-allocator arena, which has no per-allocation free at all.
 //
+// If p's pointee type declares its own destructor() (see LANGUAGE.md's
+// "Destructors" section), that destructor is called - against p itself as
+// the implicit `this`, exactly like an ordinary method call - before the
+// free, not after: reading through the still-live pointer one last time
+// (e.g. a FileHandle's destructor reading/deleting a field of its own) needs
+// the pointee's memory to still be valid.
+//
 // After the free itself, if the deleted operand is a bare local variable/
 // parameter reference (deleteLocalSlot below), its own stack slot is also
 // stored-over with a null pointer - a narrow, partial use-after-free
@@ -134,11 +196,34 @@ func (g *Generator) storeValueInto(addr llvm.Value, valueNode ast.NodeIndex) {
 func (g *Generator) genDeleteStmt(n ast.NodeIndex) {
 	operand := g.tree.Child(n, 0)
 	ptr := g.genExpr(operand)
+
+	if info, ok := g.destructorInfoForPointee(operand); ok {
+		g.genDestructorCall(ptr, info)
+	}
+
 	g.builder.CreateCall(g.freeType, g.freeFn, []llvm.Value{ptr}, "")
 
 	if addr, ok := g.deleteLocalSlot(operand); ok {
 		g.builder.CreateStore(llvm.ConstNull(g.ptrTy), addr)
 	}
+}
+
+// destructorInfoForPointee reports whether operand's own pointer type (see
+// LANGUAGE.md's "Pointers" section - operand must already be pointer-typed,
+// sema.checkDeleteStmt guarantees this) points to a struct that declares its
+// own destructor() - the delete-specific counterpart to pushDestructorEntry
+// (func.go), which asks the identical question about a plain local/
+// parameter's own declared type instead of a pointer's pointee.
+func (g *Generator) destructorInfoForPointee(operand ast.NodeIndex) (*sema.StructInfo, bool) {
+	t := g.info.Types[operand]
+	if t.Kind != sema.TypePointer || t.Elem == nil {
+		return nil, false
+	}
+	elem := *t.Elem
+	if elem.Kind != sema.TypeStruct || elem.Struct == nil || elem.Struct.Destructor == nil {
+		return nil, false
+	}
+	return elem.Struct, true
 }
 
 // deleteLocalSlot reports whether operand (delete's own operand expression,
@@ -235,6 +320,7 @@ func (g *Generator) genIncDecStmt(n ast.NodeIndex) {
 func (g *Generator) genReturnStmt(n ast.NodeIndex) bool {
 	valueNode := g.tree.Child(n, 0)
 	if valueNode == ast.InvalidNode {
+		g.unwindDestructorsTo(0)
 		if g.curFunc.isMain {
 			g.builder.CreateRet(llvm.ConstInt(g.i32Ty, 0, false))
 		} else {
@@ -242,7 +328,14 @@ func (g *Generator) genReturnStmt(n ast.NodeIndex) bool {
 		}
 		return true
 	}
-	g.builder.CreateRet(g.genExpr(valueNode))
+	// Evaluate the returned value first, while every still-in-scope local is
+	// still alive/valid, then unwind (see LANGUAGE.md's "Destructors"
+	// section: a return exits the whole function, so this always unwinds
+	// every entry currently on the stack, not just the innermost block's
+	// own), then actually return the already-computed value.
+	v := g.genExpr(valueNode)
+	g.unwindDestructorsTo(0)
+	g.builder.CreateRet(v)
 	return true
 }
 
@@ -261,7 +354,9 @@ func (g *Generator) genBreakStmt(n ast.NodeIndex) bool {
 	if len(g.loopStack) == 0 {
 		panic("codegen: break outside a loop - sema.Check should have rejected this")
 	}
-	g.builder.CreateBr(g.loopStack[len(g.loopStack)-1].breakTarget)
+	top := g.loopStack[len(g.loopStack)-1]
+	g.unwindDestructorsTo(top.destructorBase)
+	g.builder.CreateBr(top.breakTarget)
 	return true
 }
 
@@ -269,7 +364,9 @@ func (g *Generator) genContinueStmt(n ast.NodeIndex) bool {
 	if len(g.loopStack) == 0 {
 		panic("codegen: continue outside a loop - sema.Check should have rejected this")
 	}
-	g.builder.CreateBr(g.loopStack[len(g.loopStack)-1].continueTarget)
+	top := g.loopStack[len(g.loopStack)-1]
+	g.unwindDestructorsTo(top.destructorBase)
+	g.builder.CreateBr(top.continueTarget)
 	return true
 }
 
@@ -280,6 +377,21 @@ func (g *Generator) genContinueStmt(n ast.NodeIndex) bool {
 // branches exist and both terminate; when there's no else, control can
 // always still fall through to what follows, so the statement as a whole
 // never terminates.
+//
+// then/else are alternate, mutually exclusive continuations from the exact
+// same starting point - not a sequential continuation of each other the way
+// two statements in the same Block are - so each one's own codegen must
+// start from (and whatever follows the if must end up seeing) the identical
+// pre-if Generator.destructors state, never a bookkeeping side effect
+// generating the *other* branch happened to leave behind: a
+// return/break/continue inside one branch legitimately pops entries a
+// sibling branch never actually saw removed at runtime (only one branch
+// ever really executes), and, unlike a Block's own genBlock call, there's no
+// enclosing "restore to my own base" logic for either branch on its own -
+// genIfStmt is what has to do it explicitly, once per branch (preIf is
+// copied, not just its length re-sliced, since a branch's own codegen may
+// itself push fresh entries into the same backing array, which a
+// length-only restore could then read back incorrectly).
 func (g *Generator) genIfStmt(n ast.NodeIndex) bool {
 	condNode := g.tree.Child(n, 0)
 	thenNode := g.tree.Child(n, 1)
@@ -296,11 +408,14 @@ func (g *Generator) genIfStmt(n ast.NodeIndex) bool {
 	}
 	g.builder.CreateCondBr(condVal, thenBB, elseBB)
 
+	preIf := append([]destructorEntry(nil), g.destructors...)
+
 	g.builder.SetInsertPointAtEnd(thenBB)
 	thenTerm := g.genStmt(thenNode)
 	if !thenTerm {
 		g.builder.CreateBr(mergeBB)
 	}
+	g.destructors = append([]destructorEntry(nil), preIf...)
 
 	elseTerm := false
 	if hasElse {
@@ -309,6 +424,7 @@ func (g *Generator) genIfStmt(n ast.NodeIndex) bool {
 		if !elseTerm {
 			g.builder.CreateBr(mergeBB)
 		}
+		g.destructors = append([]destructorEntry(nil), preIf...)
 	}
 
 	g.builder.SetInsertPointAtEnd(mergeBB)
@@ -356,6 +472,7 @@ func (g *Generator) genForStmt(n ast.NodeIndex) bool {
 	g.loopStack = append(g.loopStack, loopCtx{
 		breakTarget:    endBB,
 		continueTarget: postBB,
+		destructorBase: len(g.destructors),
 	})
 	bodyTerm := g.genBlock(bodyNode)
 	g.loopStack = g.loopStack[:len(g.loopStack)-1]

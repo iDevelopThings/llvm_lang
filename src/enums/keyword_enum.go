@@ -27,6 +27,7 @@ const (
 	KeywordThis        Keyword = "This"
 	KeywordImport      Keyword = "Import"
 	KeywordConstructor Keyword = "Constructor"
+	KeywordDestructor  Keyword = "Destructor"
 	KeywordNew         Keyword = "New"
 	KeywordDelete      Keyword = "Delete"
 )
@@ -46,6 +47,7 @@ type KeywordContainer struct {
 	This        Keyword
 	Import      Keyword
 	Constructor Keyword
+	Destructor  Keyword
 	New         Keyword
 	Delete      Keyword
 }
@@ -66,6 +68,7 @@ var Keywords = KeywordContainer{
 	This:        KeywordThis,
 	Import:      KeywordImport,
 	Constructor: KeywordConstructor,
+	Destructor:  KeywordDestructor,
 	New:         KeywordNew,
 	Delete:      KeywordDelete,
 }
@@ -148,6 +151,11 @@ var keywordInfos = map[Keyword]KeywordInfo{
 		Name:    "Constructor",
 		String:  "constructor",
 	},
+	KeywordDestructor: {
+		Keyword: KeywordDestructor,
+		Name:    "Destructor",
+		String:  "destructor",
+	},
 	KeywordNew: {
 		Keyword: KeywordNew,
 		Name:    "New",
@@ -175,6 +183,7 @@ var keywordValues = []Keyword{
 	KeywordThis,
 	KeywordImport,
 	KeywordConstructor,
+	KeywordDestructor,
 	KeywordNew,
 	KeywordDelete,
 }
@@ -194,6 +203,7 @@ var keywordByName = map[string]Keyword{
 	"this":        KeywordThis,
 	"import":      KeywordImport,
 	"constructor": KeywordConstructor,
+	"destructor":  KeywordDestructor,
 	"new":         KeywordNew,
 	"delete":      KeywordDelete,
 }

@@ -871,6 +871,119 @@ is a completely different declaration shape from an ordinary free function's
 or method's (`sema.SymFunc`), even though the two Symbol pointer spaces never
 actually collide.
 
+## Destructors
+
+See `LANGUAGE.md`'s "Destructors" section for the language-level feature
+(`destructor() { body }`, at most one per struct, the non-copyable rule and
+its transitive propagation, and the two firing triggers). This section
+covers how those two triggers - a plain local/parameter's own scope exit,
+and `delete` - actually get lowered.
+
+**Declaration/generation follow constructors' own two-pass split exactly**
+(`declareDestructorSignature`/`genDestructorBody`, `src/codegen/func.go`): a
+destructor lowers to its own real LLVM function, reusing the identical
+implicit-first-pointer-parameter convention a method/constructor already
+uses - the struct instance being destructed, addressed, never loaded -
+always returns void, and is named `Struct.destructor` (no arity suffix at
+all, unlike a constructor's `Struct.constructor.N` - a struct declares at
+most one, so there's nothing to disambiguate). `Generator.dtors` is
+`ctors`'/`funcs`' counterpart for destructors, but keyed directly by
+`*sema.StructInfo` rather than by a destructor's own `*sema.Symbol`
+(`sema.SymDestructor`): unlike a constructor, a destructor is never selected
+by an arity lookup or any other call-site resolution at all - every real
+caller of this map (a local/parameter's own declared type, or `delete`'s
+pointee type) already holds the `StructInfo` it wants the destructor for
+directly, so there's no reason to go through the `Symbol` indirection.
+
+### The destructor stack (`Generator.destructors`)
+
+A destructor call is never inserted "wherever a variable happens to go out
+of lexical scope" the way, say, a C++ compiler's AST-scope-exit machinery
+might reason about it - this package instead maintains one flat,
+function-scoped stack, `Generator.destructors` (reset at the start of every
+function/constructor/destructor/lambda body, exactly like `locals`/
+`loopStack`), of every still-in-scope local/parameter whose own declared
+type directly declares a destructor (**not** merely non-copyable via a
+field - see `pushDestructorEntry`, `func.go`, which is the single gate every
+one of these entries passes through: `genVarDecl`/`genShortVarDecl` call it
+right after a local's storage is initialized, and
+`genFuncBody`/`genConstructorBody`/`genLambdaFunc`'s own parameter loops
+call it right after storing each incoming parameter).
+
+`unwindDestructorsTo(target)` (`stmt.go`) is the one shared primitive every
+real scope-exit trigger uses: it emits a real destructor call - via
+`genDestructorCall`, the same implicit-`this`-pointer calling convention a
+method call already uses - for every entry above `target`, **in reverse
+index order** (LANGUAGE.md's "reverse declaration order" requirement falls
+straight out of this, since entries are pushed in declaration order), then
+truncates the stack down to `target`:
+
+- **`genBlock`'s own fall-through case** (`base := len(g.destructors)`
+  recorded at the block's own start) calls `unwindDestructorsTo(base)` right
+  before returning `false` (didn't terminate) - exactly "this block's own
+  directly-declared locals, nothing from an enclosing scope".
+- **`genReturnStmt`** always unwinds to `0` - a return exits the whole
+  function, so every entry on the stack, from every enclosing block, gets
+  destructed - evaluating the returned value first (while everything is
+  still valid), *then* unwinding, *then* actually emitting the `ret`.
+- **`genBreakStmt`/`genContinueStmt`** unwind to the current loop's own
+  `loopCtx.destructorBase` - `len(g.destructors)` captured at the moment
+  that loop's own body started generating (so an enclosing scope's own
+  entries, declared before the loop, are correctly left alone) - before
+  branching to the break/continue target.
+- **`genDeleteStmt`** calls the pointee's destructor directly (see below),
+  not through this stack at all - `delete` frees a heap value with no
+  local/parameter of its own necessarily involved.
+
+`genBlock` itself, when a statement inside it *does* terminate (`genStmt`
+returns `true`), deliberately does nothing further to `Generator.destructors`
+- whichever nested `return`/`break`/`continue` actually caused that already
+unwound everything relevant, quite possibly *below* this block's own `base`
+(a `break` several blocks deep unwinds all the way back to the enclosing
+loop's own boundary, not just the innermost block's) - so there is nothing
+left for an enclosing frame to "finish".
+
+### `genIfStmt`'s then/else save-restore - the one genuinely subtle part
+
+`then`/`else` are **alternate, mutually exclusive continuations from the
+same starting point**, not a sequential continuation of each other the way
+two statements in one `Block` are - only one of them ever actually executes
+at runtime, but codegen still has to *generate both*, sequentially, in the
+same linear pass. A `return`/`break`/`continue` inside one branch legitimately
+pops entries off `Generator.destructors` that the *other* branch's own
+codegen must **not** see as already gone - if it did, the sibling branch's
+own fall-through unwind would silently stop emitting a destructor call for a
+local that, on its own runtime path, is very much still there.
+
+`genIfStmt` (`stmt.go`) therefore snapshots a real copy of
+`Generator.destructors` (`preIf`, not just its length - a branch's own
+codegen may itself push fresh entries into the same backing array, which a
+length-only restore could then read back incorrectly) before generating
+`thenBB`, restores that copy immediately afterward (regardless of whether
+`thenBB` terminated), generates `elseBB` from that identical restored state,
+and restores the copy once more afterward - so whatever follows the `if`
+(reached only when at least one branch doesn't terminate) always sees
+exactly the pre-`if` state, never a bookkeeping side effect the other branch
+happened to leave behind. This was caught directly by
+`TestDestructorFiresOnFallThroughReturn`/`TestDestructorFiresOnBreak`
+(`src/codegen/destructor_test.go`) failing before this fix existed - without
+it, only whichever branch was generated *first* ever got a real destructor
+call in the emitted IR at all, the second branch's own call having been
+silently skipped because the stack already looked "empty" by the time its
+own fall-through unwind ran.
+
+### `delete p`'s destructor-then-free ordering
+
+`genDeleteStmt` (`stmt.go`) checks `destructorInfoForPointee(operand)` - `p`'s
+own pointer type's pointee, the identical "does this struct type declare its
+own destructor" question `pushDestructorEntry` asks about a plain local's
+declared type - and, if it does, calls `genDestructorCall(ptr, info)`
+**before** the existing `free` call, not after: the destructor's own body
+(e.g. reading/nulling a field of `this`, or itself `delete`-ing a further
+pointer it owns) needs the pointee's memory to still be valid when it runs.
+A pointee type with no destructor is entirely unaffected - exactly the plain
+`free` this statement has always lowered to.
+
 ## Pointers: real `*T`, `&`/`*`, `new`/`delete`, auto-deref, and `nil`
 
 See `LANGUAGE.md`'s "Pointers" section for the language-level feature. Every
