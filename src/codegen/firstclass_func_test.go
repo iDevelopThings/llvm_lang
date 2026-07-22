@@ -150,6 +150,37 @@ func callDirect(a int, b int) int {
 	}
 }
 
+// TestCallThroughFuncTypedStructFieldDirectly is the exact repro from
+// BLOCKERS.md's now-resolved "Calling a function-typed struct field directly
+// is rejected" entry: a struct field of function type (Callback.fn), holding
+// a plain free-function reference (not a closure - see
+// TestClosureStoredInStructFieldCalledDirectly, interaction_test.go, for the
+// closure/genuine-capture-context variant), called straight through the
+// field expression with no intermediate local (`cb.fn(5)`). Runs the real
+// `func main() int` entry point end to end (lexer -> parser -> sema ->
+// codegen -> JIT), the same way BLOCKERS.md's own repro was written, proving
+// the fix works for a real program, not just an isolated function body.
+func TestCallThroughFuncTypedStructFieldDirectly(t *testing.T) {
+	jm := compileAndJIT(t, `
+struct Callback {
+	fn func(int) int
+}
+
+func double(x int) int {
+	return x * 2
+}
+
+func main() int {
+	cb := Callback{double}
+	return cb.fn(5)
+}
+`)
+
+	if got := jm.runInt32(t, "main"); got != 10 {
+		t.Errorf("main() = %d, want 10", got)
+	}
+}
+
 // TestFuncValueAssignedThenReassigned covers a function-typed local
 // reassigned to a different function value partway through, verifying each
 // call sees whichever function was most recently stored.

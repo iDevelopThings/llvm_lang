@@ -1732,10 +1732,23 @@ func (c *checker) memberObjectIsPackage(n ast.NodeIndex) bool {
 // resolve.go's resolvePackageMemberExpr, which needs no type information at
 // all) - so this just reads back whatever Info.Refs[n] already holds
 // instead of doing any struct-value lookup of its own.
+//
+// Memoized on Info.Refs[n] itself (rather than a separate cache map) - a
+// given MemberExpr node's resolution never changes between calls, and two
+// call sites can now legitimately ask about the same callee node in one
+// Check pass (methodSigForCallee's own struct-field fallback, then
+// funcSigForCall's indirect-call check re-deriving the same node's Type via
+// checkExpr/checkMemberExpr) - without this, the second call would redo
+// checkValueExpr(object) and checkExportedAccess from scratch.
 func (c *checker) resolveMember(n ast.NodeIndex) (*Symbol, bool) {
+	if sym, ok := c.info.Refs[n]; ok {
+		return sym, true
+	}
 	if c.memberObjectIsPackage(n) {
-		sym, ok := c.info.Refs[n]
-		return sym, ok
+		// Resolve already fully resolved this - Info.Refs[n] would have
+		// already hit the memoization check above if it had succeeded, so
+		// reaching here means Resolve itself already reported why.
+		return nil, false
 	}
 
 	object := c.tree.Child(n, 0)
@@ -2249,16 +2262,29 @@ func (c *checker) checkNewExpr(n ast.NodeIndex) Type {
 //     the callee names a fixed declaration, not a value with its own Type,
 //     same as before this round.
 //   - Anything else that type-checks as callable - a function-typed
-//     variable/parameter, or any other expression (e.g. a call whose own
-//     result is itself a function) - is an *indirect* call: callee is
-//     checked as an ordinary value expression (so it does get a real
-//     info.Types entry - codegen needs it to actually evaluate the
-//     function value before calling through it) and its Type must be
-//     TypeFunc.
+//     variable/parameter, an ordinary (non-method) struct field of function
+//     type (`cb.fn(5)` - methodSigForCallee's isField result), or any other
+//     expression (e.g. a call whose own result is itself a function) - is an
+//     *indirect* call: callee is checked as an ordinary value expression (so
+//     it does get a real info.Types entry - codegen needs it to actually
+//     evaluate the function value before calling through it) and its Type
+//     must be TypeFunc.
 func (c *checker) funcSigForCall(callee ast.NodeIndex) (funcSignature, bool) {
 	switch c.tree.Nodes[callee].Kind {
 	case enums.NodeKinds.MemberExpr:
-		return c.methodSigForCallee(callee)
+		sig, ok, isField := c.methodSigForCallee(callee)
+		if !isField {
+			return sig, ok
+		}
+		// callee names an ordinary struct field, not a method or package
+		// function - falls through to the same indirect-call check below
+		// that a func-typed Ident/parameter already gets (a func-typed field
+		// is called exactly the same way - see LANGUAGE.md's "First-class
+		// functions" section). methodSigForCallee's own resolveMember call
+		// already fully resolved callee (recorded into info.Refs) -
+		// resolveMember memoizes on that, so checkValueExpr below re-resolves
+		// nothing; it only re-reads the cached result to also fill in
+		// callee's own info.Types entry.
 	case enums.NodeKinds.Ident:
 		if sym, ok := c.info.Refs[callee]; ok && sym.Kind == SymFunc && sym.Decl != ast.InvalidNode {
 			// sym's FuncDecl may live in a different file than this call
@@ -2275,9 +2301,10 @@ func (c *checker) funcSigForCall(callee ast.NodeIndex) (funcSignature, bool) {
 		return funcSignature{}, false
 	}
 	if t.Kind != TypeFunc {
-		if c.tree.Nodes[callee].Kind == enums.NodeKinds.Ident {
+		switch c.tree.Nodes[callee].Kind {
+		case enums.NodeKinds.Ident, enums.NodeKinds.MemberExpr:
 			c.errorAt(callee, "cannot call %s (%s is not a function)", c.tree.Text(callee), t)
-		} else {
+		default:
 			c.errorAt(callee, "cannot call this expression (not a function)")
 		}
 		return funcSignature{}, false
@@ -2285,31 +2312,43 @@ func (c *checker) funcSigForCall(callee ast.NodeIndex) (funcSignature, bool) {
 	return funcSignature{Params: t.Params, Return: *t.Return}, true
 }
 
-// methodSigForCallee resolves a call's callee when it's a MemberExpr -
-// either an ordinary method call (`p.move()`) or a package-qualified
-// function call (`mathutils.Add()`, see resolve.go's
-// resolvePackageMemberExpr) - both go through resolveMember, which already
-// tells the two apart internally.
-func (c *checker) methodSigForCallee(callee ast.NodeIndex) (funcSignature, bool) {
-	sym, ok := c.resolveMember(callee)
-	if !ok {
-		return funcSignature{}, false
+// methodSigForCallee resolves a call's callee when it's a MemberExpr - an
+// ordinary method call (`p.move()`), a package-qualified function call
+// (`mathutils.Add()`, see resolve.go's resolvePackageMemberExpr), or an
+// ordinary struct field (isField=true) - all three go through resolveMember,
+// which already tells them apart internally.
+//
+// A field isn't necessarily callable itself - funcSigForCall's own indirect-
+// call fallback decides that, exactly mirroring its Ident-callee fallback,
+// once it knows the field's actual Type (see LANGUAGE.md's "First-class
+// functions" section: a func-typed field, `cb.fn(5)`, is a valid indirect
+// call the same way a func-typed Ident/parameter already is) - so this
+// reports a real diagnostic only for the definitively-terminal case (a
+// package member that isn't a function at all); a plain struct field just
+// reports isField=true and leaves the "is it actually callable" verdict to
+// the caller. This intentionally never touches method values (`p.move`
+// referenced uncalled) - that's a different node shape entirely
+// (checkMemberExpr's own value-position check, which still rejects it
+// exactly as before) and is out of scope here.
+func (c *checker) methodSigForCallee(callee ast.NodeIndex) (sig funcSignature, ok bool, isField bool) {
+	sym, resolved := c.resolveMember(callee)
+	if !resolved {
+		return funcSignature{}, false, false
 	}
 	if sym.Kind != SymFunc {
 		if c.memberObjectIsPackage(callee) {
 			c.errorAt(callee, "cannot call %s (%s is not a function)", c.tree.Text(callee), sym.Kind)
-		} else {
-			c.errorAt(callee, "%s is a field, not a method (cannot be called)", c.tree.Text(callee))
+			return funcSignature{}, false, false
 		}
-		return funcSignature{}, false
+		return funcSignature{}, false, true
 	}
 	// The method/function may be declared in a different file - or, for a
 	// package-qualified call, a different package entirely - than this call
 	// site (see LANGUAGE.md's "Multi-file packages" and "Imports" sections).
 	restore := c.pushTree(sym.Tree)
-	sig := c.funcSigForDecl(sym.Decl)
+	sig = c.funcSigForDecl(sym.Decl)
 	restore()
-	return sig, true
+	return sig, true, false
 }
 
 // checkCompositeLit types a composite literal (`Point{...}` or `[N]T{...}`)

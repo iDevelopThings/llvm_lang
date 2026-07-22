@@ -113,6 +113,58 @@ func TestIndirectCalleeGetsInfoTypesEntry(t *testing.T) {
 	}
 }
 
+// --- calling through a func-typed struct field (not a method) ---
+
+const callbackSrc = "struct Callback {\n\tfn func(int) int\n}\n" +
+	"func double(x int) int {\n\treturn x * 2\n}\n"
+
+// TestCallThroughFuncTypedFieldOk is the exact repro from BLOCKERS.md's
+// now-resolved "Calling a function-typed struct field directly is rejected"
+// entry: `cb.fn(5)` calls straight through an ordinary struct field of
+// function type, no intermediate local - this used to be rejected outright
+// ("fn is a field, not a method (cannot be called)"); funcSigForCall's
+// MemberExpr case now falls back to the same indirect-call check its Ident
+// case already had (via methodSigForCallee's isField result) the moment the
+// member isn't a real method.
+func TestCallThroughFuncTypedFieldOk(t *testing.T) {
+	src := callbackSrc + "func f() int {\n\tcb := Callback{double}\n\treturn cb.fn(5)\n}\n"
+	checkSrc(t, src)
+}
+
+func TestCallThroughFuncTypedFieldArgCountMismatch(t *testing.T) {
+	src := callbackSrc + "func f() {\n\tcb := Callback{double}\n\tcb.fn()\n}\n"
+	expectCheckErrors(t, src, 1)
+}
+
+func TestCallThroughFuncTypedFieldArgTypeMismatch(t *testing.T) {
+	src := callbackSrc + "func f() {\n\tcb := Callback{double}\n\tcb.fn(\"x\")\n}\n"
+	expectCheckErrors(t, src, 1)
+}
+
+// TestCallThroughFuncTypedFieldCalleeGetsInfoTypesEntry mirrors
+// TestIndirectCalleeGetsInfoTypesEntry for a MemberExpr callee: a func-typed
+// field callee is checked as an ordinary value expression exactly like a
+// func-typed Ident is, so it must likewise get a real info.Types entry -
+// codegen needs it to evaluate the field's own fat-pointer value before
+// calling through it (genIndirectCall, src/codegen/expr.go).
+func TestCallThroughFuncTypedFieldCalleeGetsInfoTypesEntry(t *testing.T) {
+	src := callbackSrc + "func f() {\n\tcb := Callback{double}\n\tcb.fn(5)\n}\n"
+	tree, info := checkSrc(t, src)
+	fDecl := tree.Children(tree.Root)[2]
+	body := tree.Child(fDecl, 4)
+	exprStmt := tree.Child(body, 1) // cb.fn(5)
+	call := tree.Child(exprStmt, 0)
+	callee := tree.Child(call, 0) // cb.fn
+
+	got, ok := info.Types[callee]
+	if !ok {
+		t.Fatal("expected an info.Types entry for the func-typed field callee")
+	}
+	if got.Kind != TypeFunc {
+		t.Errorf("Types[callee] = %v, want TypeFunc", got)
+	}
+}
+
 // --- what's still rejected ---
 
 func TestBareFuncNameUsedAsWrongTypeIsError(t *testing.T) {
@@ -132,7 +184,12 @@ func TestBarePrintReferenceIsStillError(t *testing.T) {
 func TestBareMethodReferenceIsStillError(t *testing.T) {
 	// Method values remain explicitly out of scope this round (see
 	// LANGUAGE.md) - only a MemberExpr *call* (`p.move()`) is legal; `p.move`
-	// alone must still be rejected exactly as before.
+	// alone must still be rejected exactly as before. Also doubles as a
+	// regression test for the func-typed-struct-field call fix above (see
+	// TestCallThroughFuncTypedFieldOk): that fix only ever adds a fallback for
+	// a MemberExpr *callee* that resolves to an ordinary field, never touches
+	// this uncalled-value-position check at all, so a bare method reference
+	// must remain exactly as rejected as before.
 	src := pointWithMoveSrc + "func f() {\n\tp := Point{1, 2}\n\tvar a int = p.move\n}\n"
 	expectCheckErrors(t, src, 1)
 }

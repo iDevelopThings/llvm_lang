@@ -118,28 +118,22 @@ func readBack() int {
 // TestClosureStoredInStructFieldAndReadBackAsValue covers a struct field
 // declared with a function type (func(int) int), holding a genuine closure
 // (not a bare function reference) - assigned in, then read back out to a
-// plain func-typed local and called *through the local* (not through the
-// field expression directly - see the BUG note below), proving a func-typed
-// field lowers to the same {fnPtr, ctxPtr} fat-pointer representation any
-// other func-typed storage location (a var, a parameter) already uses, and
-// still sees the closure's own captured state after round-tripping through
-// struct field storage.
+// plain func-typed local and called *through the local*, proving a
+// func-typed field lowers to the same {fnPtr, ctxPtr} fat-pointer
+// representation any other func-typed storage location (a var, a parameter)
+// already uses, and still sees the closure's own captured state after
+// round-tripping through struct field storage.
 //
-// BUG (see BLOCKERS.md's "Calling a function-typed struct field directly"
-// entry): `cb.fn(5)` - calling the field expression *directly* - currently
-// fails to type-check at all ("fn is a field, not a method (cannot be
-// called)"), even though LANGUAGE.md's "First-class functions" section
-// explicitly lists "a struct field's type" as a legal place for a function
-// type to appear, with no carve-out for calling through one. checkCallExpr's
-// MemberExpr dispatch (funcSigForCall -> methodSigForCallee,
-// sema/typecheck.go) only ever considers a MemberExpr callee a method call
-// or a package-qualified function call - it has no fallback to "this
-// resolved to an ordinary field whose own type happens to be TypeFunc, so
-// check it as a value expression and call it indirectly" the way a plain
-// Ident callee already does. This test works around the bug (reading the
-// field into a local first) to still exercise the round-trip; the direct-call
-// form is deliberately left broken and out of scope for this test sweep -
-// see BLOCKERS.md.
+// Calling the field expression *directly* (`cb.fn(5)`, no local in between)
+// used to be rejected outright ("fn is a field, not a method (cannot be
+// called)") - see the now-resolved BLOCKERS.md entry - even though
+// LANGUAGE.md's "First-class functions" section always listed "a struct
+// field's type" as a legal place for a function type to appear, with no
+// carve-out for calling through one. That's fixed now (funcSigForCall's
+// MemberExpr case falls back to the same indirect-call check its Ident case
+// already had - sema/typecheck.go); TestClosureStoredInStructFieldCalledDirectly
+// exercises the direct-call form, and this test continues to cover the
+// read-into-a-local-first form, so both remain valid, not just one.
 func TestClosureStoredInStructFieldAndReadBackAsValue(t *testing.T) {
 	jm := compileAndJIT(t, `
 struct Callback {
@@ -153,6 +147,34 @@ func f() int {
 	}}
 	fn := cb.fn
 	return fn(5)
+}
+`)
+	if got := jm.runInt32(t, "f"); got != 15 {
+		t.Errorf("f() = %d, want 15", got)
+	}
+}
+
+// TestClosureStoredInStructFieldCalledDirectly is
+// TestClosureStoredInStructFieldAndReadBackAsValue's direct-call
+// counterpart: `cb.fn(5)` calls straight through the field expression, no
+// intermediate local - the exact repro BLOCKERS.md's now-resolved "Calling a
+// function-typed struct field directly is rejected" entry described. Proves
+// both the sema fallback (funcSigForCall's MemberExpr case, via
+// methodSigForCallee's isField result) and codegen's matching dispatch
+// (isMethodCall correctly saying "no" for a plain field, routing to
+// genIndirectCall) actually work end-to-end, not just type-check.
+func TestClosureStoredInStructFieldCalledDirectly(t *testing.T) {
+	jm := compileAndJIT(t, `
+struct Callback {
+	fn func(int) int
+}
+
+func f() int {
+	base := 10
+	cb := Callback{func(x int) int {
+		return base + x
+	}}
+	return cb.fn(5)
 }
 `)
 	if got := jm.runInt32(t, "f"); got != 15 {

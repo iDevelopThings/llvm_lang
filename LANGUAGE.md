@@ -751,6 +751,31 @@ function value actually lowers to LLVM IR (the fat-pointer representation,
 and the direct-vs-indirect call distinction) - that's an implementation
 concern, not a language-spec one, so it lives there instead of here.
 
+A struct field of function type is an **ordinary field** - calling through
+it (`cb.fn(5)`) works exactly like calling through a func-typed variable or
+parameter, no different from any other indirect call:
+
+```go
+struct Callback {
+    fn func(int) int
+}
+
+func double(x int) int {
+    return x * 2
+}
+
+func main() int {
+    cb := Callback{double}
+    return cb.fn(5)   // 10 - calls through the field directly
+}
+```
+
+This is deliberately unlike a **method value** (`p.move`, referenced without
+a call), which remains out of scope and still a compile error (see above) -
+`cb.fn` is an ordinary field holding a function value, not a bound method
+closing over some receiver, so the same restriction never applied to it in
+the first place.
+
 ## Lambdas (function-literal expressions)
 
 A function value doesn't have to be a *reference* to an already-declared

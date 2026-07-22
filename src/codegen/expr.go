@@ -859,7 +859,7 @@ func (g *Generator) genCallExpr(n ast.NodeIndex) llvm.Value {
 		// direct-call lowering a same-package free function call already
 		// uses.
 		return g.genFuncCall(calleeNode, argNodes)
-	case g.tree.Nodes[calleeNode].Kind == enums.NodeKinds.MemberExpr:
+	case g.isMethodCall(calleeNode):
 		return g.genMethodCall(calleeNode, argNodes)
 	case g.isDirectFuncCall(calleeNode):
 		return g.genFuncCall(calleeNode, argNodes)
@@ -884,6 +884,31 @@ func (g *Generator) isPackageQualifiedCall(calleeNode ast.NodeIndex) bool {
 	return ok && sym.Kind == sema.SymPackage
 }
 
+// isMethodCall reports whether calleeNode (a MemberExpr, already known not
+// to be package-qualified) is a real method call - its resolved member
+// (Info.Refs[calleeNode], set by sema's own resolveMember) is a SymFunc, not
+// an ordinary struct field. Mirrors sema's own methodSigForCallee dispatch
+// (sema/typecheck.go) exactly, for the identical reason isDirectFuncCall/
+// isConversionCall already mirror their own sema counterparts - see
+// CODEGEN.md.
+//
+// A func-typed struct field (`cb.fn(5)` - LANGUAGE.md's "First-class
+// functions" section) deliberately fails this check even though it's a
+// MemberExpr: it's not a method, so genCallExpr's switch falls through to
+// isDirectFuncCall (also false, since calleeNode isn't an Ident) and then to
+// genIndirectCall - the exact same fat-pointer-extract-and-call path a
+// func-typed Ident/parameter already goes through, since sema type-checks
+// and codegen lowers a func-typed field's call exactly like any other
+// indirect call, distinguished only by which node kind ultimately holds the
+// function value.
+func (g *Generator) isMethodCall(calleeNode ast.NodeIndex) bool {
+	if g.tree.Nodes[calleeNode].Kind != enums.NodeKinds.MemberExpr {
+		return false
+	}
+	sym, ok := g.info.Refs[calleeNode]
+	return ok && sym.Kind == sema.SymFunc
+}
+
 // isDirectFuncCall mirrors sema's own dispatch (funcSigForCall in
 // sema/typecheck.go): a call's callee compiles to a plain, direct `call`
 // instruction with zero fat-pointer/indirect-call overhead only when it's a
@@ -892,9 +917,10 @@ func (g *Generator) isPackageQualifiedCall(calleeNode ast.NodeIndex) bool {
 // predeclared `print` builtin is intercepted earlier by isPrintCall and
 // never reaches here on a checked tree, but Decl != InvalidNode still
 // guards against it defensively. Anything else that type-checked as
-// callable - a function-typed variable/parameter, or any other expression
-// whose value is itself a function (e.g. a call result) - goes through
-// genIndirectCall instead (see CODEGEN.md's "First-class functions" section).
+// callable - a function-typed variable/parameter, an ordinary struct field
+// of function type (see isMethodCall), or any other expression whose value
+// is itself a function (e.g. a call result) - goes through genIndirectCall
+// instead (see CODEGEN.md's "First-class functions" section).
 func (g *Generator) isDirectFuncCall(calleeNode ast.NodeIndex) bool {
 	if g.tree.Nodes[calleeNode].Kind != enums.NodeKinds.Ident {
 		return false

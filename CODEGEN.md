@@ -458,7 +458,11 @@ of the two a given call is:
   a lambda is never reachable through a direct call in the first place (see
   that section), so this path needed no changes when lambdas were added.
 - An **indirect** call - anything else that type-checked as callable: a
-  function-typed variable/parameter, or any other expression whose value is
+  function-typed variable/parameter, an ordinary (non-method) struct field of
+  function type (`cb.fn(5)` - see `LANGUAGE.md`'s "First-class functions"
+  section; `isMethodCall` is what tells a real method-call `MemberExpr` apart
+  from a func-typed-field one, mirroring sema's own `methodSigForCallee`
+  `isField` distinction exactly), or any other expression whose value is
   itself a function (e.g. a call whose own result is a function, so
   `getAdder()(x)` chains straight through) - goes through `genIndirectCall`:
   evaluate the callee as an ordinary value expression to get its fat-pointer
@@ -467,7 +471,11 @@ of the two a given call is:
   `sema.Type` (`Params`/`Return`, plus a leading `ctxPtr` parameter - see
   "Lambdas" below for why - there's no `FuncDecl` node backing an indirect
   callee the way a direct call's `g.funcs` lookup has), and `CreateCall`
-  through that raw pointer with `ctxPtr` passed as the real first argument.
+  through that raw pointer with `ctxPtr` passed as the real first argument. A
+  func-typed field's own fat-pointer value is read exactly like any other
+  field access (`genAddr`'s `MemberExpr` case plus `genLoad`) - no special
+  casing was needed there at all, only in the dispatch that decides a
+  `MemberExpr` callee isn't a method call.
 
 ```llvm
 ; func apply(fn func(int) int, x int) int { return fn(x) }
