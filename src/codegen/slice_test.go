@@ -165,6 +165,50 @@ func f() int {
 	}
 }
 
+// TestSliceReslicedValueRemainsAliased covers re-slicing an already-sliced
+// dynamic array (`a := s[...]; b := a[...]`) - confirmed by hand during the
+// review that found the addressability-recursion bug this package's sema
+// tests guard against, but never actually pinned down by a test anywhere
+// until now. b is deliberately resliced past a's own length (but within a's
+// own reduced capacity - see TestSliceDynamicArrayReslicePastLenWithinCap
+// for the single-level version of this same subtlety) to exercise the full
+// {ptr, len, cap} chain: a mutation through the innermost slice (b) must be
+// visible both through the middle slice (a, at the one index still within
+// a's own reported length) and through the original (s) - proving the whole
+// aliasing chain holds all the way through, not just one hop of it.
+func TestSliceReslicedValueRemainsAliased(t *testing.T) {
+	jm := compileAndJIT(t, `
+func f() int {
+	s := []int{1, 2, 3, 4, 5, 6, 7, 8}
+
+	a := s[2:5]
+	if len(a) != 3 || a[0] != 3 || a[1] != 4 || a[2] != 5 {
+		return 0
+	}
+
+	b := a[1:5]
+	if len(b) != 4 || b[0] != 4 || b[1] != 5 || b[2] != 6 || b[3] != 7 {
+		return 0
+	}
+
+	b[0] = 444
+	if a[1] != 444 || s[3] != 444 {
+		return 0
+	}
+
+	b[3] = 999
+	if s[6] != 999 {
+		return 0
+	}
+
+	return 1
+}
+`)
+	if got := jm.runInt32(t, "f"); got != 1 {
+		t.Errorf("f() = %d, want 1 (re-slicing an already-sliced value must keep aliasing the exact same backing memory all the way through, including a reslice past the inner slice's own length but within its own capacity)", got)
+	}
+}
+
 // TestSliceLenAndAppendOnSlicedValue covers that a sliced value is an
 // ordinary dynamic-array value afterward - len and append work unchanged,
 // with no special-casing needed in either (see LANGUAGE.md's "Slicing"

@@ -1013,7 +1013,8 @@ func (c *checker) checkLValue(n ast.NodeIndex) (Type, bool) {
 		}
 		t := c.checkExpr(n)
 		return t, !t.IsInvalid()
-	case enums.NodeKinds.MemberExpr, enums.NodeKinds.IndexExpr:
+	case enums.NodeKinds.MemberExpr,
+		enums.NodeKinds.IndexExpr:
 		t := c.checkExpr(n)
 		return t, !t.IsInvalid()
 	case enums.NodeKinds.UnaryExpr:
@@ -1375,6 +1376,15 @@ func (c *checker) checkAddressOf(n, operand ast.NodeIndex) Type {
 // (rather than reusing checkLValue directly) purely so the diagnostic
 // wording matches what `&` misuse actually looks like ("cannot take the
 // address of X", not checkLValue's own "cannot assign to X").
+//
+// A MemberExpr/IndexExpr shape isn't addressable on its own, though - a
+// `.field`/`[index]` needs its own *object* to itself be addressable (or
+// already be a pointer being auto-dereferenced/a dynamic array indexed
+// straight into, both always fine - see isAddressableChain), all the way
+// down to some real base storage location, exactly like Go's own
+// "addressable all the way down" rule - so isAddressableChain is what
+// actually decides those two cases, once checkExpr itself has confirmed the
+// operand type-checks at all.
 func (c *checker) checkAddressable(n ast.NodeIndex) (Type, bool) {
 	switch c.tree.Nodes[n].Kind {
 	case enums.NodeKinds.Ident:
@@ -1385,9 +1395,17 @@ func (c *checker) checkAddressable(n ast.NodeIndex) (Type, bool) {
 		}
 		t := c.checkExpr(n)
 		return t, !t.IsInvalid()
-	case enums.NodeKinds.MemberExpr, enums.NodeKinds.IndexExpr:
+	case enums.NodeKinds.MemberExpr,
+		enums.NodeKinds.IndexExpr:
 		t := c.checkExpr(n)
-		return t, !t.IsInvalid()
+		if t.IsInvalid() {
+			return invalidType, false
+		}
+		if !c.isAddressableChain(n) {
+			c.errorAt(n, "cannot take the address of this expression")
+			return invalidType, false
+		}
+		return t, true
 	case enums.NodeKinds.UnaryExpr:
 		if c.tree.Text(n) != "*" {
 			c.errorAt(n, "cannot take the address of this expression")
@@ -1400,6 +1418,55 @@ func (c *checker) checkAddressable(n ast.NodeIndex) (Type, bool) {
 	default:
 		c.errorAt(n, "cannot take the address of this expression")
 		return invalidType, false
+	}
+}
+
+// isAddressableChain reports whether n - a MemberExpr or IndexExpr, already
+// fully type-checked by the caller (so c.info.Types/c.info.Refs already have
+// every entry this recurses into) - denotes a real, stable storage location
+// rather than a throwaway value, recursively all the way down to some base
+// case, matching Go's own "addressable all the way down" rule:
+//
+//   - a MemberExpr (`p.field`) is addressable iff p itself is addressable -
+//     *unless* p is itself pointer-typed, in which case `.field` auto-derefs
+//     it (see resolveMember), and dereferencing a pointer is always a real
+//     address regardless of whether the pointer expression itself had one.
+//   - an IndexExpr (`arr[i]`) is addressable iff arr itself is addressable -
+//     *unless* arr is a dynamic array (`[]T`), whose backing storage always
+//     lives on the arena heap already (see codegen's genAddr IndexExpr case),
+//     never in the slice header's own storage, so no recursion into the
+//     header's own addressability is needed either.
+//   - an Ident is addressable iff it names a variable/parameter (the same
+//     base case checkAddressable's own Ident branch already applies).
+//   - a "*" UnaryExpr (a dereference) is always addressable, same as
+//     checkAddressable's own UnaryExpr branch.
+//   - anything else (a call, a literal, an arbitrary expression) is not.
+//
+// Shared by checkAddressable (for `&`) and checkArraySliceAddressable (for
+// slicing a fixed array) - both need exactly this same recursive rule, just
+// applied at a different starting node shape.
+func (c *checker) isAddressableChain(n ast.NodeIndex) bool {
+	switch c.tree.Nodes[n].Kind {
+	case enums.NodeKinds.Ident:
+		sym, ok := c.info.Refs[n]
+		return ok && (sym.Kind == SymVar || sym.Kind == SymParam)
+	case enums.NodeKinds.MemberExpr:
+		object := c.tree.Child(n, 0)
+		if c.info.Types[object].Kind == TypePointer {
+			return true
+		}
+		return c.isAddressableChain(object)
+	case enums.NodeKinds.IndexExpr:
+		target := c.tree.Child(n, 0)
+		targetType := c.info.Types[target]
+		if targetType.Kind == TypeArray && targetType.Dynamic {
+			return true
+		}
+		return c.isAddressableChain(target)
+	case enums.NodeKinds.UnaryExpr:
+		return c.tree.Text(n) == "*"
+	default:
+		return false
 	}
 }
 
@@ -1733,22 +1800,26 @@ func (c *checker) checkSliceExpr(n ast.NodeIndex) Type {
 }
 
 // checkArraySliceAddressable reports whether objNode - already type-checked
-// by checkSliceExpr's own checkValueExpr call as a fixed-size array - has one
-// of the expression shapes checkAddressable/checkLValue already recognize as
-// a real addressable location (an Ident naming a var/param, a MemberExpr, an
-// IndexExpr, or a "*" UnaryExpr dereference): slicing a fixed array needs a
-// real, stable backing address to alias into (see LANGUAGE.md's "Slicing"
-// section), exactly the same requirement `&` has. This is a pure shape
-// check with no re-type-checking side effect of its own (unlike
-// checkAddressable, which both type-checks and shape-checks its operand in
-// one call) - objNode was already fully checked by the caller.
+// by checkSliceExpr's own checkValueExpr call as a fixed-size array - is a
+// real addressable location, recursively, exactly the same rule `&` needs
+// (isAddressableChain): slicing a fixed array needs a real, stable backing
+// address to alias into (see LANGUAGE.md's "Slicing" section), and that
+// requirement doesn't stop at objNode's own outermost shape - a
+// `.field`/`[index]` chain is only addressable if *its own* object/target is
+// addressable all the way down (Go's own rule; see isAddressableChain's own
+// doc comment for the full case-by-case reasoning, including the
+// pointer-auto-deref and dynamic-array-index exceptions). This is a pure
+// shape/addressability check with no re-type-checking side effect of its own
+// (unlike checkAddressable, which both type-checks and shape-checks its
+// operand in one call) - objNode was already fully checked by the caller.
 func (c *checker) checkArraySliceAddressable(objNode ast.NodeIndex) bool {
 	switch c.tree.Nodes[objNode].Kind {
 	case enums.NodeKinds.Ident:
 		sym := c.info.Refs[objNode]
 		return sym.Kind == SymVar || sym.Kind == SymParam
-	case enums.NodeKinds.MemberExpr, enums.NodeKinds.IndexExpr:
-		return true
+	case enums.NodeKinds.MemberExpr,
+		enums.NodeKinds.IndexExpr:
+		return c.isAddressableChain(objNode)
 	case enums.NodeKinds.UnaryExpr:
 		return c.tree.Text(objNode) == "*"
 	default:

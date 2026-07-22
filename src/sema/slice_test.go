@@ -63,6 +63,17 @@ func TestSliceFixedArrayThroughMemberAndIndexIsAddressable(t *testing.T) {
 	checkSrc(t, "func f() []int {\n\tgrid := [2][3]int{[3]int{1, 2, 3}, [3]int{4, 5, 6}}\n\treturn grid[0][0:2]\n}\n")
 }
 
+// TestSliceFixedArrayThroughNonAddressableChainIsError covers the bug this
+// test guards against: addressability must be checked *transitively* through
+// a MemberExpr/IndexExpr chain, not just at its own outermost shape - a
+// struct field accessed straight off a function call's own return value
+// (`makeBox().items`) is not addressable, since the call's result is itself
+// a throwaway rvalue with no stable storage, even though the field-access
+// shape alone (MemberExpr) looks addressable in isolation.
+func TestSliceFixedArrayThroughNonAddressableChainIsError(t *testing.T) {
+	expectCheckErrors(t, "struct Box {\n\titems [3]int\n}\nfunc makeBox() Box {\n\treturn Box{[3]int{1, 2, 3}}\n}\nfunc main() int {\n\tview := makeBox().items[0:2]\n\treturn len(view)\n}\n", 1)
+}
+
 // TestSliceNonIntBoundIsError covers rejecting a non-int bound expression
 // (a string, here) for either the low or the high bound.
 func TestSliceNonIntBoundIsError(t *testing.T) {

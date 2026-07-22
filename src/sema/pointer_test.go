@@ -68,6 +68,38 @@ func TestAddressOfStructFieldAndArrayElement(t *testing.T) {
 	checkSrc(t, "func f() int {\n\ta := [3]int{1, 2, 3}\n\tq := &a[0]\n\treturn *q\n}\n")
 }
 
+// TestAddressOfFieldThroughNonAddressableCallIsError covers checkAddressable
+// checking addressability *transitively* through a MemberExpr chain, not
+// just at its own outermost shape - a struct field accessed straight off a
+// function call's own return value (`makeBox().x`) is not addressable, since
+// the call's result is itself a throwaway rvalue with no stable storage,
+// even though the field-access shape alone (MemberExpr) looks addressable in
+// isolation. See also slice_test.go's
+// TestSliceFixedArrayThroughNonAddressableChainIsError, the same underlying
+// bug for checkArraySliceAddressable.
+func TestAddressOfFieldThroughNonAddressableCallIsError(t *testing.T) {
+	expectCheckErrors(t, pointStructSrc+"func makePoint() Point {\n\treturn Point{1, 2}\n}\nfunc f() int {\n\tq := &makePoint().x\n\treturn *q\n}\n", 1)
+}
+
+// TestAddressOfElementThroughNonAddressableCallIsError is the IndexExpr
+// analog of TestAddressOfFieldThroughNonAddressableCallIsError - indexing
+// straight into a function call's own fixed-array return value is likewise
+// not addressable.
+func TestAddressOfElementThroughNonAddressableCallIsError(t *testing.T) {
+	expectCheckErrors(t, "func make3() [3]int {\n\treturn [3]int{1, 2, 3}\n}\nfunc f() int {\n\tq := &make3()[0]\n\treturn *q\n}\n", 1)
+}
+
+// TestAddressOfFieldThroughPointerChainIsAddressable covers the pointer
+// auto-deref exception to the transitive addressability rule: `p.field`
+// where p is itself a `*T` is always addressable regardless of whether p's
+// own expression is - dereferencing a pointer always yields a real address
+// (see isAddressableChain). Uses `new` (LANGUAGE.md's "Pointers" section) to
+// produce a `*Point` from a non-addressable expression, confirming the
+// pointer indirection alone is what makes it fine.
+func TestAddressOfFieldThroughPointerChainIsAddressable(t *testing.T) {
+	checkSrc(t, pointStructSrc+"func f() int {\n\tq := &(new Point(1, 2)).x\n\treturn *q\n}\n")
+}
+
 // TestAddressOfDereferenceIsAddressable covers checkAddressable's own
 // UnaryExpr("*") branch - `&*p` (address-of a dereference) is a valid
 // operand, distinct from `*p` used as a plain value or lvalue elsewhere.
