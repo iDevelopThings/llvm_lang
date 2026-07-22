@@ -206,6 +206,49 @@ func TestTrailingCommaInCallArgs(t *testing.T) {
 	}
 }
 
+func TestTrailingCommaInParamList(t *testing.T) {
+	// A trailing comma in a function's parameter list is now tolerated, the
+	// same as parseCallExpr/finishCompositeLit already tolerate one - both
+	// now share parseCommaList with parseParamList, which previously used
+	// its own hand-rolled loop with no trailing-comma tolerance at all
+	// (`func f(a int, b int,) {}` used to cost a spurious "expected
+	// identifier, found )" error).
+	p := New(lexer.NewFile("t.ll", "func f(a int, b int,) {}"))
+	n := p.parseTopLevelItem()
+	if p.diags.HasErrors() {
+		t.Fatalf("unexpected diagnostics for a trailing comma in a param list: %v", p.diags.All())
+	}
+	params := p.tree.Children(p.tree.Child(n, 2)) // FuncDecl -> ParamList
+	if len(params) != 2 {
+		t.Fatalf("expected 2 params, got %d\n%s", len(params), p.tree.Dump(n))
+	}
+	names := []string{p.tree.Text(p.tree.Child(params[0], 0)), p.tree.Text(p.tree.Child(params[1], 0))}
+	if names[0] != "a" || names[1] != "b" {
+		t.Fatalf("expected params a, b, got %v", names)
+	}
+}
+
+func TestTrailingCommaInFuncTypeParamList(t *testing.T) {
+	// Same fix, for parseFuncType's own parameter-*type* loop
+	// (`var x func(int, int,)` used to fail the same way parseParamList did).
+	p := New(lexer.NewFile("t.ll", "var x func(int, int,)"))
+	n := p.parseStmt()
+	if p.diags.HasErrors() {
+		t.Fatalf("unexpected diagnostics for a trailing comma in a func-type param list: %v", p.diags.All())
+	}
+	funcType := p.tree.Child(n, 1)                           // VarDecl -> FuncType
+	paramTypes := p.tree.Children(p.tree.Child(funcType, 0)) // FuncType -> ParamTypeList
+	if len(paramTypes) != 2 {
+		t.Fatalf("expected 2 param types, got %d\n%s", len(paramTypes), p.tree.Dump(n))
+	}
+	if got := p.tree.Text(paramTypes[0]); got != "int" {
+		t.Errorf("paramTypes[0] = %q, want %q", got, "int")
+	}
+	if got := p.tree.Text(paramTypes[1]); got != "int" {
+		t.Errorf("paramTypes[1] = %q, want %q", got, "int")
+	}
+}
+
 func TestManyIllegalCharactersBailOutCleanly(t *testing.T) {
 	// Each illegal '$' costs two diagnostics (one lexical, one "expected
 	// expression"), so this should trip the bailout well before the block

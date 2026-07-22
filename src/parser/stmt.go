@@ -54,14 +54,7 @@ func (p *Parser) parseStmt() ast.NodeIndex {
 // case too, e.g. `{ return 1 }`); anywhere else a semicolon is required.
 func (p *Parser) parseBlock() ast.NodeIndex {
 	openTok := p.expect(enums.Lexemes.LeftBrace)
-	var stmts []ast.NodeIndex
-	for !p.at(enums.Lexemes.RightBrace) && !p.at(enums.Lexemes.EOF) {
-		stmts = append(stmts, p.parseStmt())
-		if p.at(enums.Lexemes.RightBrace) || p.at(enums.Lexemes.EOF) {
-			break
-		}
-		p.expect(enums.Lexemes.Semicolon)
-	}
+	stmts := p.parseSemiList(enums.Lexemes.RightBrace, p.parseStmt)
 	closeTok := p.expect(enums.Lexemes.RightBrace)
 	span := ast.Span{
 		Start: openTok.Start,
@@ -125,16 +118,7 @@ func (p *Parser) parseFuncType() ast.NodeIndex {
 	kwTok := p.expectKeyword(enums.Keywords.Func)
 
 	openTok := p.expect(enums.Lexemes.LeftParen)
-	var paramTypes []ast.NodeIndex
-	if !p.at(enums.Lexemes.RightParen) {
-		paramTypes = append(paramTypes, p.parseTypeExpr())
-		for {
-			if _, ok := p.accept(enums.Lexemes.Comma); !ok {
-				break
-			}
-			paramTypes = append(paramTypes, p.parseTypeExpr())
-		}
-	}
+	paramTypes := p.parseCommaList(enums.Lexemes.RightParen, p.parseTypeExpr)
 	closeTok := p.expect(enums.Lexemes.RightParen)
 	listSpan := ast.Span{
 		Start: openTok.Start,
@@ -269,7 +253,10 @@ func (p *Parser) finishIncDecStmt(target ast.NodeIndex) ast.NodeIndex {
 // reason as finishShortVarDecl's check.
 func (p *Parser) checkAssignTarget(target ast.NodeIndex) {
 	switch p.tree.Nodes[target].Kind {
-	case enums.NodeKinds.Ident, enums.NodeKinds.MemberExpr, enums.NodeKinds.IndexExpr, enums.NodeKinds.Bad:
+	case enums.NodeKinds.Ident,
+		enums.NodeKinds.MemberExpr,
+		enums.NodeKinds.IndexExpr,
+		enums.NodeKinds.Bad:
 	default:
 		span := p.tree.SpanOf(target)
 		p.errorAtSpan(span.Start, span.End, "cannot assign to this expression")

@@ -246,19 +246,9 @@ func parseBinaryExpr(p *Parser, left ast.NodeIndex) ast.NodeIndex {
 func parseCallExpr(p *Parser, callee ast.NodeIndex) ast.NodeIndex {
 	p.expect(enums.Lexemes.LeftParen)
 	p.exprLev++
-	args := []ast.NodeIndex{callee}
-	if !p.at(enums.Lexemes.RightParen) {
-		args = append(args, p.parseExpr(precLowest))
-		for {
-			if _, ok := p.accept(enums.Lexemes.Comma); !ok {
-				break
-			}
-			if p.at(enums.Lexemes.RightParen) {
-				break // a trailing comma is fine here, same as finishCompositeLit
-			}
-			args = append(args, p.parseExpr(precLowest))
-		}
-	}
+	args := append([]ast.NodeIndex{callee}, p.parseCommaList(enums.Lexemes.RightParen, func() ast.NodeIndex {
+		return p.parseExpr(precLowest)
+	})...)
 	p.exprLev--
 	closeTok := p.expect(enums.Lexemes.RightParen)
 	span := ast.Span{
@@ -323,19 +313,7 @@ func parseArrayTypeLit(p *Parser) ast.NodeIndex {
 func (p *Parser) finishCompositeLit(typ ast.NodeIndex) ast.NodeIndex {
 	p.expect(enums.Lexemes.LeftBrace)
 	p.exprLev++
-	elems := []ast.NodeIndex{typ}
-	if !p.at(enums.Lexemes.RightBrace) {
-		elems = append(elems, p.parseCompositeLitElem())
-		for {
-			if _, ok := p.accept(enums.Lexemes.Comma); !ok {
-				break
-			}
-			if p.at(enums.Lexemes.RightBrace) {
-				break // a trailing comma is fine here, unlike in call args
-			}
-			elems = append(elems, p.parseCompositeLitElem())
-		}
-	}
+	elems := append([]ast.NodeIndex{typ}, p.parseCommaList(enums.Lexemes.RightBrace, p.parseCompositeLitElem)...)
 	p.exprLev--
 	closeTok := p.expect(enums.Lexemes.RightBrace)
 	span := ast.Span{

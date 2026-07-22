@@ -223,6 +223,51 @@ func (p *Parser) sync(stop ...enums.Lexeme) {
 	}
 }
 
+// parseCommaList parses a comma-separated list of elements (via parseElem)
+// up to close, tolerating a trailing comma right before it - the one shared
+// shape behind every comma-separated grammar rule in this package (call
+// args, composite-lit elements, param lists, function-type param-type
+// lists). Callers own consuming the opening delimiter and close itself; this
+// only handles what's between them. The caller always needs the result as a
+// concrete slice (to prepend a fixed leading element before handing it to
+// ast.Tree.NewNode's variadic elems, or to attach directly as a node's
+// children), so this returns []ast.NodeIndex rather than an iter.Seq - there
+// is no streaming consumer here to justify one.
+func (p *Parser) parseCommaList(close enums.Lexeme, parseElem func() ast.NodeIndex) []ast.NodeIndex {
+	var elems []ast.NodeIndex
+	if p.at(close) {
+		return elems
+	}
+	elems = append(elems, parseElem())
+	for {
+		if _, ok := p.accept(enums.Lexemes.Comma); !ok {
+			break
+		}
+		if p.at(close) {
+			break // a trailing comma is tolerated right before close
+		}
+		elems = append(elems, parseElem())
+	}
+	return elems
+}
+
+// parseSemiList parses a semicolon-separated list of elements (via
+// parseElem) up to close or EOF, where the separator is required between
+// elements but optional right before close itself (matching Go: `{ return 1
+// }` needs no semicolon before the closing brace) - the shared shape behind
+// parseBlock's statement list and parseStructDecl's field list.
+func (p *Parser) parseSemiList(close enums.Lexeme, parseElem func() ast.NodeIndex) []ast.NodeIndex {
+	var elems []ast.NodeIndex
+	for !p.at(close) && !p.at(enums.Lexemes.EOF) {
+		elems = append(elems, parseElem())
+		if p.at(close) || p.at(enums.Lexemes.EOF) {
+			break
+		}
+		p.expect(enums.Lexemes.Semicolon)
+	}
+	return elems
+}
+
 // Run drives fn over a fresh Parser for file and returns fn's result
 // alongside every diagnostic collected, recovering the internal bailout
 // panic so a hopelessly broken parse returns normally instead of crashing

@@ -132,16 +132,7 @@ func (p *Parser) parseFuncDecl() ast.NodeIndex {
 // returnType/body).
 func (p *Parser) parseParamList() ast.NodeIndex {
 	openTok := p.expect(enums.Lexemes.LeftParen)
-	var params []ast.NodeIndex
-	if !p.at(enums.Lexemes.RightParen) {
-		params = append(params, p.parseParam())
-		for {
-			if _, ok := p.accept(enums.Lexemes.Comma); !ok {
-				break
-			}
-			params = append(params, p.parseParam())
-		}
-	}
+	params := p.parseCommaList(enums.Lexemes.RightParen, p.parseParam)
 	closeTok := p.expect(enums.Lexemes.RightParen)
 	span := ast.Span{
 		Start: openTok.Start,
@@ -172,14 +163,7 @@ func (p *Parser) parseStructDecl() ast.NodeIndex {
 	name := p.tree.NewNode(enums.NodeKinds.Ident, nameTok, tokenSpan(nameTok))
 
 	p.expect(enums.Lexemes.LeftBrace)
-	fields := []ast.NodeIndex{name}
-	for !p.at(enums.Lexemes.RightBrace) && !p.at(enums.Lexemes.EOF) {
-		fields = append(fields, p.parseField())
-		if p.at(enums.Lexemes.RightBrace) || p.at(enums.Lexemes.EOF) {
-			break
-		}
-		p.expect(enums.Lexemes.Semicolon)
-	}
+	fields := append([]ast.NodeIndex{name}, p.parseSemiList(enums.Lexemes.RightBrace, p.parseField)...)
 	closeTok := p.expect(enums.Lexemes.RightBrace)
 
 	span := ast.Span{
