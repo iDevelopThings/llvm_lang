@@ -55,6 +55,14 @@ func init() {
 		enums.Lexemes.Minus:       parseUnaryExpr,
 		enums.Lexemes.Not:         parseUnaryExpr,
 		enums.Lexemes.LeftBracket: parseArrayTypeLit,
+		// Ampersand/Asterisk each already have an infix rule below (bitwise
+		// `&`, multiply `*`) - a prefix entry for the same lexeme is exactly
+		// the same dual-role disambiguation unary `-` already has alongside
+		// binary `-` (see LANGUAGE.md's "Pointers" section): parseExpr only
+		// ever consults prefixFns for the *first* token of an expression, so
+		// there's no conflict with the infix table below at all.
+		enums.Lexemes.Ampersand: parseUnaryExpr,
+		enums.Lexemes.Asterisk:  parseUnaryExpr,
 	}
 
 	infixRules = map[enums.Lexeme]infixRule{
@@ -172,6 +180,8 @@ func parseIdentExpr(p *Parser) ast.NodeIndex {
 		return p.tree.NewNode(enums.NodeKinds.ThisExpr, tok, tokenSpan(tok))
 	case enums.Keywords.Func:
 		return p.parseFuncLit()
+	case enums.Keywords.New:
+		return p.parseNewExpr()
 	case "":
 		p.advance()
 		ident := p.tree.NewNode(enums.NodeKinds.Ident, tok, tokenSpan(tok))
@@ -218,6 +228,25 @@ func (p *Parser) parseFuncLit() ast.NodeIndex {
 		End:   p.tree.SpanOf(body).End,
 	}
 	return p.tree.NewNode(enums.NodeKinds.FuncLit, kwTok, span, params, returnType, body)
+}
+
+// parseNewExpr parses `new T(args)` / `new T{...}` (see LANGUAGE.md's
+// "Pointers" section) - the `new` keyword wraps an ordinary, already-legal
+// constructor-call or composite-literal expression unchanged: parsing the
+// wrapped expression at precPostfix means the prefix rule for T (an
+// identifier) runs first, then the very same infix loop that already
+// recognizes `(` as a call and `{` as a composite literal keeps extending
+// it - no bespoke grammar of its own is needed for either shape, only for
+// the leading `new` keyword itself. sema (not this grammar rule) is what
+// actually requires the wrapped expression to be one of those two shapes.
+func (p *Parser) parseNewExpr() ast.NodeIndex {
+	kwTok := p.expectKeyword(enums.Keywords.New)
+	inner := p.parseExpr(precPostfix)
+	span := ast.Span{
+		Start: kwTok.Start,
+		End:   p.tree.SpanOf(inner).End,
+	}
+	return p.tree.NewNode(enums.NodeKinds.NewExpr, kwTok, span, inner)
 }
 
 func parseNumberExpr(p *Parser) ast.NodeIndex {

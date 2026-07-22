@@ -236,6 +236,8 @@ type Generator struct {
 	printfFn   llvm.Value
 	mallocType llvm.Type
 	mallocFn   llvm.Value
+	freeType   llvm.Type
+	freeFn     llvm.Value
 	memcpyType llvm.Type
 	memcpyFn   llvm.Value
 	memcmpType llvm.Type

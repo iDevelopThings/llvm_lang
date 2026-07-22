@@ -143,12 +143,20 @@ that) and point the arena at it - whatever was left in the abandoned block is
 simply never reused, not reclaimed; then bump the cursor forward by `size`
 and hand back the pre-bump address.
 
-This remains a real, intentional memory leak overall - **no `free`, no GC,
-no refcounting** - exactly as before, just centralized behind one primitive
-instead of ad hoc `malloc` calls at each use site. See `BLOCKERS.md`: a real
-memory-management strategy (actual scoped frees, refcounting, a real GC) is
-still an open, deliberately-deferred question for the user to decide - this
-arena is groundwork for that future decision, not an attempt to answer it.
+This remains a real, intentional memory leak overall - **no per-allocation
+free, no GC, no refcounting** - exactly as before, just centralized behind
+one primitive instead of ad hoc `malloc` calls at each use site. See
+`BLOCKERS.md`: a real memory-management strategy (actual scoped frees,
+refcounting, a real GC) is still an open, deliberately-deferred question for
+the user to decide for *this arena specifically* - it is groundwork for that
+future decision, not an attempt to answer it.
+
+`new`/`delete` (see "Pointers" below) are a deliberate, separate exception to
+that, not a change to the arena itself: each `new` is its own individually
+`malloc`'d block on a completely different heap, freed one at a time via a
+real `delete`/`free` - the arena's own allocations (string concatenation,
+dynamic arrays) are untouched by either of them and remain exactly as
+leaky as before.
 
 ## Dynamic arrays (`[]T`)
 
@@ -712,6 +720,94 @@ for read-site clarity: a constructor's `*sema.Symbol` (`sema.SymConstructor`)
 is a completely different declaration shape from an ordinary free function's
 or method's (`sema.SymFunc`), even though the two Symbol pointer spaces never
 actually collide.
+
+## Pointers: real `*T`, `&`/`*`, `new`/`delete`, auto-deref, and `nil`
+
+See `LANGUAGE.md`'s "Pointers" section for the language-level feature. Every
+`sema.TypePointer` lowers to `g.ptrTy` (`llvmType`, `src/codegen/types.go`) -
+the same single opaque `ptr` LLVM type this package already uses everywhere
+else a pointer-shaped value is needed (a string's data pointer, a dynamic
+array's, a first-class function value's fat-pointer fields, a method's
+implicit receiver) - a pointer's pointee type never affects its own LLVM
+representation, only what a dereference/GEP through it targets, so there's
+no need for a distinct LLVM pointer-to-`X` type per pointee.
+
+**`&x`/`*p`** are both `UnaryExpr` nodes distinguished by operator text, same
+as unary `-`/`!` (`genUnaryExpr`, `src/codegen/expr.go`) - handled before
+either falls through to the shared "evaluate the operand as an rvalue" path
+the arithmetic/logical operators use:
+
+- **`&x`** lowers to `genAddr(x)` directly - the exact same address
+  computation an assignment target, `++`/`--`, or a method-call receiver
+  already uses for the same expression shapes (`Ident`, `MemberExpr`,
+  `IndexExpr`, `ThisExpr`, another `*p`) - so `&` never spills its operand
+  into a fresh temporary the way `genAddr`'s own fallback case does for a
+  genuine non-addressable rvalue; it *is* that fallback's addressable case,
+  reused. `genAddr` gained one new case for this: `UnaryExpr("*")` as an
+  lvalue (`*p = v`, or `&*p`) evaluates its own operand (`p`) as a plain
+  rvalue - the address a dereference reads/writes through *is* `p`'s own
+  value, not `p`'s own address.
+- **`*p`** as a value lowers to evaluating `p` (`genExpr`) and loading
+  through the result - `CreateLoad(llvmType(pointee), ptrValue, "")`.
+
+**`new T(args)`/`new T{...}`** (`genNewExpr`, `src/codegen/expr.go`) `malloc`s
+exactly `sizeof(T)` bytes (`llvm.SizeOf`, the same null-pointer-GEP-trick
+helper `genArenaAllocElems`/`genLambdaFunc`'s own capture-context sizing
+already use) and initializes that address in place, reusing the *exact
+same* lowering an ordinary stack-/field-allocated construction already
+uses - just pointed at a different destination:
+
+- A composite-literal inner (`new Point{1, 2}`) calls `genCompositeLitInto`
+  directly against the malloc'd pointer, identical to `genAddr`'s own
+  `CompositeLit` case except the destination is heap, not a fresh
+  `createEntryAlloca`.
+- A constructor-call inner (`new Point(1, 2)`) calls a new
+  `genConstructorCallInto(dst, calleeNode, argNodes)` helper - factored
+  *out* of `genConstructorCall` itself (which now just allocates its own
+  stack slot and delegates to it) specifically so `genNewExpr` can reuse the
+  identical this-pointer-as-hidden-first-argument calling convention against
+  a malloc'd `dst` instead, without duplicating it.
+
+Unlike `genConstructorCall`/a plain `CompositeLit`'s own `genExpr` case
+(both of which load and return the constructed *value*, since this language
+passes structs by value everywhere else - see "Structs/arrays/strings..."
+below), `genNewExpr` returns the malloc'd pointer directly, never loading
+through it - the entire point of `new` is a pointer that outlives the
+current stack frame.
+
+**`delete p`** (`genDeleteStmt`, `src/codegen/stmt.go`) is a direct call to
+libc `free` against `p`'s own evaluated pointer value - no different from
+any other libc-extern call this package already makes (`malloc`/`memcpy`/
+`memcmp`/`memset`). **This is a real, separate heap from the bump-allocator
+arena** `setupArena` builds (string concatenation/dynamic arrays) - `new`
+mallocs its own individually-freeable block per call, never asking the arena
+for space, and `delete` frees exactly that block via a real `free`, never
+touching the arena's own bump cursor. The two heaps deliberately never mix:
+`delete`ing a sub-block carved out of a shared arena chunk another
+allocation still lives in would be a real bug, so `new`/`delete` simply stay
+on their own separate, ordinary malloc/free heap instead. The arena itself
+still has no per-allocation free at all (see `BLOCKERS.md`) - that
+limitation is unchanged; `new`/`delete` are a new, independent code path, not
+a fix to the arena's own leak.
+
+**Auto-deref for member access** (`genReceiverAddr`, `src/codegen/expr.go`) -
+shared by `genAddr`'s `MemberExpr` case and `genMethodCall` (a plain field
+read/write and a method-call receiver are, at the address level, the exact
+same "get me this struct value's address" operation): when the object
+expression's own `sema.Type` is `TypePointer`, its *value* is evaluated
+directly (`genExpr`, the pointer itself) rather than its *address*
+(`genAddr`, the address of whatever variable happens to be holding the
+pointer) - `p.field`/`p.method(...)` on a `*Point` therefore addresses the
+exact same heap struct `(*p).field`/`(*p).method(...)` would, with no copy
+in between; a mutating method called through a pointer receiver mutates the
+same shared allocation every other alias of that pointer also sees.
+
+**`nil`** (`sema.SymBuiltinValue`, see `LANGUAGE.md`) has no storage of its
+own to load from - `genExpr`'s `Ident` case special-cases it exactly the way
+it already special-cases a bare, uncalled function reference (`SymFunc`),
+lowering straight to `llvm.ConstNull(g.ptrTy)` regardless of which concrete
+`*T` sema resolved it to (a pointer's own pointee type never affects its
+LLVM representation - see above).
 
 ## Structs/arrays/strings are passed and returned as real LLVM aggregate
 ## types, not manual `sret`/by-ref tricks

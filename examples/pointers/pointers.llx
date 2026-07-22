@@ -1,0 +1,69 @@
+// pointers.llx - real *T pointer types, &/* operators, new/delete against a
+// real malloc'd heap (a genuinely separate heap from the string/dynamic-
+// array bump allocator - see LANGUAGE.md's "Pointers" section), auto-deref
+// for member access/method calls through a pointer receiver, and nil.
+// Returns an int, which becomes this process's own exit code (see
+// cmd/llvmc's package doc comment).
+//
+// Run with:
+//   .\llvmc.exe examples\pointers\pointers.llx
+//   echo $LASTEXITCODE   # (PowerShell) -> 40
+
+struct Point {
+    x int
+    y int
+
+    constructor(px int, py int) {
+        this.x = px
+        this.y = py
+    }
+}
+
+func (Point) move(dx int, dy int) {
+    this.x = this.x + dx
+    this.y = this.y + dy
+}
+
+// swap demonstrates *T as an ordinary parameter type: writing through both
+// pointers mutates the caller's own variables, not local copies.
+func swap(a *int, b *int) {
+    tmp := *a
+    *a = *b
+    *b = tmp
+}
+
+func main() int {
+    // &/* - address-of and dereference on a plain local variable.
+    x := 1
+    y := 2
+    swap(&x, &y)
+    print(x)   // 2
+    print(y)   // 1
+
+    // new T(args) - a constructor call against a real heap allocation.
+    p := new Point(3, 4)
+    print(p.x)      // 3 - auto-deref: p.x reads exactly like (*p).x
+    print(p.y)      // 4
+    p.move(10, 20)  // auto-deref: the method receiver is the same heap Point
+    print(p.x)      // 13
+    print(p.y)      // 24
+    moved := p.x + p.y   // 37
+
+    // new T{...} - the composite-literal form of new.
+    q := new Point{100, 200}
+
+    // nil - starts life untyped, adapts to the declared pointer context.
+    var r *Point = nil
+    print(r == nil)   // true
+    r = q
+    print(r == nil)   // false
+    print(r.x + r.y)  // 300 - r and q share the exact same heap allocation
+
+    // delete - frees the real heap allocation via libc free, distinct from
+    // the arena string/dynamic-array allocator (see runtime.go's
+    // setupRuntime).
+    delete p
+    delete q
+
+    return x + y + moved   // 2 + 1 + 37 = 40
+}

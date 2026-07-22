@@ -15,15 +15,30 @@ import (
 // lowers to a call into libc's printf, string concatenation goes through the
 // bump-allocator arena (setupArena, which itself grows via malloc), and
 // string equality/ordering go through memcmp. Heap memory handed out by the
-// arena is never freed - there's no GC and no `free` in this language yet, so
-// a program that concatenates strings in a loop leaks; a documented, accepted
-// limitation for this chunk of work (see BLOCKERS.md), not an oversight.
+// arena is still never freed - there's no GC and the arena itself has no
+// free-single-allocation operation, so a program that concatenates strings in
+// a loop still leaks; a documented, accepted limitation for that chunk of
+// work (see BLOCKERS.md), not an oversight. `new`/`delete` (see LANGUAGE.md's
+// "Pointers" section) are a real, separate exception to that: each is its own
+// direct malloc/free pair, a genuinely freeable allocation, entirely outside
+// the arena.
 func (g *Generator) setupRuntime() {
 	g.printfType = llvm.FunctionType(g.i32Ty, []llvm.Type{g.ptrTy}, true)
 	g.printfFn = llvm.AddFunction(g.mod, "printf", g.printfType)
 
 	g.mallocType = llvm.FunctionType(g.ptrTy, []llvm.Type{g.i64Ty}, false)
 	g.mallocFn = llvm.AddFunction(g.mod, "malloc", g.mallocType)
+
+	// free - `delete` (see LANGUAGE.md's "Pointers" section) calls this
+	// directly, exactly the same libc-extern-call shape malloc already uses
+	// above. Deliberately a real, separate heap from the bump-allocator
+	// arena setupArena builds just below: `new`/`delete` manage their own
+	// memory one real malloc'd block at a time (each freed individually),
+	// never touching the arena's own never-freed bump cursor, and vice
+	// versa - mixing the two would mean `delete`ing a sub-block out of a
+	// shared arena chunk another allocation still lives in.
+	g.freeType = llvm.FunctionType(g.voidTy, []llvm.Type{g.ptrTy}, false)
+	g.freeFn = llvm.AddFunction(g.mod, "free", g.freeType)
 
 	g.memcpyType = llvm.FunctionType(g.ptrTy, []llvm.Type{g.ptrTy, g.ptrTy, g.i64Ty}, false)
 	g.memcpyFn = llvm.AddFunction(g.mod, "memcpy", g.memcpyType)

@@ -568,6 +568,8 @@ func (r *resolver) resolveStmt(scope *Scope, n ast.NodeIndex) {
 		r.resolveExpr(scope, r.tree.Child(n, 0))
 	case enums.NodeKinds.ExprStmt:
 		r.resolveExpr(scope, r.tree.Child(n, 0))
+	case enums.NodeKinds.DeleteStmt:
+		r.resolveExpr(scope, r.tree.Child(n, 0))
 	case enums.NodeKinds.ReturnStmt:
 		if v := r.tree.Child(n, 0); v != ast.InvalidNode {
 			r.resolveExpr(scope, v)
@@ -648,6 +650,8 @@ func (r *resolver) resolveType(scope *Scope, n ast.NodeIndex) {
 			r.resolveExpr(scope, size)
 		}
 		r.resolveType(scope, r.tree.Child(n, 1))
+	case enums.NodeKinds.PointerType:
+		r.resolveType(scope, r.tree.Child(n, 0))
 	case enums.NodeKinds.FuncType:
 		paramList := r.tree.Child(n, 0)
 		for _, param := range r.tree.Children(paramList) {
@@ -767,6 +771,13 @@ func (r *resolver) resolveExpr(scope *Scope, n ast.NodeIndex) {
 		r.resolveCompositeLit(scope, n)
 	case enums.NodeKinds.FuncLit:
 		r.resolveFuncLit(scope, n)
+	case enums.NodeKinds.NewExpr:
+		// `new T(args)`/`new T{...}` (see LANGUAGE.md's "Pointers" section)
+		// wraps an ordinary, already-legal constructor-call or
+		// composite-literal expression - resolved exactly the same way it
+		// would be if `new` weren't there at all, via the same CallExpr/
+		// CompositeLit cases just above.
+		r.resolveExpr(scope, r.tree.Child(n, 0))
 	}
 }
 

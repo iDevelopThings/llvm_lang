@@ -43,6 +43,8 @@ func (p *Parser) parseStmt() ast.NodeIndex {
 		return p.parseBreakStmt()
 	case p.atKeyword(enums.Keywords.Continue):
 		return p.parseContinueStmt()
+	case p.atKeyword(enums.Keywords.Delete):
+		return p.parseDeleteStmt()
 	default:
 		return p.parseSimpleStmt()
 	}
@@ -71,9 +73,19 @@ func (p *Parser) parseBlock() ast.NodeIndex {
 // context, not by grammar), an array type `[N]T` (fixed-size) / `[]T`
 // (dynamic - parsed now, rejected later at a semantic stage once one
 // exists, so the grammar doesn't need to change when dynamic arrays land),
-// or a function type `func(T1, T2) R` (see parseFuncType) - first-class
-// function values (LANGUAGE.md's "First-class functions" section).
+// a pointer type `*T` (see LANGUAGE.md's "Pointers" section - a leading `*`
+// prefix modifier, same shape as `[N]T`'s own leading `[`), or a function
+// type `func(T1, T2) R` (see parseFuncType) - first-class function values
+// (LANGUAGE.md's "First-class functions" section).
 func (p *Parser) parseTypeExpr() ast.NodeIndex {
+	if starTok, ok := p.accept(enums.Lexemes.Asterisk); ok {
+		elem := p.parseTypeExpr()
+		span := ast.Span{
+			Start: starTok.Start,
+			End:   p.tree.SpanOf(elem).End,
+		}
+		return p.tree.NewNode(enums.NodeKinds.PointerType, lexer.Token{}, span, elem)
+	}
 	if openTok, ok := p.accept(enums.Lexemes.LeftBracket); ok {
 		p.exprLev++
 		size := ast.InvalidNode
@@ -152,7 +164,7 @@ func (p *Parser) parseFuncType() ast.NodeIndex {
 // `true`, `this`, ...) also lexes as Lexeme.Identifier (see Token.Keyword)
 // but can never start a type, hence the explicit Keyword == "" check.
 func (p *Parser) atTypeStart() bool {
-	if p.at(enums.Lexemes.LeftBracket) || p.atKeyword(enums.Keywords.Func) {
+	if p.at(enums.Lexemes.LeftBracket) || p.at(enums.Lexemes.Asterisk) || p.atKeyword(enums.Keywords.Func) {
 		return true
 	}
 	return p.at(enums.Lexemes.Identifier) && p.tok.Keyword == ""
@@ -256,6 +268,14 @@ func (p *Parser) checkAssignTarget(target ast.NodeIndex) {
 	case enums.NodeKinds.Ident,
 		enums.NodeKinds.MemberExpr,
 		enums.NodeKinds.IndexExpr,
+		// UnaryExpr covers `*p` as an lvalue (see LANGUAGE.md's "Pointers"
+		// section) - this is purely a parser-level shape check (unchanged
+		// from before this feature: any lvalue-shaped syntax is accepted
+		// here), same as every other case; sema's checkLValue is what
+		// actually rejects a UnaryExpr whose operator isn't "*" (e.g. `&x = 5`
+		// never parses as anything but this same shape, and is rejected
+		// there instead).
+		enums.NodeKinds.UnaryExpr,
 		enums.NodeKinds.Bad:
 	default:
 		span := p.tree.SpanOf(target)
@@ -400,4 +420,18 @@ func (p *Parser) parseBreakStmt() ast.NodeIndex {
 func (p *Parser) parseContinueStmt() ast.NodeIndex {
 	kwTok := p.expectKeyword(enums.Keywords.Continue)
 	return p.tree.NewNode(enums.NodeKinds.ContinueStmt, kwTok, tokenSpan(kwTok))
+}
+
+// parseDeleteStmt parses `delete p` (see LANGUAGE.md's "Pointers" section) -
+// its own dedicated statement form, the same way break/continue/return are,
+// rather than a call-expression-shaped builtin: delete returns nothing and is
+// purely side-effecting, unlike make/append/len.
+func (p *Parser) parseDeleteStmt() ast.NodeIndex {
+	kwTok := p.expectKeyword(enums.Keywords.Delete)
+	expr := p.parseExpr(precLowest)
+	span := ast.Span{
+		Start: kwTok.Start,
+		End:   p.tree.SpanOf(expr).End,
+	}
+	return p.tree.NewNode(enums.NodeKinds.DeleteStmt, kwTok, span, expr)
 }

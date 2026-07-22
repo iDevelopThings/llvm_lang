@@ -42,18 +42,23 @@ type Span struct {
 //     (=, +=, -=, *=, /=, ++, --)
 //   - ShortVarDecl: the `:=` token
 //   - VarDecl, FuncDecl, StructDecl, IfStmt, ForStmt, ReturnStmt, BreakStmt,
-//     ContinueStmt, FuncType, ConstructorDecl, FuncLit: the leading keyword
-//     token (FuncType's is the `func` that introduces a function-type
-//     expression, e.g. `func(int) int`, see LANGUAGE.md's Types section;
-//     FuncLit's is the `func` that introduces a function-literal expression,
-//     e.g. `func(x int) int { return x }`, see LANGUAGE.md's "Lambdas"
-//     section - the same keyword, disambiguated from FuncType purely by
-//     whether a `{` body follows the parameter list/return type, exactly the
-//     same way FuncDecl's own body already disambiguates it from a bare
-//     declaration)
+//     ContinueStmt, FuncType, ConstructorDecl, FuncLit, NewExpr, DeleteStmt:
+//     the leading keyword token (FuncType's is the `func` that introduces a
+//     function-type expression, e.g. `func(int) int`, see LANGUAGE.md's Types
+//     section; FuncLit's is the `func` that introduces a function-literal
+//     expression, e.g. `func(x int) int { return x }`, see LANGUAGE.md's
+//     "Lambdas" section - the same keyword, disambiguated from FuncType
+//     purely by whether a `{` body follows the parameter list/return type,
+//     exactly the same way FuncDecl's own body already disambiguates it from
+//     a bare declaration; NewExpr's is the `new` keyword, DeleteStmt's the
+//     `delete` keyword - see LANGUAGE.md's "Pointers" section)
+//   - `&`/`*` address-of/dereference are ordinary UnaryExpr nodes - Tok is
+//     the operator token exactly like unary `-`/`!`, distinguished purely by
+//     Tok.Lexeme, no new node kind needed for either (see LANGUAGE.md's
+//     "Pointers" section)
 //   - everything else (File, Block, ParamList, Param, Field, CallExpr,
-//     ParenExpr, IndexExpr, ArrayType, CompositeLit, KeyValueExpr, ExprStmt,
-//     ParamTypeList): unused, left as the zero Token
+//     ParenExpr, IndexExpr, ArrayType, PointerType, CompositeLit,
+//     KeyValueExpr, ExprStmt, ParamTypeList): unused, left as the zero Token
 //
 // Children shapes, by kind:
 //   - CallExpr: [callee, arg0, arg1, ...] - variable arity, callee always first
@@ -134,6 +139,19 @@ type Span struct {
 //     "Lambdas" section: a lambda closes over its enclosing scope by
 //     reference instead, which is a sema/codegen-level concern, not a
 //     grammar one - the AST shape itself carries no capture information).
+//   - PointerType: [elem] - fixed arity, a type-position node for `*T` (see
+//     LANGUAGE.md's "Pointers" section) - the pointer counterpart to
+//     ArrayType's own [size, elem] shape, minus the size slot a pointer type
+//     has no use for.
+//   - NewExpr: [inner] - fixed arity; inner is an ordinary, already-legal
+//     constructor-call (`T(args)`) or composite-literal (`T{...}`) expression
+//   - `new` wraps one of those two unchanged, it doesn't introduce a new
+//     inner grammar of its own (see LANGUAGE.md's "Pointers" section).
+//   - DeleteStmt: [expr] - fixed arity; expr is the pointer-typed expression
+//     being freed (see LANGUAGE.md's "Pointers" section) - a statement, not a
+//     value-producing call, the same way BreakStmt/ContinueStmt/ReturnStmt
+//     are their own dedicated statement forms rather than call-shaped
+//     builtins.
 //   - a fixed-arity kind may reserve a positional slot as InvalidNode for an
 //     omitted optional child (e.g. VarDecl's type annotation); a
 //     variable-arity kind (Block's statements, CallExpr's arguments) is

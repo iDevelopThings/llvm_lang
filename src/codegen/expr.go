@@ -72,10 +72,19 @@ func (g *Generator) genAddr(n ast.NodeIndex) llvm.Value {
 
 	case enums.NodeKinds.MemberExpr:
 		objNode := g.tree.Child(n, 0)
-		base := g.genAddr(objNode)
-		layout := g.structLayouts[g.info.Types[objNode].Struct]
+		base, structInfo := g.genReceiverAddr(objNode)
+		layout := g.structLayouts[structInfo]
 		idx := layout.fieldIndex[g.info.Refs[n]]
 		return g.builder.CreateStructGEP(layout.llvmType, base, idx, "")
+
+	case enums.NodeKinds.UnaryExpr:
+		// `*p` as an lvalue (see LANGUAGE.md's "Pointers" section, and
+		// sema's checkLValue - the only UnaryExpr shape ever reachable
+		// here, since `&x` is never itself assignable/addressable) - the
+		// address a dereference reads/writes through *is* p's own value,
+		// not p's own address, so this evaluates p as a plain rvalue
+		// (genExpr), not genAddr(operand).
+		return g.genExpr(g.tree.Child(n, 0))
 
 	case enums.NodeKinds.IndexExpr:
 		targetNode := g.tree.Child(n, 0)
@@ -121,6 +130,22 @@ func (g *Generator) genAddr(n ast.NodeIndex) llvm.Value {
 		g.builder.CreateStore(v, tmp)
 		return tmp
 	}
+}
+
+// genReceiverAddr computes the address of a struct-value expression used as
+// a MemberExpr's object (a plain field access or a method-call receiver) -
+// or, when objNode is itself pointer-typed (`*T`), auto-derefs it (see
+// LANGUAGE.md's "Pointers" section: `p.field`/`p.method(...)` on a `*T`
+// behaves exactly like `(*p).field`/`(*p).method(...)`) by evaluating the
+// pointer's own value directly, rather than the address of whatever
+// variable happens to be holding it. Shared by genAddr's MemberExpr case and
+// genMethodCall - the two call sites that need a struct receiver's address.
+func (g *Generator) genReceiverAddr(objNode ast.NodeIndex) (llvm.Value, *sema.StructInfo) {
+	objType := g.info.Types[objNode]
+	if objType.Kind == sema.TypePointer {
+		return g.genExpr(objNode), objType.Elem.Struct
+	}
+	return g.genAddr(objNode), objType.Struct
 }
 
 // genLoad computes n's address (genAddr) and loads its value - the common
@@ -431,10 +456,20 @@ func (g *Generator) genExpr(n ast.NodeIndex) llvm.Value {
 		// A bare, uncalled reference to a declared free function (`add`,
 		// not `add(...)`) has no storage location to load from - genAddr
 		// would panic on it (see its own Ident case) - so it's built
-		// directly as a fat-pointer value instead. Every other Ident (a
-		// var/param) still goes through the ordinary addr+load path.
-		if sym := g.info.Refs[n]; sym.Kind == sema.SymFunc {
+		// directly as a fat-pointer value instead. `nil` (see LANGUAGE.md's
+		// "Pointers" section) is the same story - a predeclared value with
+		// no storage of its own (see sema/scope.go's universeScope) - and
+		// lowers to a plain null pointer constant regardless of which
+		// concrete *T sema resolved it to (genAddr's fallback would
+		// otherwise try to spill it into a temp the same as any other
+		// rvalue, which would still work but is needless indirection for
+		// what's always just a constant). Every other Ident (a var/param)
+		// still goes through the ordinary addr+load path.
+		switch sym := g.info.Refs[n]; sym.Kind {
+		case sema.SymFunc:
 			return g.genFuncValue(sym)
+		case sema.SymBuiltinValue:
+			return llvm.ConstNull(g.ptrTy)
 		}
 		return g.genLoad(n)
 	case enums.NodeKinds.MemberExpr, enums.NodeKinds.IndexExpr, enums.NodeKinds.ThisExpr:
@@ -460,6 +495,8 @@ func (g *Generator) genExpr(n ast.NodeIndex) llvm.Value {
 		return g.builder.CreateLoad(t, tmp, "")
 	case enums.NodeKinds.FuncLit:
 		return g.genFuncLit(n)
+	case enums.NodeKinds.NewExpr:
+		return g.genNewExpr(n)
 	default:
 		panic("codegen: cannot generate an expression of kind " + g.tree.Nodes[n].Kind.String())
 	}
@@ -525,8 +562,21 @@ func (g *Generator) genBoolLit(n ast.NodeIndex) llvm.Value {
 	return g.constBool(g.tree.Nodes[n].Tok.Keyword == enums.Keywords.True)
 }
 
+// genUnaryExpr lowers `-`/`!`/`&`/`*`. `&`/`*` (see LANGUAGE.md's "Pointers"
+// section) are handled before the operand is evaluated as a plain rvalue:
+// `&x` needs x's *address*, not its value (genAddr - the same address a
+// plain assignment to x would compute), and `*p` needs p's value (the
+// pointer itself) loaded through, not p's own address.
 func (g *Generator) genUnaryExpr(n ast.NodeIndex) llvm.Value {
 	operand := g.tree.Child(n, 0)
+	switch g.tree.Text(n) {
+	case "&":
+		return g.genAddr(operand)
+	case "*":
+		ptr := g.genExpr(operand)
+		return g.builder.CreateLoad(g.llvmType(g.info.Types[n]), ptr, "")
+	}
+
 	v := g.genExpr(operand)
 	switch g.tree.Text(n) {
 	case "-":
@@ -922,17 +972,66 @@ func (g *Generator) isConstructorCall(calleeNode ast.NodeIndex) bool {
 // returned as real LLVM aggregate types" section).
 func (g *Generator) genConstructorCall(calleeNode ast.NodeIndex, argNodes []ast.NodeIndex) llvm.Value {
 	sym := g.info.Refs[calleeNode]
-	entry := g.ctors[sym]
 	layout := g.structLayouts[sym.StructInfo]
 
 	dst := g.createEntryAlloca(layout.llvmType, "ctor")
+	g.genConstructorCallInto(dst, calleeNode, argNodes)
+	return g.builder.CreateLoad(layout.llvmType, dst, "")
+}
+
+// genConstructorCallInto runs calleeNode's selected constructor (see
+// isConstructorCall/genConstructorCall) against an already-addressed
+// destination, rather than always allocating its own fresh stack slot -
+// factored out of genConstructorCall so genNewExpr (see LANGUAGE.md's
+// "Pointers" section) can run the exact same constructor-call lowering
+// against a real malloc'd address instead, without duplicating the
+// this-pointer-as-hidden-first-argument convention both share (see
+// AGENTS.md's "Method receivers" section - a constructor call and a method
+// call use the identical calling convention).
+func (g *Generator) genConstructorCallInto(dst llvm.Value, calleeNode ast.NodeIndex, argNodes []ast.NodeIndex) {
+	sym := g.info.Refs[calleeNode]
+	entry := g.ctors[sym]
+
 	args := make([]llvm.Value, len(argNodes)+1)
 	args[0] = dst
 	for i, a := range argNodes {
 		args[i+1] = g.genExpr(a)
 	}
 	g.builder.CreateCall(entry.fnType, entry.fn, args, "")
-	return g.builder.CreateLoad(layout.llvmType, dst, "")
+}
+
+// genNewExpr lowers `new T(args)`/`new T{...}` (see LANGUAGE.md's "Pointers"
+// section): mallocs exactly sizeof(T) bytes on a real, genuinely freeable
+// heap - a separate heap from the bump-allocator arena string concatenation/
+// dynamic arrays use (see runtime.go's setupRuntime and BLOCKERS.md) - then
+// initializes it in place, reusing the exact same constructor-call
+// (genConstructorCallInto) or composite-literal (genCompositeLitInto)
+// lowering an ordinary stack- or field-allocated `T(args)`/`T{...}` already
+// uses; sema's checkNewExpr already restricted inner to exactly those two
+// shapes, so this needs no further validation of its own. Returns the
+// malloc'd pointer directly, never loading through it - unlike
+// genConstructorCall/a plain CompositeLit's own genExpr case (which both
+// return the constructed value itself, since this language passes structs by
+// value everywhere else - see AGENTS.md's codegen section), `new`'s entire
+// point is to hand back a pointer to a heap allocation that outlives the
+// current stack frame.
+func (g *Generator) genNewExpr(n ast.NodeIndex) llvm.Value {
+	inner := g.tree.Child(n, 0)
+	elemType := *g.info.Types[n].Elem
+	llt := g.llvmType(elemType)
+	size := llvm.SizeOf(llt)
+	ptr := g.builder.CreateCall(g.mallocType, g.mallocFn, []llvm.Value{size}, "")
+
+	switch g.tree.Nodes[inner].Kind {
+	case enums.NodeKinds.CompositeLit:
+		g.genCompositeLitInto(ptr, inner)
+	case enums.NodeKinds.CallExpr:
+		children := g.tree.Children(inner)
+		g.genConstructorCallInto(ptr, children[0], children[1:])
+	default:
+		panic("codegen: new wrapping an unsupported expression kind " + g.tree.Nodes[inner].Kind.String())
+	}
+	return ptr
 }
 
 // isConversionCall mirrors sema's own recognition of `T(x)` as an explicit
@@ -1005,14 +1104,18 @@ func (g *Generator) genFuncCall(calleeNode ast.NodeIndex, argNodes []ast.NodeInd
 
 // genMethodCall lowers `p.move(...)`: the receiver's address (not its
 // loaded value - see AGENTS.md, every method is implicitly by-reference)
-// becomes the call's hidden first argument.
+// becomes the call's hidden first argument. genReceiverAddr auto-derefs a
+// pointer-typed receiver (`ptr.move(...)` where ptr is `*Point` - see
+// LANGUAGE.md's "Pointers" section), so this needs no awareness of the
+// distinction itself.
 func (g *Generator) genMethodCall(calleeNode ast.NodeIndex, argNodes []ast.NodeIndex) llvm.Value {
 	objNode := g.tree.Child(calleeNode, 0)
 	sym := g.info.Refs[calleeNode]
 	entry := g.funcs[sym]
 
+	receiverAddr, _ := g.genReceiverAddr(objNode)
 	args := make([]llvm.Value, len(argNodes)+1)
-	args[0] = g.genAddr(objNode)
+	args[0] = receiverAddr
 	for i, a := range argNodes {
 		args[i+1] = g.genExpr(a)
 	}

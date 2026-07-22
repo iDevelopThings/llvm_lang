@@ -85,6 +85,14 @@ func (g *Generator) llvmType(t sema.Type) llvm.Type {
 		return llvm.ArrayType(g.llvmType(*t.Elem), int(t.Size))
 	case sema.TypeFunc:
 		return g.funcValTy
+	case sema.TypePointer:
+		// A pointer's own pointee type never matters to its LLVM
+		// representation - g.ptrTy is already the single opaque `ptr` type
+		// this package uses everywhere a pointer is needed (string/dynamic-
+		// array/func-value fields, method receivers, ...), so a real `*T`
+		// value (see LANGUAGE.md's "Pointers" section) reuses it directly
+		// rather than needing its own distinct LLVM pointer-to-X type.
+		return g.ptrTy
 	default:
 		panic(fmt.Sprintf("codegen: type %s reached llvmType - only valid, checked types are supported", t))
 	}

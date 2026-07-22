@@ -46,6 +46,9 @@ func (g *Generator) genStmt(n ast.NodeIndex) bool {
 	case enums.NodeKinds.ExprStmt:
 		g.genExpr(g.tree.Child(n, 0))
 		return false
+	case enums.NodeKinds.DeleteStmt:
+		g.genDeleteStmt(n)
+		return false
 	case enums.NodeKinds.ReturnStmt:
 		return g.genReturnStmt(n)
 	case enums.NodeKinds.BreakStmt:
@@ -108,6 +111,15 @@ func (g *Generator) storeValueInto(addr llvm.Value, valueNode ast.NodeIndex) {
 		return
 	}
 	g.builder.CreateStore(g.genExpr(valueNode), addr)
+}
+
+// genDeleteStmt lowers `delete p` (see LANGUAGE.md's "Pointers" section): a
+// direct call to libc's `free` against p's own pointer value - the real,
+// separate heap `new` mallocs from (runtime.go's setupRuntime), never the
+// bump-allocator arena, which has no per-allocation free at all.
+func (g *Generator) genDeleteStmt(n ast.NodeIndex) {
+	ptr := g.genExpr(g.tree.Child(n, 0))
+	g.builder.CreateCall(g.freeType, g.freeFn, []llvm.Value{ptr}, "")
 }
 
 // genAssignStmt lowers `=` and the compound forms `+= -= *= /=`. `+=` also

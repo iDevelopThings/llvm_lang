@@ -388,3 +388,99 @@ thunk" subsection) for the exact mechanism (`genFuncThunk`/`genFuncLit`/
 for the regression test that exercises a single func-typed variable holding
 each kind of value in turn, calling it indirectly both times - the test that
 would have caught this exact class of bug had the fix been wrong or missing.
+
+---
+
+## 2026-07-22 - Pointers: `new`/`delete` get a real, separate heap from the arena
+
+**Decision:** `new T(args)`/`new T{...}` mallocs its own individually-sized
+block directly (a plain libc `malloc` call, not routed through
+`llvm_lang.arena_alloc`), and `delete p` frees exactly that block via a real
+libc `free` call. The bump-allocator arena (string concatenation, dynamic
+arrays) is completely untouched by either - two genuinely separate heaps,
+not one heap with two access paths into it.
+
+**Why:** the arena's own design (see the arena entry above) is a bump
+allocator over 64KiB chunks with no notion of "give this one sub-allocation
+back" at all - freeing a single `new`'d value out of a chunk other, still-
+live allocations share would either be a no-op (defeating the point of
+`delete`) or require retrofitting real free-list bookkeeping onto a
+primitive deliberately kept as simple as possible for its own use case
+(string concatenation and dynamic arrays never need to free a single
+element early - they leak for the process's lifetime by design, an accepted
+trade-off documented in the arena's own entry). Reusing a bare
+`malloc`/`free` pair instead needs none of that: it's the direct, obviously-
+correct mapping from "the user asked for exactly this much heap memory
+back" to the real system call underneath, has clean, unambiguous semantics
+per-allocation, and doesn't touch or complicate the arena's own bump-pointer
+invariants at all. The two heaps mixing would be the actual bug to avoid,
+not a caveat to work around.
+
+**Status:** shipped. See `CODEGEN.md`'s "Pointers" section for the mechanism
+(`genNewExpr`/`genDeleteStmt`) and the arena section for why the arena itself
+still has no per-allocation free. Destructors/RAII (running a struct's own
+cleanup logic automatically at `delete` time) are explicitly out of scope
+for this round - `delete` only frees raw memory; there is no such concept
+in this language yet, and adding one is a separate, larger design question
+left for later.
+
+---
+
+## 2026-07-22 - Pointers: `nil` scoped to pointer types only, not a general zero value
+
+**Decision:** `nil` is a predeclared, untyped placeholder value usable only
+where a pointer type is expected (a `*T` variable's initializer, either side
+of `==`/`!=` against a pointer) - it is not a general "zero value" concept
+usable against a struct, array, numeric, string, or bool type the way, say,
+a Go `interface{}` holding `nil` or a `nil` map/slice would suggest.
+
+**Why:** this language has no interface/`any` type and no reference-typed
+non-pointer value (a struct/array/string is always a real concrete value,
+never something that could itself be absent) - the *only* thing that can
+meaningfully have "no value" is a pointer, so there was no reason to design
+a broader zero-value concept just to give `nil` a home. Modeling it as its
+own narrow untyped-constant kind (`sema.TypeUntypedNil`, deliberately kept
+out of the existing `IsUntyped()`/`IsNumeric()` predicates every numeric
+untyped-constant code path already assumes "untyped" means "numeric")
+reused this language's existing untyped-constant deferral machinery
+(`checkAssignable`/a dedicated `checkNilEquality`) almost entirely as-is,
+rather than inventing a second, parallel mechanism. Unlike an untyped
+numeric constant, `nil` was deliberately given **no default type** - Go
+itself allows `var x interface{} = nil` with no further context because
+`interface{}` is nil's own natural home; this language has nothing
+equivalent, so a context that never pins down a concrete `*T` (`p := nil`)
+is a real error rather than a silently-accepted default to some arbitrary
+pointer type.
+
+**Status:** shipped. See `LANGUAGE.md`'s "Pointers" section for the exact
+rules and `sema/pointer_test.go` for the coverage (including the rejected
+cases: bare `:= nil`, `nil == nil`, `nil` against a non-pointer).
+
+---
+
+## 2026-07-22 - Pointers: auto-deref scoped to member access only, not indexing
+
+**Decision:** `p.field`/`p.method(...)` on a `*T` auto-dereferences (behaves
+exactly like `(*p).field`/`(*p).method(...)`), matching Go's own automatic
+pointer-dereference rule for selector expressions - but indexing does not:
+`p[0]` on a `*[N]T` is rejected; `(*p)[0]` is required.
+
+**Why:** Go itself only auto-derefs for selector expressions (`.field`/
+method calls), never for indexing (`p[0]` on a `*[N]T` is also a compile
+error in real Go) - this isn't a narrower carve-out invented for this
+project, it's matching the same precedent exactly. Member access auto-deref
+pulls its weight because a pointer-to-struct is the overwhelmingly common
+shape once `new` exists at all (a heap-allocated struct is *always* accessed
+through a pointer - forcing `(*p).field` at every call site would make `new`
+noticeably more awkward to use than it needs to be for no real benefit).
+Indexing through a pointer-to-array is a rarer shape by comparison, and Go's
+own choice not to special-case it suggests the inconsistency-avoidance isn't
+worth it there either - extending auto-deref to indexing was simply out of
+scope rather than rejected on its own merits; it can be added later if a
+real need for `[N]T` behind a pointer turns out to be common enough to
+justify it.
+
+**Status:** shipped, scoped as described above. See `LANGUAGE.md`'s
+"Pointers" section and `sema/pointer_test.go`'s
+`TestNewCompositeLitProducesPointer` for the explicit `(*a)[0]` case this
+implies.

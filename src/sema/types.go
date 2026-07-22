@@ -32,6 +32,14 @@ import (
 // functions" section for the representation and what's (and isn't) covered
 // this round - bound method values are explicitly out of scope for now.
 //
+// TypePointer is a real pointer type (`*T` - see LANGUAGE.md's "Pointers"
+// section): `&x` (address-of an addressable expression), `new T(...)`/
+// `new T{...}` (a heap allocation), and a `*T`-typed var/param/field all
+// produce one. Reuses Type's own Elem field (the pointee type) exactly like
+// TypeArray already does for its element type - two pointer types are equal
+// iff their Elem types are (see Equal), the same structural-equality
+// pattern TypeArray/TypeFunc already use.
+//
 // TypeUntypedInt/TypeUntypedFloat are Go's own "untyped constant" model,
 // narrowed to numeric literals only - bool/string literals always have
 // exactly one representation, so they never need this. A NumberLit starts
@@ -43,6 +51,14 @@ import (
 // context - Go's own untyped-constant defaulting rule (untyped int -> i32,
 // untyped float -> f64). See resolveNumericOperands/checkAssignable/
 // retypeUntyped in typecheck.go and AGENTS.md's Types section.
+//
+// TypeUntypedNil is the predeclared `nil` identifier's own starting type
+// (see LANGUAGE.md's "Pointers" section), modeled directly on that same
+// untyped-constant precedent but deliberately scoped to pointer types only -
+// this language has no general "zero value"/nil concept yet, so `nil` isn't
+// folded into IsUntyped/IsNumeric (which every other numeric-untyped code
+// path here assumes means "numeric") - it's handled by its own small set of
+// call sites instead (checkAssignable, checkEqualityOperands, defaultIfUntyped).
 type TypeKind int
 
 const (
@@ -62,9 +78,11 @@ const (
 	TypeStruct
 	TypeArray
 	TypeFunc
+	TypePointer
 
 	TypeUntypedInt
 	TypeUntypedFloat
+	TypeUntypedNil
 )
 
 // TypeInt is a synonym for TypeI32, not a distinct TypeKind value: "int" in
@@ -100,6 +118,11 @@ type Type struct {
 	// Dynamic distinguishes `[]T` (parsed, but semantically rejected for
 	// now - see AGENTS.md's Arrays section) from `[N]T`; Size is only
 	// meaningful when Dynamic is false.
+	//
+	// Elem alone (Size/Dynamic unused) is also set when Kind == TypePointer -
+	// a pointer's own pointee type (see LANGUAGE.md's "Pointers" section) -
+	// reusing the same field TypeArray already has for exactly the same
+	// reason: both are simple "wraps one other Type" cases.
 	Elem    *Type
 	Size    int64
 	Dynamic bool
@@ -132,6 +155,7 @@ var (
 
 	untypedIntType   = Type{Kind: TypeUntypedInt}
 	untypedFloatType = Type{Kind: TypeUntypedFloat}
+	untypedNilType   = Type{Kind: TypeUntypedNil}
 )
 
 // IsInvalid reports whether t is the TypeInvalid error-recovery sentinel.
@@ -225,6 +249,8 @@ func (t Type) Equal(u Type) bool {
 			return false
 		}
 		return t.Elem.Equal(*u.Elem)
+	case TypePointer:
+		return t.Elem.Equal(*u.Elem)
 	case TypeFunc:
 		if len(t.Params) != len(u.Params) {
 			return false
@@ -278,6 +304,8 @@ func (t Type) String() string {
 			return "[]" + t.Elem.String()
 		}
 		return fmt.Sprintf("[%d]%s", t.Size, t.Elem.String())
+	case TypePointer:
+		return "*" + t.Elem.String()
 	case TypeFunc:
 		parts := make([]string, len(t.Params))
 		for i, p := range t.Params {
@@ -292,6 +320,8 @@ func (t Type) String() string {
 		return "untyped int"
 	case TypeUntypedFloat:
 		return "untyped float"
+	case TypeUntypedNil:
+		return "nil"
 	default:
 		return "<unknown type>"
 	}

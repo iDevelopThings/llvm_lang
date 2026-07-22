@@ -45,3 +45,6 @@ values:
   - name: FuncType
   - name: ParamTypeList
   - name: FuncLit
+  - name: PointerType
+  - name: NewExpr
+  - name: DeleteStmt

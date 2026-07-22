@@ -171,6 +171,14 @@ const (
 	// resolved to" idea an ordinary method call's Info.Refs entry already
 	// captures.
 	SymConstructor
+	// SymBuiltinValue names a predeclared value with no declaration of its
+	// own - currently only `nil` (see universeScope and LANGUAGE.md's
+	// "Pointers" section) - a value, deliberately distinct from
+	// SymBuiltinType (a type name) and SymFunc (print/make/append/len are
+	// callable; nil never is): it needs neither IsType() nor any call-site
+	// signature handling, just a Type of its own (typeOfSymbolValue,
+	// typecheck.go).
+	SymBuiltinValue
 )
 
 func (k SymbolKind) String() string {
@@ -193,6 +201,8 @@ func (k SymbolKind) String() string {
 		return "package"
 	case SymConstructor:
 		return "constructor"
+	case SymBuiltinValue:
+		return "builtin value"
 	default:
 		return "symbol"
 	}
@@ -374,5 +384,17 @@ func universeScope() *Scope {
 			Scope: u,
 		})
 	}
+	// nil is a predeclared value (see LANGUAGE.md's "Pointers" section) -
+	// deliberately scoped to pointer types only this round, not a general
+	// zero-value concept: it starts life as the untyped TypeUntypedNil (same
+	// deferred-resolution precedent as an untyped numeric literal - see
+	// sema/types.go's own doc comment) and only adapts to a concrete *T the
+	// moment it's assigned/compared against one (checkAssignable/
+	// checkEqualityOperands, typecheck.go).
+	u.Define(&Symbol{
+		Name:  "nil",
+		Kind:  SymBuiltinValue,
+		Scope: u,
+	})
 	return u
 }

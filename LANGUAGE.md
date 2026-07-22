@@ -196,14 +196,131 @@ A bare, uncalled struct type name (not followed by `(` or `{`) still means exact
 
 **Export/visibility.** A constructor doesn't get its own independent export bit - it isn't individually named beyond the `constructor` keyword. A struct's constructors are usable cross-package if and only if the struct type itself is exported, exactly the same rule its fields and methods already follow (see "Imports" below).
 
+## Pointers
+
+A real pointer type `*T` - one level of indirection to any other type
+(a primitive, a struct, an array, or another pointer - `**T` is legal). Two
+operators produce/consume one:
+
+- **`&x`** (address-of) - `x` must be *addressable*: a plain variable/
+  parameter, a struct field (`&p.x`), an array element (`&a[0]`), or another
+  pointer's own dereference (`&*p`). It is **not** legal on a bare value that
+  has no real storage of its own - a literal (`&5`), a function name (`&f` -
+  see "First-class functions" above: `f` alone already means something
+  different there), or any other expression that isn't one of the shapes
+  above.
+- **`*p`** (dereference) - `p` must itself be a pointer; `*p` reads (or, as
+  an assignment target, writes) the value it points to. `*p = v` is a legal
+  lvalue, exactly like `.field`/`[index]` (see "Assignment" below).
+
+```go
+x := 5
+p := &x     // p is *int
+*p = 10     // x is now 10
+y := *p     // y is 10
+```
+
+**`new T(args)` / `new T{...}`** heap-allocates a `T` and returns a `*T` -
+the one way to obtain a pointer that outlives the current function's own
+stack frame. Both existing construction forms work unchanged, just wrapped:
+a struct's own constructor call (`new Point(1, 2)`, requires at least one
+declared `constructor` - see "Constructors" above) or a composite literal
+(`new Point{1, 2}`, `new [3]int{1, 2, 3}`) - `new` itself only decides
+*where* the value is built (a real heap allocation instead of a stack slot
+or inline field), not *how*. Wrapping anything else (`new someFunc()`,
+`new i64(5)`) is rejected - `new` is not a general-purpose allocator syntax,
+only a heap-allocating spelling of construction that already exists.
+
+```go
+struct Point {
+    x int
+    y int
+
+    constructor(px int, py int) {
+        this.x = px
+        this.y = py
+    }
+}
+
+p := new Point(1, 2)     // *Point, via the constructor
+q := new Point{3, 4}     // *Point, via a composite literal
+```
+
+**`delete p`** frees a heap allocation obtained from `new`, calling straight
+through to libc's real `free` - a genuinely separate heap from the bump-
+allocator arena string concatenation/dynamic arrays use (see `CODEGEN.md`),
+so `delete`ing a `new`'d pointer is a real, individually-freeable
+deallocation, not a no-op against a never-freed arena. `p` must be a real
+pointer type; `delete` itself produces no value, matching `break`/`continue`
+being their own dedicated statement forms rather than call-shaped builtins.
+There is no automatic memory management here at all - deleting a value
+that's still reachable through another pointer, or using a pointer again
+after deleting it, is a real use-after-free/double-free, exactly as
+unchecked as it would be in C. **Destructors/RAII are explicitly out of
+scope** for this round - `delete` only frees raw memory, it never runs any
+struct-specific cleanup logic (there is no such concept in this language
+yet).
+
+```go
+p := new Point(1, 2)
+delete p
+```
+
+**Auto-deref for member access.** `p.field`/`p.method(...)` on a `*T` works
+exactly like `(*p).field`/`(*p).method(...)` - matching Go's own automatic
+pointer-dereference rule for selector expressions, so a heap-allocated value
+reads and calls just like a plain struct value would. This is scoped to
+member access only - **indexing does not auto-deref**: `(*p)[0]`, not
+`p[0]`, for a `*[N]T`.
+
+```go
+p := new Point(1, 2)
+print(p.x)        // 1 - reads exactly like (*p).x
+p.x = 10          // writes exactly like (*p).x = 10
+
+func (Point) move(dx int, dy int) {
+    this.x = this.x + dx
+}
+p.move(5, 0)      // the receiver is the same heap Point - mutates in place
+```
+
+**`nil`** is a predeclared value naming a null pointer - deliberately scoped
+to pointer types only, not a general zero-value/`interface{}` concept this
+language doesn't have. Like a numeric literal, it starts out *untyped* and
+only becomes a concrete `*T` once a pointer-typed context pins one down (a
+declared `*T` variable, or the other side of an `==`/`!=` comparison); unlike
+an untyped numeric constant, **it has no default type to fall back to** - a
+context that never provides one (`p := nil`, `print(nil)`) is a compile
+error, not a silent default.
+
+```go
+var p *Point = nil   // fine - nil adapts to *Point
+if p == nil {
+    p = new Point(1, 2)
+}
+
+q := nil             // error: cannot use nil without a pointer type context
+```
+
+`*T` is an ordinary type everywhere else a type can appear - a `var`
+declaration, a function parameter/return type, a struct field, an array
+element type. Two pointer types are equal (for `==`/`!=`, or any assignment/
+argument check) iff their pointee types are - `*Point` and `*int` never mix,
+same "no implicit conversion" rule every other type in this language follows
+(see "Types" below).
+
 ## Assignment
 
-`=` assigns to any lvalue: an identifier, `.field`, or `[index]`. Compound assignment and increment/decrement are supported: `+=  -=  *=  /=  ++  --`.
+`=` assigns to any lvalue: an identifier, `.field`, `[index]`, or a
+dereference `*p`. Compound assignment and increment/decrement are supported:
+`+=  -=  *=  /=  ++  --` (none of these apply to a pointer itself - there's
+no pointer arithmetic in this language).
 
 ```go
 a = 5
 p.x = 10
 arr[0] = 1
+*ptr = 20
 x += 1
 x++
 ```
@@ -246,8 +363,9 @@ Primitive types: signed integers `i8`, `i16`, `i32`, `i64`; floats `f32`,
 synonym for `i32` (see `sema.TypeInt`'s doc comment: both spellings produce
 the literal same `Type` value, so `var a int = 1` and `var b i32 = a` need no
 conversion between them at all - see `DECISIONS.md` for why this width was
-chosen). A named struct type and an array type (`[N]T` fixed-size, `[]T`
-dynamic) round out the type system - see their own sections above.
+chosen). A named struct type, an array type (`[N]T` fixed-size, `[]T`
+dynamic), and a pointer type (`*T` - see "Pointers" above) round out the type
+system - see their own sections above.
 
 There is still no *implicit* conversion between two named types anywhere:
 every assignment, call argument, return value, and operator operand must
@@ -377,12 +495,20 @@ lossy: `i32(5.5)` (float -> int) truncates deliberately, same as Go's own
 - `%` and the bitwise `& | ^` are `integer + integer -> integer` only - any
   int width, but never float, same restriction Go itself has.
 - `== !=` require both operands to already be the same type (numeric of any
-  matching width/kind, `string`, `bool`, or the exact same struct/array type
-  - `Type.Equal`, `sema/types.go`) and produce `bool`. Two structs are equal
-  iff every corresponding field is equal, recursively (a field can itself be
-  a struct or array); two arrays are equal iff every corresponding element is
-  equal, recursively - the same rule Go itself uses. Comparing two
-  *different* struct/array types (or a struct against an array) remains a
+  matching width/kind, `string`, `bool`, the exact same struct/array type, or
+  the exact same pointer type - `Type.Equal`, `sema/types.go`) and produce
+  `bool`. Two structs are equal iff every corresponding field is equal,
+  recursively (a field can itself be a struct or array); two arrays are equal
+  iff every corresponding element is equal, recursively - the same rule Go
+  itself uses. Two pointers compare equal iff they hold the exact same
+  address (identity, not pointee-value comparison - dereference first,
+  `*a == *b`, to compare what they point to). `nil` (see "Pointers" above)
+  is a special case on either side of `==`/`!=` against a pointer - it's
+  never itself a pointer *value*, only ever an untyped placeholder that
+  adapts to whichever concrete `*T` the other operand is; comparing `nil`
+  against `nil` directly is rejected (there's no pointer type either side
+  could adapt to). Comparing two *different* struct/array/pointer types (or
+  a struct against an array, or a non-pointer against `nil`) remains a
   compile error, same as every other operator here - no implicit conversion
   anywhere in this language. A float comparison lowers to `FCmp` with the
   *ordered* `OEQ`/*unordered* `UNE` predicates (`==`/`!=` respectively) -

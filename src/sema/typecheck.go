@@ -570,6 +570,15 @@ func (c *checker) checkShortVarDeclNode(decl ast.NodeIndex) Type {
 // Retypes exprNode's whole subtree (retypeUntyped) to match, since nothing
 // else will ever revisit it. A non-untyped t passes through unchanged.
 func (c *checker) defaultIfUntyped(exprNode ast.NodeIndex, t Type) Type {
+	if t.Kind == TypeUntypedNil {
+		// Unlike an untyped numeric constant, nil (see LANGUAGE.md's
+		// "Pointers" section) has no default type to fall back to - there's
+		// no general zero value in this language, only a pointer-typed one -
+		// so a context that never pins down a concrete *T (a type-less
+		// `:= nil`, or `print(nil)`) is a real error, not a silent default.
+		c.errorAt(exprNode, "cannot use nil without a pointer type context")
+		return invalidType
+	}
 	if !t.IsUntyped() {
 		return t
 	}
@@ -639,6 +648,20 @@ func (c *checker) checkAssignable(at ast.NodeIndex, want, got Type, context stri
 	if want.IsInvalid() || got.IsInvalid() {
 		return true
 	}
+	if got.Kind == TypeUntypedNil {
+		// nil (see LANGUAGE.md's "Pointers" section) adapts to any pointer
+		// context, exactly like an untyped numeric constant adapts to any
+		// numeric one - deliberately narrower, since this language's nil
+		// isn't a general zero value: anything else (want not itself a
+		// pointer) is rejected outright, not "would lose information" the
+		// way an untyped-float-into-int mismatch is worded below.
+		if want.Kind != TypePointer {
+			c.errorAt(at, "cannot use nil as %s in %s", want, context)
+			return false
+		}
+		c.retypeUntyped(at, want)
+		return true
+	}
 	if got.IsUntyped() {
 		if !want.IsNumeric() {
 			c.errorAt(at, "cannot use %s as %s in %s", got, want, context)
@@ -701,10 +724,23 @@ func (c *checker) computeTypeFromNode(n ast.NodeIndex) Type {
 		return c.typeFromSymbol(sym)
 	case enums.NodeKinds.ArrayType:
 		return c.arrayTypeFromNode(n)
+	case enums.NodeKinds.PointerType:
+		return c.pointerTypeFromNode(n)
 	case enums.NodeKinds.FuncType:
 		return c.funcTypeFromNode(n)
 	default:
 		return invalidType
+	}
+}
+
+// pointerTypeFromNode converts a PointerType type-position node (`*T` - see
+// LANGUAGE.md's "Pointers" section) into a Type - the pointer counterpart to
+// arrayTypeFromNode, minus the size handling a pointer type has no use for.
+func (c *checker) pointerTypeFromNode(n ast.NodeIndex) Type {
+	elem := c.typeFromNode(c.tree.Child(n, 0))
+	return Type{
+		Kind: TypePointer,
+		Elem: &elem,
 	}
 }
 
@@ -875,6 +911,8 @@ func (c *checker) checkStmt(n ast.NodeIndex) {
 		c.checkBreakOrContinue(n, "break")
 	case enums.NodeKinds.ContinueStmt:
 		c.checkBreakOrContinue(n, "continue")
+	case enums.NodeKinds.DeleteStmt:
+		c.checkDeleteStmt(n)
 	case enums.NodeKinds.Block:
 		c.checkBlock(n)
 	case enums.NodeKinds.IfStmt:
@@ -894,6 +932,19 @@ func (c *checker) checkStmt(n ast.NodeIndex) {
 func (c *checker) checkBreakOrContinue(n ast.NodeIndex, word string) {
 	if c.loopDepth == 0 {
 		c.errorAt(n, "%s outside a loop", word)
+	}
+}
+
+// checkDeleteStmt type-checks `delete p` (see LANGUAGE.md's "Pointers"
+// section) - p must have a pointer type; delete itself produces no value.
+func (c *checker) checkDeleteStmt(n ast.NodeIndex) {
+	expr := c.tree.Child(n, 0)
+	t := c.defaultIfUntyped(expr, c.checkValueExpr(expr))
+	if t.IsInvalid() {
+		return
+	}
+	if t.Kind != TypePointer {
+		c.errorAt(n, "delete requires a pointer, got %s", t)
 	}
 }
 
@@ -963,6 +1014,19 @@ func (c *checker) checkLValue(n ast.NodeIndex) (Type, bool) {
 		t := c.checkExpr(n)
 		return t, !t.IsInvalid()
 	case enums.NodeKinds.MemberExpr, enums.NodeKinds.IndexExpr:
+		t := c.checkExpr(n)
+		return t, !t.IsInvalid()
+	case enums.NodeKinds.UnaryExpr:
+		// `*p = v` (see LANGUAGE.md's "Pointers" section) - a dereference is
+		// the one UnaryExpr shape that's ever a valid lvalue; `&x` (the only
+		// other prefix operator sharing this node kind) never is - the
+		// parser's own checkAssignTarget accepts the shape broadly (same as
+		// every other case here), so this is what actually narrows it down,
+		// same division of labor as Ident's own sym.Kind check just above.
+		if c.tree.Text(n) != "*" {
+			c.errorAt(n, "cannot assign to this expression")
+			return invalidType, false
+		}
 		t := c.checkExpr(n)
 		return t, !t.IsInvalid()
 	case enums.NodeKinds.Bad:
@@ -1098,6 +1162,8 @@ func (c *checker) inferExpr(n ast.NodeIndex) Type {
 		return c.checkCompositeLit(n)
 	case enums.NodeKinds.FuncLit:
 		return c.checkFuncLit(n)
+	case enums.NodeKinds.NewExpr:
+		return c.checkNewExpr(n)
 	case enums.NodeKinds.ArrayType:
 		// Reachable two ways (see resolve.go's resolveExpr, which documents
 		// the same two paths for its own ArrayType case): a bare array type
@@ -1201,6 +1267,12 @@ func (c *checker) typeOfSymbolValue(n ast.NodeIndex, sym *Symbol) Type {
 	case SymPackage:
 		c.errorAt(n, "%s is a package, not a value", c.tree.Text(n))
 		return invalidType
+	case SymBuiltinValue:
+		// Currently only `nil` (see scope.go's universeScope) - starts life
+		// untyped, exactly like a numeric literal (checkNumberLit), deferring
+		// to whatever pointer-typed context it's used in (checkAssignable/
+		// checkEqualityOperands) to pin down the concrete *T.
+		return untypedNilType
 	default:
 		return invalidType
 	}
@@ -1230,19 +1302,35 @@ func (c *checker) checkThisExpr(n ast.NodeIndex) Type {
 	}
 }
 
-// checkUnaryExpr types `-`/`!`. Unary `-` now works on any numeric type
+// checkUnaryExpr types `-`/`!`/`&`/`*`. Unary `-` works on any numeric type
 // (every int width, every float width, or an untyped constant - see
 // AGENTS.md's Types section) and always yields the exact same Type/Kind it
 // was given, untyped included: an untyped operand simply stays untyped,
 // deferring resolution further up the tree exactly like a NumberLit would on
 // its own (see retypeUntyped's ParenExpr/UnaryExpr case, which knows to
-// recurse into a unary-minus operand the same way).
+// recurse into a unary-minus operand the same way). `&`/`*` (see
+// LANGUAGE.md's "Pointers" section) are handled by their own dedicated
+// helpers (checkAddressOf/checkDeref) before ever reaching
+// checkValueExpr - unlike -/!/&&, `&`'s operand must be checked as an
+// addressable location, not an ordinary value expression (an addressable
+// expression is still a perfectly good value too, but checkAddressOf needs
+// to know *which* expression shapes even qualify, the same reason
+// checkLValue exists as its own function rather than reusing checkExpr's
+// generic dispatch).
 func (c *checker) checkUnaryExpr(n ast.NodeIndex) Type {
-	t := c.checkValueExpr(c.tree.Child(n, 0))
+	operand := c.tree.Child(n, 0)
+	op := c.tree.Text(n)
+	switch op {
+	case "&":
+		return c.checkAddressOf(n, operand)
+	case "*":
+		return c.checkDeref(n, operand)
+	}
+
+	t := c.checkValueExpr(operand)
 	if t.IsInvalid() {
 		return invalidType
 	}
-	op := c.tree.Text(n)
 	switch op {
 	case "-":
 		if !t.IsNumeric() {
@@ -1259,6 +1347,74 @@ func (c *checker) checkUnaryExpr(n ast.NodeIndex) Type {
 	default:
 		return invalidType
 	}
+}
+
+// checkAddressOf types `&x` (see LANGUAGE.md's "Pointers" section): operand
+// must be an addressable location (checkAddressable) - not a plain value -
+// producing a real pointer to it, rather than a pointer to some anonymous
+// spilled copy (see codegen's genAddr/genUnaryExpr, which lowers this
+// exactly that way: the address itself, no intermediate load).
+func (c *checker) checkAddressOf(n, operand ast.NodeIndex) Type {
+	t, ok := c.checkAddressable(operand)
+	if !ok || t.IsInvalid() {
+		return invalidType
+	}
+	return Type{
+		Kind: TypePointer,
+		Elem: &t,
+	}
+}
+
+// checkAddressable reports whether operand is a valid `&` operand - the same
+// set of expression shapes checkLValue accepts as a valid assignment target
+// (a variable, a struct field, an array element, or another pointer's
+// dereference), since "has a real address `&` can take" and "can appear on
+// the left of `=`" are the same property here. Kept as its own function
+// (rather than reusing checkLValue directly) purely so the diagnostic
+// wording matches what `&` misuse actually looks like ("cannot take the
+// address of X", not checkLValue's own "cannot assign to X").
+func (c *checker) checkAddressable(n ast.NodeIndex) (Type, bool) {
+	switch c.tree.Nodes[n].Kind {
+	case enums.NodeKinds.Ident:
+		sym, ok := c.info.Refs[n]
+		if ok && sym.Kind != SymVar && sym.Kind != SymParam {
+			c.errorAt(n, "cannot take the address of %s (%s is not a variable)", c.tree.Text(n), sym.Kind)
+			return invalidType, false
+		}
+		t := c.checkExpr(n)
+		return t, !t.IsInvalid()
+	case enums.NodeKinds.MemberExpr, enums.NodeKinds.IndexExpr:
+		t := c.checkExpr(n)
+		return t, !t.IsInvalid()
+	case enums.NodeKinds.UnaryExpr:
+		if c.tree.Text(n) != "*" {
+			c.errorAt(n, "cannot take the address of this expression")
+			return invalidType, false
+		}
+		t := c.checkExpr(n)
+		return t, !t.IsInvalid()
+	case enums.NodeKinds.Bad:
+		return invalidType, false
+	default:
+		c.errorAt(n, "cannot take the address of this expression")
+		return invalidType, false
+	}
+}
+
+// checkDeref types `*p` (see LANGUAGE.md's "Pointers" section): p must be a
+// pointer type; the result is its pointee type. Valid both as a value
+// (`x := *p`) and, via checkLValue's own UnaryExpr("*") case, as an
+// assignment target (`*p = v`).
+func (c *checker) checkDeref(n, operand ast.NodeIndex) Type {
+	t := c.checkValueExpr(operand)
+	if t.IsInvalid() {
+		return invalidType
+	}
+	if t.Kind != TypePointer {
+		c.errorAt(n, "cannot dereference %s (not a pointer)", t)
+		return invalidType
+	}
+	return *t.Elem
 }
 
 // checkBinaryExpr types a binary operator against its (already
@@ -1405,6 +1561,9 @@ func (c *checker) checkEqualityOperands(n, lNode, rNode ast.NodeIndex, lt, rt Ty
 		c.errorAt(n, "slices are not comparable with %s", op)
 		return invalidType
 	}
+	if lt.Kind == TypeUntypedNil || rt.Kind == TypeUntypedNil {
+		return c.checkNilEquality(n, lNode, rNode, lt, rt, op)
+	}
 	switch {
 	case lt.Kind == TypeStruct, lt.Kind == TypeArray:
 		if lt.Equal(rt) {
@@ -1414,6 +1573,13 @@ func (c *checker) checkEqualityOperands(n, lNode, rNode ast.NodeIndex, lt, rt Ty
 		return boolType
 	case lt.Kind == TypeBool && rt.Kind == TypeBool:
 		return boolType
+	case lt.Kind == TypePointer && rt.Kind == TypePointer:
+		// Pointer identity comparison (see LANGUAGE.md's "Pointers" section) -
+		// both sides must point to the exact same pointee type, same
+		// no-implicit-conversion rule every other operator here follows.
+		if lt.Equal(rt) {
+			return boolType
+		}
 	case lt.IsNumeric() && rt.IsNumeric():
 		if c.resolveComparisonOperands(lNode, rNode, lt, rt) {
 			return boolType
@@ -1421,6 +1587,36 @@ func (c *checker) checkEqualityOperands(n, lNode, rNode ast.NodeIndex, lt, rt Ty
 	}
 	c.errorAt(n, "operator %s not defined for %s and %s", op, lt, rt)
 	return invalidType
+}
+
+// checkNilEquality types `p == nil`/`nil == p`-shaped comparisons (see
+// LANGUAGE.md's "Pointers" section) - the one place nil's own untyped Type
+// (TypeUntypedNil) is compared, deliberately kept out of
+// checkEqualityOperands' own general switch above, the same way this
+// language's numeric untyped constants get their own dedicated resolution
+// path (resolveComparisonOperands) rather than folding into a generic
+// Type.Equal check. Comparing nil against nil is rejected outright - there's
+// no pointer type either side could adapt to.
+func (c *checker) checkNilEquality(n, lNode, rNode ast.NodeIndex, lt, rt Type, op string) Type {
+	switch {
+	case lt.Kind == TypeUntypedNil && rt.Kind == TypeUntypedNil:
+		c.errorAt(n, "cannot compare nil with nil (no pointer type to infer)")
+		return invalidType
+	case lt.Kind == TypeUntypedNil:
+		if rt.Kind != TypePointer {
+			c.errorAt(n, "cannot compare nil with %s", rt)
+			return invalidType
+		}
+		c.retypeUntyped(lNode, rt)
+		return boolType
+	default:
+		if lt.Kind != TypePointer {
+			c.errorAt(n, "cannot compare nil with %s", lt)
+			return invalidType
+		}
+		c.retypeUntyped(rNode, lt)
+		return boolType
+	}
 }
 
 // checkOrderingOperands types `< <= > >=`.
@@ -1548,6 +1744,15 @@ func (c *checker) resolveMember(n ast.NodeIndex) (*Symbol, bool) {
 
 	if objType.IsInvalid() {
 		return nil, false
+	}
+	// A pointer-to-struct object auto-derefs for member access (see
+	// LANGUAGE.md's "Pointers" section): `p.field`/`p.method(...)` on a `*T`
+	// behaves exactly like `(*p).field`/`(*p).method(...)` would, matching
+	// Go's own automatic pointer-dereference rule for selector expressions.
+	// codegen's genAddr/genMethodCall mirror this same auto-deref at the
+	// value-address level.
+	if objType.Kind == TypePointer {
+		objType = *objType.Elem
 	}
 	if objType.Kind != TypeStruct {
 		c.errorAt(n, "%s undefined (%s is not a struct)", name, objType)
@@ -1969,6 +2174,55 @@ func (c *checker) checkConversionCall(n, callee ast.NodeIndex, args []ast.NodeIn
 
 	c.info.Types[n] = target
 	return target, true
+}
+
+// checkNewExpr type-checks `new T(args)`/`new T{...}` (see LANGUAGE.md's
+// "Pointers" section): inner (a CallExpr or CompositeLit - see parseNewExpr)
+// is checked exactly as it would be unwrapped, reusing checkCallExpr/
+// checkCompositeLit's own machinery completely unchanged - `new` itself only
+// adds one thing, wrapping the result in a pointer to a real heap allocation
+// instead of a stack/inline one (see codegen's genNewExpr for the malloc
+// this produces).
+//
+// The CallExpr case is further restricted to an actual constructor call
+// (Info.Refs on its own callee resolving to SymConstructor, exactly the way
+// checkConstructorCall itself marks one) - checkCallExpr's ordinary call/
+// conversion-call fallbacks still run first (so an undefined callee, wrong
+// argument count, etc. all still get their own correct diagnostics), but
+// `new someFunc(...)`/`new i64(5)` are rejected once the call shape itself
+// turns out not to be a constructor call, same as any other misuse of
+// `new`.
+func (c *checker) checkNewExpr(n ast.NodeIndex) Type {
+	inner := c.tree.Child(n, 0)
+	switch c.tree.Nodes[inner].Kind {
+	case enums.NodeKinds.CompositeLit:
+		// Routed through checkExpr (not checkCompositeLit directly) so
+		// inner's own info.Types entry actually gets memoized - checkExpr,
+		// not checkCompositeLit itself, is what does that (see checkExpr's
+		// doc comment); codegen's genNewExpr reads it back via
+		// g.info.Types[inner]'s sibling lookups the same way any other
+		// checked CompositeLit node would.
+		t := c.checkExpr(inner)
+		if t.IsInvalid() {
+			return invalidType
+		}
+		return Type{Kind: TypePointer, Elem: &t}
+	case enums.NodeKinds.CallExpr:
+		t := c.checkExpr(inner)
+		calleeNode := c.tree.Child(inner, 0)
+		sym, ok := c.info.Refs[calleeNode]
+		if t.IsInvalid() || !ok || sym.Kind != SymConstructor {
+			c.errorAt(n, "new requires a struct constructor call or composite literal")
+			return invalidType
+		}
+		return Type{Kind: TypePointer, Elem: &t}
+	default:
+		// Still check inner so an undefined identifier/etc. inside it gets
+		// its own diagnostic too, rather than being silently skipped.
+		c.checkValueExpr(inner)
+		c.errorAt(n, "new requires a struct constructor call or composite literal")
+		return invalidType
+	}
 }
 
 // funcSigForCall resolves a CallExpr's callee to the funcSignature its
