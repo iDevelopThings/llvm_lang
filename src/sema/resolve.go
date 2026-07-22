@@ -721,8 +721,8 @@ func (r *resolver) resolveExpr(scope *Scope, n ast.NodeIndex) {
 		}
 		r.info.Refs[n] = sym
 	case enums.NodeKinds.ThisExpr:
-		fnScope := nearestFunc(scope)
-		if fnScope == nil || fnScope.Receiver == nil {
+		fnScope := nearestReceiverFunc(scope)
+		if fnScope == nil {
 			r.errorAt(n, "this is only valid inside a method")
 			return
 		}
@@ -786,11 +786,11 @@ func (r *resolver) resolveExpr(scope *Scope, n ast.NodeIndex) {
 //
 // A literal has no receiver clause (see ast.Node's own FuncLit doc comment),
 // so fnScope.Receiver is left nil - a `this` reference inside a literal still
-// resolves via nearestFunc (see resolveExpr's ThisExpr case), which simply
+// resolves via nearestReceiverFunc (see resolveExpr's ThisExpr case), which
 // keeps walking past this scope (whose Receiver is nil) until it reaches the
 // nearest *enclosing* method's own receiver, if any - capture.go's own pass
-// is what actually rejects that case (capturing `this` is out of scope this
-// round - see LANGUAGE.md), not anything here.
+// is what actually rejects that case (capturing `this` inside a lambda is
+// disallowed - see LANGUAGE.md), not anything here.
 func (r *resolver) resolveFuncLit(parent *Scope, lit ast.NodeIndex) {
 	paramList := r.tree.FuncLitParamList(lit)
 	returnType := r.tree.FuncLitReturnType(lit)

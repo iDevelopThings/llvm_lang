@@ -202,6 +202,17 @@ func TestTwoLevelNestedCaptureRelaysThroughBothLambdas(t *testing.T) {
 // pass (computeCaptures), not Check, so this test drives Resolve directly
 // rather than going through checkSrc/expectCheckErrors (which both assert
 // Resolve itself found nothing).
+//
+// Asserts on the actual message text, not just the error count: a `this`
+// reference nested inside a lambda must resolve all the way through to the
+// nearest enclosing method's real receiver (nearestReceiverFunc, scope.go) so
+// that this capture.go's dedicated SymReceiver branch is the one that fires -
+// producing the specific "cannot capture `this`" diagnostic - rather than the
+// generic, misleading "this is only valid inside a method" resolve.go
+// otherwise reports when a ThisExpr fails to resolve to any receiver at all.
+// Asserting only the count previously let a real bug (nearestFunc stopping at
+// the lambda's own nil-Receiver ScopeFunc, so info.Refs[n] was never
+// populated and this branch could never fire) go unnoticed.
 func TestCapturingThisInsideLambdaIsRejected(t *testing.T) {
 	src := "struct Point {\n" +
 		"\tx int\n" +
@@ -218,5 +229,10 @@ func TestCapturingThisInsideLambdaIsRejected(t *testing.T) {
 	_, rdiags := Resolve(tree)
 	if rdiags.ErrorCount() != 1 {
 		t.Fatalf("Resolve ErrorCount = %d, want 1: %v", rdiags.ErrorCount(), rdiags.All())
+	}
+	all := rdiags.All()
+	const want = "cannot capture `this` inside a function literal"
+	if all[0].Msg != want {
+		t.Errorf("diagnostic message = %q, want %q", all[0].Msg, want)
 	}
 }

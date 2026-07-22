@@ -122,6 +122,28 @@ func nearestFunc(scope *Scope) *Scope {
 	return nil
 }
 
+// nearestReceiverFunc walks up from scope to the nearest enclosing ScopeFunc
+// that actually has a receiver (Receiver != nil) - i.e. the nearest enclosing
+// *method's* own function scope, or nil if scope isn't inside one. Unlike
+// plain nearestFunc, this keeps walking straight past a ScopeFunc whose
+// Receiver is nil (a FuncLit's own function scope - see resolveFuncLit,
+// resolve.go) instead of stopping at the first ScopeFunc found at all: a
+// `this` reference lexically inside a lambda still needs to resolve to the
+// nearest *enclosing method's* receiver (see resolveExpr's ThisExpr case),
+// not bail out just because the lambda's own scope happens to have no
+// receiver of its own. Walking past a nil-receiver ScopeFunc belonging to a
+// free (non-method) function is harmless too: a free function is never
+// itself nested inside a method, so the walk simply continues outward and
+// still correctly finds nothing, same as today.
+func nearestReceiverFunc(scope *Scope) *Scope {
+	for s := scope; s != nil; s = s.Parent {
+		if s.Kind == ScopeFunc && s.Receiver != nil {
+			return s
+		}
+	}
+	return nil
+}
+
 // SymbolKind classifies what a Symbol names.
 type SymbolKind int
 

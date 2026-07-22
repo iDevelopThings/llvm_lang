@@ -87,6 +87,13 @@ language-level rules and `CODEGEN.md`'s "First-class functions" section for
 the fat-pointer construction site (`genFuncValue`) and the direct-vs-
 indirect call dispatch (`isDirectFuncCall`/`genIndirectCall`).
 
+Note (superseded): "this round, `ctxPtr` is always null and unused" above no
+longer holds - the "Lambdas" entry further down added real closures, whose
+`ctxPtr` genuinely carries a non-null capture-context pointer through an
+indirect call. See that entry (and `CODEGEN.md`'s own equivalent correction
+note on its "First-class functions" section) for the current behavior; the
+original decision/rationale above is left as-is, historical-log style.
+
 ---
 
 ## 2026-07-22 - Multi-file packages: directory = package, non-recursive

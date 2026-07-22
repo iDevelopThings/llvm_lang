@@ -162,6 +162,124 @@ func runNested() int {
 	}
 }
 
+// TestThreeLevelNestedClosureCapture extends
+// TestTwoLevelNestedClosureCapture one level further: outerFunc declares x;
+// lambda1 declares lambda2, which itself declares lambda3, which is the one
+// that actually reads x. Each intermediate lambda must relay x's address
+// into the next one's own capture context even though neither lambda1's nor
+// lambda2's own body ever mentions x directly - proving the relay chain
+// (sema/capture.go's analyzeFuncLitCaptures walking straight through nested
+// FuncLit subtrees, and codegen's own per-level relay - see CODEGEN.md's
+// "Lambdas" section) generalizes past two levels rather than only happening
+// to work for exactly two.
+func TestThreeLevelNestedClosureCapture(t *testing.T) {
+	jm := compileAndJIT(t, `
+func outerFunc() func() func() func() int {
+	x := 7
+	lambda1 := func() func() func() int {
+		lambda2 := func() func() int {
+			lambda3 := func() int {
+				return x
+			}
+			return lambda3
+		}
+		return lambda2
+	}
+	return lambda1
+}
+
+func runThreeLevel() int {
+	lambda1 := outerFunc()
+	lambda2 := lambda1()
+	lambda3 := lambda2()
+	return lambda3()
+}
+`)
+
+	if got := jm.runInt32(t, "runThreeLevel"); got != 7 {
+		t.Errorf("runThreeLevel() = %d, want 7", got)
+	}
+}
+
+// TestCaptureFromConditionalBranchOnlyLambda covers a FuncLit that only
+// lexically exists inside one arm of an if/else - the capture-promotion
+// decision (marking the captured local as needing arena storage instead of
+// an ordinary stack alloca) must not depend on which control-flow branch a
+// FuncLit happens to sit in, since capture analysis walks the whole tree by
+// node kind (computeCaptures, sema/capture.go), not by simulating control
+// flow. Both branches assign a lambda that captures the same outer local x
+// into the same func-typed variable, so the same JIT-executed function
+// exercises whichever branch flag selects.
+func TestCaptureFromConditionalBranchOnlyLambda(t *testing.T) {
+	jm := compileAndJIT(t, `
+func makeChooser(flag bool) func() int {
+	x := 41
+	var result func() int
+	if flag {
+		result = func() int {
+			return x + 1
+		}
+	} else {
+		result = func() int {
+			return x + 2
+		}
+	}
+	return result
+}
+
+func runChooser(flag bool) int {
+	fn := makeChooser(flag)
+	return fn()
+}
+`)
+
+	if got := jm.runInt32(t, "runChooser", 1); got != 42 {
+		t.Errorf("runChooser(true) = %d, want 42", got)
+	}
+	if got := jm.runInt32(t, "runChooser", 0); got != 43 {
+		t.Errorf("runChooser(false) = %d, want 43", got)
+	}
+}
+
+// TestMethodParamAndReceiverDerivedLocalCapturedThroughLambdaChain covers a
+// method's own parameter and a receiver-derived local (a plain local var
+// initialized from `this.<field>`, since `this` itself can never be
+// captured directly - see TestCapturingThisInsideLambdaIsRejected,
+// sema/lambda_test.go) each captured through a two-level lambda chain -
+// confirming this goes through the identical capture/relay code path a free
+// function's own parameter/local capture already does (see
+// TestLambdaCapturesParameterByReference and
+// TestTwoLevelNestedClosureCapture above), with no method-specific special
+// casing anywhere in that path.
+func TestMethodParamAndReceiverDerivedLocalCapturedThroughLambdaChain(t *testing.T) {
+	jm := compileAndJIT(t, `
+struct Box {
+	v int
+}
+
+func (Box) makeNestedAdder(base int) func() func(int) int {
+	local := this.v
+	outer := func() func(int) int {
+		return func(x int) int {
+			return local + base + x
+		}
+	}
+	return outer
+}
+
+func runBoxAdder(v int, base int, x int) int {
+	b := Box{v}
+	outer := b.makeNestedAdder(base)
+	inner := outer()
+	return inner(x)
+}
+`)
+
+	if got := jm.runInt32(t, "runBoxAdder", 100, 10, 1); got != 111 {
+		t.Errorf("runBoxAdder(100, 10, 1) = %d, want 111", got)
+	}
+}
+
 // TestUniformAbiAcrossPlainFunctionAndLambda is the test that would catch a
 // silent miscompilation if the thunk/uniform-calling-convention fix
 // (CODEGEN.md's "Lambdas" section) were wrong or missing: a single
