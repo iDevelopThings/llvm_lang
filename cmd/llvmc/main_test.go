@@ -203,6 +203,87 @@ func main() {
 	}
 }
 
+// TestBinary_EmitLLVMWithNonConstantGlobalNeverExecutes covers -emit-llvm
+// against a non-constant global initializer (see CODEGEN.md's "Global var
+// initializers" section): its real initializer now runs inside a
+// synthesized init function registered into @llvm.global_ctors, but
+// -emit-llvm must still only ever print IR text and exit 0, exactly as
+// before this feature existed - never actually running the synthesized init
+// function (or main). Mirrors TestBinary_EmitLLVM's own marker-string trick
+// exactly (see its doc comment for why a runtime-only string concatenation,
+// not a plain literal or a small int a JIT-independent LLVM constant-fold
+// could just as easily produce, is the only reliable "this never actually
+// ran" signal) - the concatenation happens inside a *global*'s own
+// initializer this time, specifically exercising genGlobalCtors's lowering
+// rather than an ordinary function body's.
+func TestBinary_EmitLLVMWithNonConstantGlobalNeverExecutes(t *testing.T) {
+	src := `
+func buildGreeting() string {
+	a := "NOPE_"
+	b := "RUNTIME_EXEC_MARKER"
+	return a + b
+}
+
+var greeting string = buildGreeting()
+
+func main() {
+	print(greeting)
+}
+`
+	path := filepath.Join(t.TempDir(), "global_concat.llx")
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatalf("writing temp source file: %v", err)
+	}
+
+	out, err := exec.Command(llvmcPath, "-emit-llvm", path).Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			t.Fatalf("llvmc exited %v, stderr:\n%s", err, ee.Stderr)
+		}
+		t.Fatalf("running llvmc: %v", err)
+	}
+
+	got := string(out)
+	if !strings.Contains(got, "@llvm.global_ctors") {
+		t.Errorf("stdout = %q, want it to contain the @llvm.global_ctors array", got)
+	}
+	if !strings.Contains(got, "llvm_lang.global_init") {
+		t.Errorf("stdout = %q, want it to contain the synthesized llvm_lang.global_init function", got)
+	}
+	if strings.Contains(got, "NOPE_RUNTIME_EXEC_MARKER") {
+		t.Errorf("stdout = %q, want it to never contain the runtime-concatenated printed text - -emit-llvm must not execute the synthesized global-init function", got)
+	}
+}
+
+// TestBinary_GlobalInitExample runs examples/global_init/global_init.llx end
+// to end via the real binary: computeStart()'s result, a reference to
+// another global, and a `new`-heap-allocated struct must all be genuinely
+// evaluated by the synthesized init function before main runs (see
+// CODEGEN.md's "Global var initializers" section) - real stdout output plus
+// the exit code, not just a clean compile.
+func TestBinary_GlobalInitExample(t *testing.T) {
+	cmd := exec.Command(llvmcPath, "../../examples/global_init/global_init.llx")
+	out, err := cmd.Output()
+
+	if err != nil {
+		ee, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("running llvmc: %v", err)
+		}
+		if ee.ExitCode() != 52 {
+			t.Fatalf("exit code = %d, want 52, stderr:\n%s", ee.ExitCode(), ee.Stderr)
+		}
+	} else {
+		t.Fatal("expected llvmc to exit 52, got exit 0")
+	}
+
+	normalized := strings.ReplaceAll(string(out), "\r\n", "\n")
+	normalized = strings.TrimRight(normalized, "\n")
+	if normalized != "42\n42\n52" {
+		t.Errorf("stdout = %q, want the lines 42, 42, 52", string(out))
+	}
+}
+
 // TestBinary_MainExitCode covers examples/features/features.llx end to end: its
 // three print calls' real stdout, and its `func main() int` return value
 // coming back as the child process's own exit code.

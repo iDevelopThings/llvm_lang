@@ -13,11 +13,12 @@
 // supported and may panic - every lookup here (info.Refs, info.Types,
 // info.Structs) assumes the entry it wants is actually present.
 //
-// The one class of error still possible on a semantically valid tree is a
-// codegen-level restriction sema doesn't know about (see BLOCKERS.md): a
-// non-constant top-level var initializer. That lands in the affected file's
-// own diag.Bag rather than panicking, so a caller gets it reported, same as
-// every other pass in this compiler.
+// A top-level `var`'s initializer is real generated code now, not required
+// to be a compile-time constant (see CODEGEN.md's "Global var initializers"
+// section and globalinit.go) - one still-possible codegen-only diagnostic is
+// a genuine error inside an otherwise constant-*shaped* initializer (division
+// by zero, an out-of-range literal), which lands in the affected file's own
+// diag.Bag rather than panicking, same as every other pass in this compiler.
 package codegen
 
 import (
@@ -151,6 +152,17 @@ type Generator struct {
 
 	structLayouts map[*sema.StructInfo]*structLayout
 	globals       map[*sema.Symbol]llvm.Value
+
+	// globalInits queues every non-constant top-level `var`'s initializer -
+	// appended by genGlobalVarDecl, in source declaration order across every
+	// file in the package (the same order genPackage's own per-tree loops
+	// already visit declarations in) - for genGlobalCtors (globalinit.go) to
+	// consume, once, after every global/function/constructor signature in the
+	// whole package already exists. See CODEGEN.md's "Global var
+	// initializers" section for why declaration order (not a full
+	// dependency-graph topological sort) is this round's deliberately scoped
+	// ordering rule.
+	globalInits []globalInitEntry
 
 	// funcs is keyed by *sema.Symbol (the declared free function or
 	// method's own symbol, from Info.Refs), not by its FuncDecl's
@@ -398,6 +410,15 @@ func (g *Generator) genPackage(trees []*ast.Tree) {
 			}
 		}
 	}
+	// genGlobalCtors (globalinit.go) needs every function/constructor
+	// signature already declared (a non-constant global initializer may call
+	// one - see LANGUAGE.md's "Global var initializers" section) but runs
+	// before any function/constructor body is generated below - its own
+	// synthesized init function is just one more function as far as the rest
+	// of this package is concerned, and ordering it here keeps every one of
+	// genPackage's own passes in the same "declare everything, then generate
+	// every body" shape.
+	g.genGlobalCtors()
 	for _, tree := range trees {
 		g.enter(tree)
 		for d := range tree.TopLevelDeclsOfKind(enums.NodeKinds.FuncDecl) {
@@ -479,14 +500,35 @@ func (g *Generator) structLitFieldSlot(layout *structLayout, e ast.NodeIndex, i 
 	return layout.fieldIndex[sym], g.tree.Child(e, 1)
 }
 
-// genGlobalVarDecl lowers one top-level `var` into a real LLVM global. See
-// AGENTS.md's codegen section for the decision this encodes: a global's
-// initializer must be a compile-time constant expression (constExpr, in
-// constfold.go) - there's no synthesized Go-style init-routine-before-main
-// in this language. A non-constant initializer is a codegen-level error
-// (reported, not panicked - see the package doc comment); codegen recovers
-// by zero-initializing the global and moving on, so one bad global doesn't
-// stop every other diagnostic from surfacing.
+// globalInitEntry is one non-constant top-level `var`'s initializer, queued
+// by genGlobalVarDecl (Generator.globalInits) for genGlobalCtors
+// (globalinit.go) to lower later, once every global/function/constructor
+// signature in the whole package already exists. tree is recorded alongside
+// glob/initNode (rather than assuming whatever tree is currently entered)
+// since globalInits accumulates across every file in the package before
+// genGlobalCtors ever consumes it - initNode is only ever meaningful relative
+// to the one Tree it came from (see ast.NodeIndex's doc comment), so
+// genGlobalCtors must re-enter the right tree before generating each entry.
+type globalInitEntry struct {
+	tree     *ast.Tree
+	glob     llvm.Value
+	initNode ast.NodeIndex
+}
+
+// genGlobalVarDecl lowers one top-level `var` into a real LLVM global, always
+// given a zero-value initializer up front (matching Go's own zero-value
+// convention for a global whose real initializer hasn't run yet - see
+// CODEGEN.md's "Global var initializers" section). An initializer that's
+// foldable at compile time (isConstFoldable, constfold.go) is folded
+// immediately, overwriting that zero initializer with the real constant - the
+// exact same behavior this function has always had, unchanged. Anything else
+// keeps the zero initializer and is instead queued into g.globalInits, to be
+// lowered as real generated code inside the synthesized init function
+// genGlobalCtors builds once every global in the package has been declared
+// (globalinit.go) - see LANGUAGE.md's "Global var initializers" section for
+// what's now legal there (a function call, a reference to another global, a
+// dynamic-array/slice literal, ...) and the declaration-order guarantee this
+// queuing relies on.
 func (g *Generator) genGlobalVarDecl(decl ast.NodeIndex) {
 	nameNode := g.tree.Child(decl, 0)
 	initNode := g.tree.Child(decl, 2)
@@ -494,15 +536,27 @@ func (g *Generator) genGlobalVarDecl(decl ast.NodeIndex) {
 
 	llt := g.llvmType(g.info.Types[decl])
 	glob := llvm.AddGlobal(g.mod, llt, sym.Name)
+	glob.SetInitializer(llvm.ConstNull(llt))
 	g.globals[sym] = glob
 
 	if initNode == ast.InvalidNode {
-		glob.SetInitializer(llvm.ConstNull(llt))
 		return
 	}
-	if v, ok := g.constExpr(initNode); ok {
-		glob.SetInitializer(v)
-	} else {
-		glob.SetInitializer(llvm.ConstNull(llt))
+	if g.isConstFoldable(initNode) {
+		// isConstFoldable already guarantees constExpr won't hit its "not a
+		// constant at all" default cases - only a genuinely-erroneous
+		// constant expression (division by zero, an out-of-range literal)
+		// can still fail here, in which case the zero initializer already in
+		// place is exactly the same recovery this package has always used.
+		if v, ok := g.constExpr(initNode); ok {
+			glob.SetInitializer(v)
+		}
+		return
 	}
+
+	g.globalInits = append(g.globalInits, globalInitEntry{
+		tree:     g.tree,
+		glob:     glob,
+		initNode: initNode,
+	})
 }

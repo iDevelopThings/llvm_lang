@@ -1,15 +1,23 @@
-// This file implements codegen's compile-time constant evaluator, used only
-// for top-level `var` initializers (see codegen.go's genGlobalVarDecl and
-// AGENTS.md's codegen section for the decision this encodes: a global's
-// initializer must already be a compile-time constant - there is no
-// synthesized Go-style init-routine-before-main in this language). It is
-// deliberately more capable than sema/typecheck.go's constArraySize (which
-// only ever needs a bare integer literal for an array size): literals,
-// parenthesization, unary +/-/!, binary arithmetic/comparison/logical/string-
-// concatenation, and struct/array composite literals built entirely from
-// constants. Anything else (a reference to another variable, a function
-// call, `this`, a member/index expression) is not a constant expression this
-// package can fold, and is reported as a codegen diagnostic.
+// This file implements codegen's compile-time constant evaluator, used for
+// top-level `var` initializers (see codegen.go's genGlobalVarDecl and
+// CODEGEN.md's "Global var initializers" section): whenever an initializer
+// happens to be foldable at compile time - literals, parenthesization, unary
+// +/-/!, binary arithmetic/comparison/logical/string-concatenation, and
+// struct/(fixed-size-)array composite literals built entirely from constants
+// - it's folded directly into the global's own LLVM initializer, exactly as
+// before this file ever had a "non-constant" counterpart. It is deliberately
+// more capable than sema/typecheck.go's constArraySize (which only ever needs
+// a bare integer literal for an array size).
+//
+// Anything else (a reference to another variable, a function call, `this`, a
+// member/index expression, a dynamic-array/slice literal) is not a constant
+// expression this evaluator can fold - genGlobalVarDecl routes those through
+// a synthesized init function instead (see globalinit.go), so constExpr is
+// only ever invoked once isConstFoldable (below) has already confirmed the
+// whole initializer is structurally constant-shaped; every diagnostic
+// constExpr still reports (an out-of-range literal, division by zero, an
+// unsupported operator) is therefore a real error in an expression that
+// genuinely looks constant, not "this isn't a constant at all".
 package codegen
 
 import (
@@ -290,4 +298,102 @@ func (g *Generator) constBool(b bool) llvm.Value {
 		iv = 1
 	}
 	return llvm.ConstInt(g.boolTy, iv, false)
+}
+
+// isConstFoldable reports whether n is structurally shaped like a compile-
+// time constant expression - the same node-kind shapes constExpr itself
+// knows how to fold (see this file's own doc comment) - without actually
+// evaluating anything or emitting any diagnostic. genGlobalVarDecl calls this
+// first to decide which of the two lowering paths a global's initializer
+// takes (constExpr directly, or the synthesized init function - see
+// globalinit.go); once this returns true, constExpr is guaranteed to only
+// ever hit one of its genuinely-erroneous cases (division by zero, an
+// out-of-range literal, ...), never its "not a constant at all" default
+// cases, so a diagnostic constExpr reports past this point is always real.
+//
+// This intentionally mirrors constExpr/constStringText's own switch shape
+// node-kind-for-node-kind, rather than reusing constExpr's evaluation and
+// silently discarding whatever diagnostic it produced along the way: the
+// latter would either lose a genuine "constant but erroneous" diagnostic
+// (dividing a constant by a constant zero) by conflating it with "not
+// constant, run it at init time instead" - deferring a division that would
+// otherwise be a clean compile-time error into an actual runtime crash - or
+// require a much more invasive silence-diagnostics-during-probing mechanism
+// threaded through every recursive constExpr helper. A second small,
+// clearly-labeled traversal is the simpler, safer trade-off.
+func (g *Generator) isConstFoldable(n ast.NodeIndex) bool {
+	if t := g.info.Types[n]; t.Kind == sema.TypeString {
+		return g.isConstFoldableString(n)
+	}
+
+	switch g.tree.Nodes[n].Kind {
+	case enums.NodeKinds.NumberLit, enums.NodeKinds.BoolLit:
+		return true
+	case enums.NodeKinds.ParenExpr, enums.NodeKinds.UnaryExpr:
+		return g.isConstFoldable(g.tree.Child(n, 0))
+	case enums.NodeKinds.BinaryExpr:
+		return g.isConstFoldable(g.tree.Child(n, 0)) && g.isConstFoldable(g.tree.Child(n, 1))
+	case enums.NodeKinds.CompositeLit:
+		return g.isConstFoldableCompositeLit(n)
+	default:
+		return false
+	}
+}
+
+// isConstFoldableString is isConstFoldable's string-typed counterpart,
+// mirroring constStringText's own recursive shape (a StringLit, or
+// `+`-concatenation of constant strings, arbitrarily nested/parenthesized).
+func (g *Generator) isConstFoldableString(n ast.NodeIndex) bool {
+	switch g.tree.Nodes[n].Kind {
+	case enums.NodeKinds.StringLit:
+		return true
+	case enums.NodeKinds.ParenExpr:
+		return g.isConstFoldableString(g.tree.Child(n, 0))
+	case enums.NodeKinds.BinaryExpr:
+		return g.tree.Text(n) == "+" &&
+			g.isConstFoldableString(g.tree.Child(n, 0)) &&
+			g.isConstFoldableString(g.tree.Child(n, 1))
+	default:
+		return false
+	}
+}
+
+// isConstFoldableCompositeLit is isConstFoldable's CompositeLit case,
+// mirroring constCompositeLit's own shape: a struct or fixed-size array
+// literal built entirely from constant elements. A dynamic-array (slice)
+// literal is never foldable - it always needs a real runtime heap allocation
+// (see LANGUAGE.md's "Dynamic arrays" section), which is exactly the kind of
+// initializer the synthesized init function (globalinit.go) now exists to
+// handle, rather than a case constExpr needs to reject.
+func (g *Generator) isConstFoldableCompositeLit(n ast.NodeIndex) bool {
+	t := g.info.Types[n]
+	_, elems := g.tree.CompositeLitElems(n)
+
+	switch t.Kind {
+	case sema.TypeStruct:
+		for _, e := range elems {
+			valueNode := e
+			if g.tree.IsKeyedElement(e) {
+				valueNode = g.tree.Child(e, 1)
+			}
+			if !g.isConstFoldable(valueNode) {
+				return false
+			}
+		}
+		return true
+
+	case sema.TypeArray:
+		if t.Dynamic {
+			return false
+		}
+		for _, e := range elems {
+			if !g.isConstFoldable(e) {
+				return false
+			}
+		}
+		return true
+
+	default:
+		return false
+	}
 }

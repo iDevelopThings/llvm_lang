@@ -484,3 +484,42 @@ justify it.
 "Pointers" section and `sema/pointer_test.go`'s
 `TestNewCompositeLitProducesPointer` for the explicit `(*a)[0]` case this
 implies.
+
+---
+
+## 2026-07-22 - Non-constant global initializers: declaration order, not a dependency-graph topological sort
+
+**Decision:** every non-constant top-level `var`'s real initializer now runs
+in one synthesized init function, in plain **source declaration order**
+across the whole package (each file in the order it's processed, each file's
+own globals in the order they're written) - not a full dependency-graph
+topological sort the way Go's own spec actually requires for package-level
+variable initialization (Go orders strictly by each variable's dependencies,
+so `var a = b + 1; var b = 2` initializes `b` before `a` regardless of
+which is written first).
+
+**Why:** a real topological sort needs a dependency graph built from which
+other globals each initializer's expression references (transitively, through
+any function it calls too, in general), plus cycle detection for when that
+graph doesn't have one - genuinely more analysis machinery than this round's
+actual goal (lifting the "must be a compile-time constant" restriction so a
+global's initializer can be an arbitrary expression at all, matching Go's
+*shape* of the feature) needed to justify building right away. Declaration
+order is simple, predictable, and correct for the overwhelmingly common case
+(a global's initializer depending only on globals already declared above it,
+or on nothing but function calls) - it only diverges from Go's real
+semantics in the narrower case of a global's initializer referencing another
+global declared *later* in the same package, which now deterministically
+observes that other global's zero value rather than Go's own
+however-it-actually-depends result.
+
+**Status:** shipped, with this scoping deliberately called out as narrower
+than Go's real behavior (not an oversight) - see `CODEGEN.md`'s "Global var
+initializers" section for the exact mechanism (`@llvm.global_ctors` plus one
+synthesized `llvm_lang.global_init` function, `src/codegen/globalinit.go`)
+and `src/codegen/globals_test.go`'s
+`TestGlobalNonConstantInitializersRunInDeclarationOrder` for the passing
+declaration-order behavior asserted directly. A real dependency-graph sort
+(matching Go's spec exactly) remains a reasonable future upgrade if a program
+ever needs it, without changing anything about the language-level feature
+itself - only which order this same synthesized function runs its stores in.

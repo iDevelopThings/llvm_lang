@@ -118,6 +118,12 @@ func compileAndJIT(t *testing.T, src string) *jitModule {
 	if err != nil {
 		t.Fatalf("NewExecutionEngine: %v", err)
 	}
+	// Mirrors cmd/llvmc's own jitRunMain: a normal linked/loaded program's C
+	// runtime would run @llvm.global_ctors (see CODEGEN.md's "Global var
+	// initializers" section) before this test ever calls any function of its
+	// own - MCJIT needs this triggered explicitly. Always safe to call: a
+	// module with no non-constant globals has no such array to run at all.
+	engine.RunStaticConstructors()
 	t.Cleanup(func() {
 		engine.Dispose()
 		mod.Ctx.Dispose()

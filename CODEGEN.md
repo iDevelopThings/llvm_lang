@@ -298,19 +298,87 @@ test binary as a child process and asserts the *child* exits abnormally -
 the same `GO_WANT_HELPER_PROCESS` pattern `os/exec`'s own test suite uses -
 rather than ever tripping the trap in-process.
 
-## Global `var` initializers must be compile-time constants
+## Global `var` initializers
 
-A top-level `var`'s initializer must be foldable at compile time
-(`codegen/constfold.go`'s `constExpr`: literals, parenthesization, unary
-`-`/`!`, binary arithmetic/comparison/logical/string-concatenation, and
-struct/array composite literals built entirely from constants). There is
-**no** synthesized Go-style init-routine-that-runs-before-main - a
-non-constant initializer (a call, a reference to another variable, `this`,
-a member/index expression) is a codegen-level diagnostic, not silently
-accepted and not a sema error (sema type-checks it fine; the restriction is
-purely about what codegen is willing to lower a *global's* initializer to).
-*(This section is expected to be rewritten once the implicit-global-init
-round lands - see `DECISIONS.md`.)*
+A top-level `var`'s initializer can be any well-typed expression now -
+matching Go's own real behavior (a package-level `var`'s initializer isn't
+required to be a compile-time constant; it runs automatically before `main`)
+- not just a compile-time constant the way this section used to describe.
+Sema needs no opinion on this at all: it already type-checks a non-constant
+global initializer fine (a call, a reference to another `var`, a `new`
+heap allocation, a lambda literal, ...) - this was always purely a
+codegen-level question of what `codegen.GeneratePackage` was willing to
+lower a *global's* initializer to.
+
+**Two lowering paths, chosen per-initializer, not per-program:**
+
+- **Foldable at compile time** (`isConstFoldable`, `src/codegen/constfold.go`)
+  - literals, parenthesization, unary `-`/`!`, binary arithmetic/comparison/
+  logical/string-concatenation, and struct/fixed-size-array composite
+  literals built entirely from constants - is folded directly into the
+  global's own LLVM initializer via `constExpr`, exactly as this package has
+  always done. `isConstFoldable` is a pure structural predicate (no
+  evaluation, no diagnostics) that decides *which* path a given initializer
+  takes; once it says yes, `constExpr` is guaranteed to only ever hit a
+  genuinely-erroneous case (division by zero, an out-of-range literal) if it
+  fails, never its "not a constant at all" default cases - so a diagnostic
+  reported past that point is always a real error in an expression that
+  really does look constant, not "this needed the other path instead".
+- **Everything else** (a function call, a reference to another `var`, a
+  member/index expression, a dynamic-array/slice literal, `new`, a lambda
+  literal, ...) - the global gets a zero-value initializer up front (matching
+  Go's own zero-value convention for a global whose real initializer hasn't
+  run yet), and its real initializer expression is queued
+  (`Generator.globalInits`) for `genGlobalCtors`
+  (`src/codegen/globalinit.go`) to lower as real generated code, once every
+  global and every function/constructor signature in the whole package
+  already exists (a non-constant initializer's expression can reference
+  either).
+
+**The synthesized init function, and `@llvm.global_ctors`:** `genGlobalCtors`
+builds one internal-linkage, parameterless function
+(`llvm_lang.global_init`) - the exact same per-function generation state
+(entry block, fresh locals map, no enclosing loop/receiver/lambda-capture
+context) `genFuncBody`/`genConstructorBody`/`genLambdaFunc` each set up for a
+body of their own - and lowers every queued initializer inside it via
+`storeValueInto` (`src/codegen/stmt.go`, the same helper a local
+`var`/short-var-decl already uses to store its own initializer), one plain
+`evaluate, then store into the global` per entry. This function is then
+registered into LLVM's own `@llvm.global_ctors` mechanism - a standard,
+well-documented array of `{ i32, ptr, ptr }` entries (`{ priority, ctor
+function pointer, associated data }`, appending linkage) any real linked/
+loaded program's C runtime startup sequence scans and calls, in priority
+order, before ever reaching `main`. A program whose every global happens to
+be compile-time-constant gets no `llvm_lang.global_init` function and no
+`@llvm.global_ctors` array at all - this mechanism leaves no trace in the IR
+unless it's actually needed.
+
+**Declaration order, not a full dependency graph:** every queued
+initializer runs in plain source declaration order across the whole package
+(each file in processing order, each file's own globals in the order
+they're written) - a deliberately narrower simplification than Go's own real
+spec (which topologically sorts by actual variable dependencies) - see
+`DECISIONS.md`'s dated entry for why this was scoped this way. A global's
+initializer referencing another global declared *later* in the same package
+sees only that other global's zero value, not whatever its own initializer
+would eventually compute - `TestGlobalNonConstantInitializersRunInDeclarationOrder`
+(`src/codegen/globals_test.go`) asserts this exact behavior directly, not
+just that it type-checks/compiles.
+
+**JIT execution needs this triggered manually:** unlike a normal linked/
+loaded program, `cmd/llvmc`'s JIT path (`jitRunMain`) never goes through a
+real C runtime startup sequence that would scan `@llvm.global_ctors` on its
+own - MCJIT's `ExecutionEngine` has no such thing. `jitRunMain` (and this
+package's own test helper, `compileAndJIT`) calls
+`engine.RunStaticConstructors()` explicitly, right after creating the engine
+and before ever looking up/calling `main` - go-llvm's exact binding for this
+purpose. Always safe to call even when no `@llvm.global_ctors` array exists
+at all (a program with only compile-time-constant globals). `-emit-llvm`
+needs no such change: it never reaches `llvm.NewExecutionEngine` in the
+first place (see its own section below), so the synthesized init function
+and `@llvm.global_ctors` array simply show up in the printed IR text like
+any other generated code, unexecuted - consistent with `-emit-llvm` never
+executing anything, before or after this feature.
 
 ## The `print` builtin, concretely
 

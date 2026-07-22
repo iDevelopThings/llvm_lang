@@ -168,12 +168,14 @@ func main() {
 	}
 }
 
-// TestCompilePackage_CodegenError covers a real codegen-level restriction
-// sema itself has no opinion on (see AGENTS.md's "Global var initializers
-// must be compile-time constants" section): a top-level var whose
-// initializer calls a function. sema.Check passes this fine; only
-// codegen.GeneratePackage rejects it.
-func TestCompilePackage_CodegenError(t *testing.T) {
+// TestCompilePackage_NonConstantGlobalInitializer covers the feature
+// documented in CODEGEN.md's "Global var initializers" section end to end,
+// through this package's own real pipeline (not just codegen in isolation -
+// see src/codegen/globals_test.go for the JIT-executed coverage of this same
+// feature): a top-level var whose initializer calls a function used to be a
+// codegen-level error; it's real, legal code now, lowered into a synthesized
+// init function rather than folded at compile time.
+func TestCompilePackage_NonConstantGlobalInitializer(t *testing.T) {
 	res := CompilePackage([]loader.SourceFile{
 		{Name: "t.llx", Src: `
 func get() int {
@@ -187,13 +189,41 @@ func main() {
 }
 `},
 	})
+	t.Cleanup(func() {
+		if res.Module != nil {
+			res.Module.Dispose()
+		}
+	})
+
+	if res.Module == nil {
+		t.Fatalf("Module = nil, want a real module; VerifyErr = %v, diags = %v", res.VerifyErr, dumpDiags(res))
+	}
+}
+
+// TestCompilePackage_CodegenError covers the one class of codegen-only
+// diagnostic that survives the non-constant-global-initializer round (see
+// src/codegen/constfold.go's isConstFoldable doc comment): a genuine error
+// inside an initializer that's still structurally constant-*shaped* (both
+// operands of `/` are literals) - division by zero - rather than deferred to
+// a synthesized init function the way an actually non-constant initializer
+// (TestCompilePackage_NonConstantGlobalInitializer above) now is.
+func TestCompilePackage_CodegenError(t *testing.T) {
+	res := CompilePackage([]loader.SourceFile{
+		{Name: "t.llx", Src: `
+var a int = 5 / 0
+
+func main() {
+	print(a)
+}
+`},
+	})
 
 	if res.Module != nil {
 		res.Module.Dispose()
 		t.Fatal("Module = non-nil, want nil on a codegen error")
 	}
-	if !anyDiagContains(res, "compile-time constant") {
-		t.Errorf("expected a diagnostic mentioning \"compile-time constant\", got: %v", dumpDiags(res))
+	if !anyDiagContains(res, "division by zero") {
+		t.Errorf("expected a diagnostic mentioning \"division by zero\", got: %v", dumpDiags(res))
 	}
 }
 

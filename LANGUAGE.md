@@ -38,6 +38,50 @@ func main() {
 
 ```
 
+## Global `var` initializers
+
+A top-level `var`'s initializer can be any well-typed expression, not just a
+literal or another compile-time-constant expression - matching Go's own real
+package-level `var` behavior: a function call, a reference to another global,
+a `new` heap allocation, a dynamic-array/slice literal, a lambda literal, and
+so on all work. There's no `func init() {}` to write by hand for this -
+every non-constant global's real initializer runs automatically, once, in a
+synthesized routine before `main` ever starts (see `CODEGEN.md`'s "Global
+var initializers" section for the actual `@llvm.global_ctors` mechanism this
+compiles down to).
+
+```go
+func computeStart() int {
+    return 40 + 2
+}
+
+var start int = computeStart()   // calls a function
+var doubled int = start * 2      // reads another global
+
+func main() int {
+    return doubled   // 84
+}
+```
+
+**Initialization order is source declaration order, not a full dependency
+graph** - a deliberately narrower simplification than Go's own real spec
+(which topologically sorts by each variable's actual dependencies, so which
+one is written first in the source doesn't matter there). Here, every
+non-constant global's initializer runs strictly in the order it's declared
+(across every file in the package, in file-processing order) - a global
+whose initializer reads another global declared *later* in the same package
+sees only that other global's zero value, not whatever its initializer would
+eventually compute:
+
+```go
+var a int = b + 1   // b hasn't been initialized yet here - reads b's zero
+                     // value (0), so a == 1
+var b int = 5        // b's real initializer runs after a's already ran
+```
+
+See `DECISIONS.md`'s dated entry for why this round scopes ordering this way
+rather than building a real dependency-graph sort up front.
+
 ## Loops
 
 Only `for` exists - no `while`. It covers all three Go-style forms:

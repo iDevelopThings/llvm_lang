@@ -256,6 +256,17 @@ func initJIT() {
 // src/codegen/func.go) and returns its i32 result as a plain int, ready to
 // hand straight to os.Exit.
 //
+// engine.RunStaticConstructors() runs first, unconditionally - a normal
+// linked/loaded program's own C runtime startup sequence would scan and call
+// every entry in `@llvm.global_ctors` (see CODEGEN.md's "Global var
+// initializers" section) before ever reaching main on its own, but MCJIT's
+// execution engine has no such startup sequence at all, so this driver has
+// to trigger it explicitly - the exact call go-llvm's own ExecutionEngine
+// exposes for this. A module with no non-constant globals has no
+// `@llvm.global_ctors` array in the first place (see
+// src/codegen/globalinit.go's genGlobalCtors), so this is always safe to
+// call, not just whenever one happens to exist.
+//
 // This calls through the function's raw address via syscall.SyscallN rather
 // than ExecutionEngine.RunFunction/GenericValue, mirroring
 // src/codegen/codegen_test.go's runInt32 helper exactly (see its doc comment
@@ -278,6 +289,7 @@ func jitRunMain(mod *codegen.Module) (int, error) {
 		mod.Dispose()
 		return 0, fmt.Errorf("failed to create execution engine: %w", err)
 	}
+	engine.RunStaticConstructors()
 
 	addr := engine.GetFunctionAddress("main")
 	if addr == 0 {

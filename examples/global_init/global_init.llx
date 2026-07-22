@@ -1,0 +1,41 @@
+// global_init.llx - non-constant top-level `var` initializers (see
+// LANGUAGE.md/CODEGEN.md's "Global var initializers" sections): a global's
+// initializer can now be any well-typed expression, not just a compile-time
+// constant - a function call, a reference to another global, or a heap
+// allocation via `new` - evaluated by a synthesized init function that runs
+// automatically before main (via LLVM's own @llvm.global_ctors mechanism),
+// matching Go's own real package-level var behavior rather than requiring a
+// hand-written `func init() {}`.
+//
+// `start`'s initializer calls a function; `counter`'s initializer both
+// references `start` (declared just above it) and heap-allocates via `new` -
+// none of the three would have been legal before this feature landed.
+//
+// Run with:
+//   .\llvmc.exe examples\global_init\global_init.llx
+//   echo $LASTEXITCODE   # (PowerShell) -> 52
+
+struct Counter {
+    value int
+
+    constructor(startValue int) {
+        this.value = startValue
+    }
+}
+
+func computeStart() int {
+    return 40 + 2
+}
+
+var start int = computeStart()
+var counter *Counter = new Counter(start)
+
+func main() int {
+    print(start)         // 42
+    print(counter.value) // 42
+
+    counter.value = counter.value + 10
+    print(counter.value) // 52
+
+    return counter.value
+}
