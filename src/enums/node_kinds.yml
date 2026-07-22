@@ -10,6 +10,7 @@ fields:
 values:
   - name: File
   - name: Bad
+  - name: ImportDecl
   - name: VarDecl
   - name: ShortVarDecl
   - name: FuncDecl

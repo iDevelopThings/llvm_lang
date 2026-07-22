@@ -483,6 +483,16 @@ func (g *Generator) genCallExpr(n ast.NodeIndex) llvm.Value {
 		return g.genConversion(n, argNodes[0])
 	}
 	switch {
+	case g.tree.Nodes[calleeNode].Kind == enums.NodeKinds.MemberExpr && g.isPackageQualifiedCall(calleeNode):
+		// `mathutils.Add(...)` - a plain direct call to a free function
+		// exported from another package (see LANGUAGE.md's "Imports"
+		// section), already resolved straight to its own *sema.Symbol by
+		// sema (Info.Refs[calleeNode] - see resolve.go's
+		// resolvePackageMemberExpr). There is no receiver to compute here,
+		// unlike an ordinary method call - genFuncCall is exactly the same
+		// direct-call lowering a same-package free function call already
+		// uses.
+		return g.genFuncCall(calleeNode, argNodes)
 	case g.tree.Nodes[calleeNode].Kind == enums.NodeKinds.MemberExpr:
 		return g.genMethodCall(calleeNode, argNodes)
 	case g.isDirectFuncCall(calleeNode):
@@ -490,6 +500,22 @@ func (g *Generator) genCallExpr(n ast.NodeIndex) llvm.Value {
 	default:
 		return g.genIndirectCall(calleeNode, argNodes)
 	}
+}
+
+// isPackageQualifiedCall reports whether calleeNode (a MemberExpr) is a
+// package-qualified function call - its object is a bare Ident resolving
+// (via Info.Refs) to a SymPackage symbol (an import binding), as opposed to
+// an ordinary struct-value method call. Mirrors sema's own
+// memberObjectIsPackage (sema/typecheck.go) exactly, for the identical
+// reason isDirectFuncCall/isConversionCall already mirror their own sema
+// counterparts - see CODEGEN.md.
+func (g *Generator) isPackageQualifiedCall(calleeNode ast.NodeIndex) bool {
+	objNode := g.tree.Child(calleeNode, 0)
+	if g.tree.Nodes[objNode].Kind != enums.NodeKinds.Ident {
+		return false
+	}
+	sym, ok := g.info.Refs[objNode]
+	return ok && sym.Kind == sema.SymPackage
 }
 
 // isDirectFuncCall mirrors sema's own dispatch (funcSigForCall in

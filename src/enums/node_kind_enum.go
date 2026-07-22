@@ -15,43 +15,45 @@ type NodeKind int
 const (
 	NodeKindFile          NodeKind = 0
 	NodeKindBad           NodeKind = 1
-	NodeKindVarDecl       NodeKind = 2
-	NodeKindShortVarDecl  NodeKind = 3
-	NodeKindFuncDecl      NodeKind = 4
-	NodeKindParamList     NodeKind = 5
-	NodeKindParam         NodeKind = 6
-	NodeKindStructDecl    NodeKind = 7
-	NodeKindField         NodeKind = 8
-	NodeKindBlock         NodeKind = 9
-	NodeKindExprStmt      NodeKind = 10
-	NodeKindReturnStmt    NodeKind = 11
-	NodeKindBreakStmt     NodeKind = 12
-	NodeKindContinueStmt  NodeKind = 13
-	NodeKindIfStmt        NodeKind = 14
-	NodeKindForStmt       NodeKind = 15
-	NodeKindAssignStmt    NodeKind = 16
-	NodeKindIncDecStmt    NodeKind = 17
-	NodeKindIdent         NodeKind = 18
-	NodeKindNumberLit     NodeKind = 19
-	NodeKindStringLit     NodeKind = 20
-	NodeKindBoolLit       NodeKind = 21
-	NodeKindBinaryExpr    NodeKind = 22
-	NodeKindUnaryExpr     NodeKind = 23
-	NodeKindCallExpr      NodeKind = 24
-	NodeKindParenExpr     NodeKind = 25
-	NodeKindIndexExpr     NodeKind = 26
-	NodeKindMemberExpr    NodeKind = 27
-	NodeKindArrayType     NodeKind = 28
-	NodeKindCompositeLit  NodeKind = 29
-	NodeKindKeyValueExpr  NodeKind = 30
-	NodeKindThisExpr      NodeKind = 31
-	NodeKindFuncType      NodeKind = 32
-	NodeKindParamTypeList NodeKind = 33
+	NodeKindImportDecl    NodeKind = 2
+	NodeKindVarDecl       NodeKind = 3
+	NodeKindShortVarDecl  NodeKind = 4
+	NodeKindFuncDecl      NodeKind = 5
+	NodeKindParamList     NodeKind = 6
+	NodeKindParam         NodeKind = 7
+	NodeKindStructDecl    NodeKind = 8
+	NodeKindField         NodeKind = 9
+	NodeKindBlock         NodeKind = 10
+	NodeKindExprStmt      NodeKind = 11
+	NodeKindReturnStmt    NodeKind = 12
+	NodeKindBreakStmt     NodeKind = 13
+	NodeKindContinueStmt  NodeKind = 14
+	NodeKindIfStmt        NodeKind = 15
+	NodeKindForStmt       NodeKind = 16
+	NodeKindAssignStmt    NodeKind = 17
+	NodeKindIncDecStmt    NodeKind = 18
+	NodeKindIdent         NodeKind = 19
+	NodeKindNumberLit     NodeKind = 20
+	NodeKindStringLit     NodeKind = 21
+	NodeKindBoolLit       NodeKind = 22
+	NodeKindBinaryExpr    NodeKind = 23
+	NodeKindUnaryExpr     NodeKind = 24
+	NodeKindCallExpr      NodeKind = 25
+	NodeKindParenExpr     NodeKind = 26
+	NodeKindIndexExpr     NodeKind = 27
+	NodeKindMemberExpr    NodeKind = 28
+	NodeKindArrayType     NodeKind = 29
+	NodeKindCompositeLit  NodeKind = 30
+	NodeKindKeyValueExpr  NodeKind = 31
+	NodeKindThisExpr      NodeKind = 32
+	NodeKindFuncType      NodeKind = 33
+	NodeKindParamTypeList NodeKind = 34
 )
 
 type NodeKindContainer struct {
 	File          NodeKind
 	Bad           NodeKind
+	ImportDecl    NodeKind
 	VarDecl       NodeKind
 	ShortVarDecl  NodeKind
 	FuncDecl      NodeKind
@@ -90,6 +92,7 @@ type NodeKindContainer struct {
 var NodeKinds = NodeKindContainer{
 	File:          NodeKindFile,
 	Bad:           NodeKindBad,
+	ImportDecl:    NodeKindImportDecl,
 	VarDecl:       NodeKindVarDecl,
 	ShortVarDecl:  NodeKindShortVarDecl,
 	FuncDecl:      NodeKindFuncDecl,
@@ -138,6 +141,10 @@ var nodeKindInfos = map[NodeKind]NodeKindInfo{
 	NodeKindBad: {
 		NodeKind: NodeKindBad,
 		Name:     "Bad",
+	},
+	NodeKindImportDecl: {
+		NodeKind: NodeKindImportDecl,
+		Name:     "ImportDecl",
 	},
 	NodeKindVarDecl: {
 		NodeKind: NodeKindVarDecl,
@@ -272,6 +279,7 @@ var nodeKindInfos = map[NodeKind]NodeKindInfo{
 var nodeKindValues = []NodeKind{
 	NodeKindFile,
 	NodeKindBad,
+	NodeKindImportDecl,
 	NodeKindVarDecl,
 	NodeKindShortVarDecl,
 	NodeKindFuncDecl,
@@ -309,6 +317,7 @@ var nodeKindValues = []NodeKind{
 var nodeKindByName = map[string]NodeKind{
 	"file":          NodeKindFile,
 	"bad":           NodeKindBad,
+	"importdecl":    NodeKindImportDecl,
 	"vardecl":       NodeKindVarDecl,
 	"shortvardecl":  NodeKindShortVarDecl,
 	"funcdecl":      NodeKindFuncDecl,

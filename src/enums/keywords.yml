@@ -32,3 +32,5 @@ values:
     string: "struct"
   - name: This
     string: "this"
+  - name: Import
+    string: "import"

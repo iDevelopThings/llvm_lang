@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"llvm_lang/src/loader"
+
+	"github.com/spf13/afero"
 )
 
 // TestCompileAndRun_Success drives compileAndRun in-process against a valid
@@ -353,4 +355,126 @@ func TestBinary_MultiFileDirectory(t *testing.T) {
 
 	t.Run("directory", func(t *testing.T) { runAndCheck(t, "../../examples/multifile") })
 	t.Run("file", func(t *testing.T) { runAndCheck(t, "../../examples/multifile/main.llx") })
+}
+
+// --- Cross-package import tests (see LANGUAGE.md's "Imports" section) -
+// loader.LoadProgram discovers/parses/dedups/cycle-checks the whole
+// transitive import graph, and compileAndRunProgram drives it through the
+// rest of the pipeline as one shared Module.
+
+// TestBinary_ImportsExample shells out to the real llvmc binary against
+// examples/imports/app - a real two-package program (app imports the
+// sibling mathutils package - see that directory's own doc comments) - both
+// as a directory and as one of its files, exactly like
+// TestBinary_MultiFileDirectory does one level down.
+func TestBinary_ImportsExample(t *testing.T) {
+	const wantStdout = "30\n15"
+	const wantExit = 30
+
+	runAndCheck := func(t *testing.T, path string) {
+		t.Helper()
+		cmd := exec.Command(llvmcPath, path)
+		out, err := cmd.Output()
+		if err != nil {
+			ee, ok := err.(*exec.ExitError)
+			if !ok {
+				t.Fatalf("running llvmc: %v", err)
+			}
+			if ee.ExitCode() != wantExit {
+				t.Fatalf("exit code = %d, want %d, stderr:\n%s", ee.ExitCode(), wantExit, ee.Stderr)
+			}
+		} else {
+			t.Fatalf("expected llvmc to exit %d, got exit 0", wantExit)
+		}
+
+		got := strings.ReplaceAll(string(out), "\r\n", "\n")
+		got = strings.TrimRight(got, "\n")
+		if got != wantStdout {
+			t.Errorf("stdout = %q, want %q", got, wantStdout)
+		}
+	}
+
+	t.Run("directory", func(t *testing.T) { runAndCheck(t, "../../examples/imports/app") })
+	t.Run("file", func(t *testing.T) { runAndCheck(t, "../../examples/imports/app/main.llx") })
+}
+
+// TestCompileAndRunProgram_CrossPackageImports drives compileAndRunProgram
+// in-process (via loader.LoadProgram over an afero.MemMapFs, so no real
+// filesystem is involved) against a two-package program - proving the
+// cmd/llvmc <-> loader <-> sema bridging (compileAndRunProgram,
+// runPipeline) works end to end, not just the individually-tested pieces.
+func TestCompileAndRunProgram_CrossPackageImports(t *testing.T) {
+	fs := afero.NewMemMapFs()
+	sep := string(filepath.Separator)
+	writeFile := func(path, src string) {
+		if err := afero.WriteFile(fs, path, []byte(src), 0o644); err != nil {
+			t.Fatalf("writing %s: %v", path, err)
+		}
+	}
+	writeFile(filepath.Join(sep, "prog", "mathutils", "add.llx"), `
+func Add(a int, b int) int {
+	return a + b
+}
+`)
+	writeFile(filepath.Join(sep, "prog", "app", "main.llx"), `
+import "../mathutils"
+
+func main() int {
+	return mathutils.Add(2, 3)
+}
+`)
+
+	prog, err := loader.LoadProgram(fs, filepath.Join(sep, "prog", "app"))
+	if err != nil {
+		t.Fatalf("LoadProgram: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	code := compileAndRunProgram(prog, &stderr, false)
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want empty", stderr.String())
+	}
+	if code != 5 {
+		t.Errorf("exit code = %d, want 5", code)
+	}
+}
+
+// TestCompileAndRunProgram_UnexportedNameIsCompileError covers the failure
+// path: a cross-package reference to an unexported name must stop the
+// pipeline with exitCompile and a diagnostic mentioning it, never panic or
+// silently succeed.
+func TestCompileAndRunProgram_UnexportedNameIsCompileError(t *testing.T) {
+	fs := afero.NewMemMapFs()
+	sep := string(filepath.Separator)
+	writeFile := func(path, src string) {
+		if err := afero.WriteFile(fs, path, []byte(src), 0o644); err != nil {
+			t.Fatalf("writing %s: %v", path, err)
+		}
+	}
+	writeFile(filepath.Join(sep, "prog", "mathutils", "add.llx"), `
+func add(a int, b int) int {
+	return a + b
+}
+`)
+	writeFile(filepath.Join(sep, "prog", "app", "main.llx"), `
+import "../mathutils"
+
+func main() int {
+	return mathutils.add(2, 3)
+}
+`)
+
+	prog, err := loader.LoadProgram(fs, filepath.Join(sep, "prog", "app"))
+	if err != nil {
+		t.Fatalf("LoadProgram: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	code := compileAndRunProgram(prog, &stderr, false)
+	if code != exitCompile {
+		t.Errorf("exit code = %d, want %d", code, exitCompile)
+	}
+	if !strings.Contains(stderr.String(), "not exported") {
+		t.Errorf("stderr = %q, want it to mention the unexported name", stderr.String())
+	}
 }

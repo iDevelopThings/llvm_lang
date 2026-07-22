@@ -174,3 +174,76 @@ just for this one package - see `AGENTS.md`'s new note under `## Standards`:
 any future disk I/O this compiler needs should go through `afero.Fs` for the
 same testability reason, rather than reaching for `os` directly out of
 habit.
+
+---
+
+## 2026-07-22 - Cross-package imports: relative-path resolution, not a module-root/manifest scheme
+
+**Decision:** an `import "path"` is resolved relative to the *importing
+file's own directory* - confirmed directly with the user, not inferred.
+`./mathutils` written in `app/main.llx` resolves to `app/mathutils`; a
+different file in a different directory importing the exact same path text
+resolves relative to *its own* directory instead. There is no notion of a
+project/module root, no manifest file naming a module path, and no absolute
+"package path" concept at all.
+
+**Why:** this is the simplest possible scheme that still fully supports the
+one thing this round needs (one package referencing another one it knows
+the relative location of) - a module-root/manifest scheme (Go modules,
+`go.mod`-style) adds real design surface (where does the root live, what
+syntax names a module, how does a package path map back to a directory) for
+a problem this project doesn't have yet: there's still no multi-repository/
+external-dependency story at all, so nothing needs a globally-unique module
+path to disambiguate against. Relative-path resolution reuses `src/loader`'s
+already-existing directory-resolution logic almost as-is, extended to
+recurse.
+
+**Status:** shipped. See `LANGUAGE.md`'s "Imports" section and
+`src/loader/program.go`'s `LoadProgram`.
+
+---
+
+## 2026-07-22 - Imports: one shared Module for the whole program, not real separate compilation
+
+**Decision:** extending the existing "one shared Module per package" model
+(see the two entries above) to "one shared Module for the entire program" -
+every package reachable via the import graph still lowers into the exact
+same single `llvm.Module`, not separate per-package modules with a real
+link step.
+
+**Why:** identical reasoning to the original one-Module-per-package
+decision, one level up: this compiler is still the only producer of every
+module in play (no external LLVM module from another toolchain to
+interoperate with), and every cross-file lookup codegen needs
+(`Generator.funcs`/`globals`/`structLayouts`) was already keyed by
+`*sema.Symbol`/`*sema.StructInfo` pointer identity rather than by which file
+- or, it turns out, which *package* - originally declared it. Verified, not
+assumed, before shipping: `genPackage`'s five passes needed zero changes to
+correctly handle a multi-package program, since none of them have any
+notion of "package" to begin with - they just iterate "every tree passed
+in". Real separate compilation (an object-file backend, a real linker) isn't
+a need this project has yet, and building one purely to say packages are
+"really" separately compiled would be speculative machinery with no
+motivating requirement behind it.
+
+**Status:** shipped. See `CODEGEN.md`'s "Imports: still one shared Module,
+now for the whole program" section.
+
+---
+
+## 2026-07-22 - Imports: no aliasing syntax this round
+
+**Decision:** `import "./mathutils"` always binds its path's own last
+segment as the local name (`mathutils`) - there is no `import m
+"./mathutils"` form to pick a different local name.
+
+**Why:** not needed for this round to be a complete, usable feature -
+every real use case this round targets (one package calling into another
+it doesn't already have a name collision with) works fine without it.
+Deliberately deferred rather than designed-then-unused: aliasing is a small,
+additive grammar extension (an optional identifier before the path string in
+`ImportDecl`) that can be layered on later with no rework of the
+path-resolution/binding machinery this round already built - it wasn't worth
+the extra grammar/scope-binding surface now on spec alone.
+
+**Status:** deferred, not shipped. See `LANGUAGE.md`'s "Imports" section.

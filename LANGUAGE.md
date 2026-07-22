@@ -11,7 +11,7 @@ The language is supposed to be similar to go's syntax.
 
 ## Top level
 
-File scope is Go-style, not script-style: only `var`, `func`, and `struct` declarations are legal directly at the top level - no bare `if`/`for`/`:=`/expression-statements there. This isn't an arbitrary restriction: LLVM has no notion of "just run a statement at global scope," only static data initializers, so a top-level `var` is a real global (no function needed to "run" it) while anything actually executable needs a real entry point, same as Go/C/Rust - `func main()` is required for that.
+File scope is Go-style, not script-style: only `import`, `var`, `func`, and `struct` declarations are legal directly at the top level - no bare `if`/`for`/`:=`/expression-statements there. This isn't an arbitrary restriction: LLVM has no notion of "just run a statement at global scope," only static data initializers, so a top-level `var` is a real global (no function needed to "run" it) while anything actually executable needs a real entry point, same as Go/C/Rust - `func main()` is required for that. See "Imports" below for `import`'s own rules (it must come first in a file, before any other declaration).
 
 ```go
 
@@ -453,17 +453,117 @@ even if it also contains `.llx` files. A subdirectory full of `.llx` files
 is simply a separate, unrelated package by this round's rules (there's no
 way yet to reference it from another package at all - see below).
 
-**Single package only, no imports yet:** this round adds the directory/
-multi-file *scoping* model only - there is no `import` syntax, no
-cross-package resolution, and no cycle detection, because there is only
-ever one package in play at all: everything reachable from the directory
-you point `llvmc` at. A future round is expected to add real cross-package
-imports on top of this.
+**Cross-package imports:** this section covers single-package scoping only;
+see "Imports" below for real `import` syntax, cross-package resolution, and
+cycle detection, all built directly on top of the directory/multi-file model
+described here.
 
-**`Exported`/visibility is a hook, not a rule - yet:** Go's own name-case
-visibility convention (`Point` visible outside its package, `point` not) has
-a real field for it already reserved in the compiler (`sema.Symbol.Exported`
-- see `sema/scope.go`), but nothing enforces it this round: with only one
-package ever in play, there is no *outside* to be visible or invisible
-from, so enforcing the rule now would have nothing to check against. This
-is expected to become meaningful once cross-package imports exist.
+**`Exported`/visibility is now a real, enforced rule:** Go's own name-case
+visibility convention (`Point` visible outside its package, `point` not) is
+implemented via `sema.Symbol.Exported` (see `sema/scope.go`) and actually
+enforced the moment a second package exists to enforce it against - see
+"Imports" below for exactly what's checked and what isn't. **Within a single
+package, case still never matters for visibility** - every example above,
+and every same-package cross-file reference, is completely unaffected by
+this: `Exported` only has any effect the moment a name is reached through an
+actual package qualifier (`pkg.Name`).
+
+## Imports
+
+A package can reference another package's **exported** (capitalized-name)
+top-level declarations via a new top-level `import "path"` declaration,
+which must come before every other top-level declaration in the file
+(matching Go's own ordering rule - simplest to parse, no real downside):
+
+```go
+// app/main.llx
+import "./mathutils"
+
+func main() int {
+    return mathutils.Add(1, 2)
+}
+
+// app/mathutils/add.llx  (package "mathutils", i.e. the directory name)
+func Add(a int, b int) int {
+    return a + b
+}
+```
+
+**Path resolution is relative to the importing file's own directory** - not
+the entry package's directory, and not a module-root/manifest scheme (see
+`DECISIONS.md`): `./mathutils` written in `app/main.llx` resolves to
+`app/mathutils`, exactly the same directory-resolution `src/loader` already
+does for a single root, extended to follow every import transitively,
+deduping a diamond dependency (two packages importing the same third one) by
+directory identity so it's only ever loaded once, and rejecting a real
+import cycle with a clear error naming it (e.g.
+`import cycle: a -> b -> a`) rather than looping forever.
+
+**An import's local name** defaults to its path's own last segment -
+`mathutils` for `./mathutils`, `util` for `../shared/util` - Go's own
+convention. **There is no aliasing syntax yet** (`import m "./mathutils"`) -
+deliberately deferred (see `DECISIONS.md`): easy to add later, not needed
+for this round to be complete.
+
+**An import binding is file-scoped, not package-scoped** - matching Go
+exactly. An import declared in one file of a package is *not* visible in a
+different file of the same package unless that file also writes its own
+`import "./mathutils"`:
+
+```go
+// app/main.llx
+import "./mathutils"
+
+func useIt() int {
+    return mathutils.Add(1, 2)   // fine - this file imported it
+}
+
+// app/other.llx  (same package as main.llx)
+func alsoUseIt() int {
+    return mathutils.Add(3, 4)   // error: undefined: mathutils - this file
+                                 // never wrote its own import
+}
+```
+
+**Export enforcement is real:** referencing an unexported name through a
+package qualifier is a compile error - this applies to top-level functions,
+struct types, and a struct value's fields/methods, whenever the struct type
+itself belongs to another package:
+
+```go
+// mathutils/add.llx
+func Add(a int, b int) int { return a + b }    // exported - reachable
+func double(x int) int { return x * 2 }        // unexported - NOT reachable
+
+struct Point {
+    X int      // exported field
+    secret int // unexported field
+}
+
+// app/main.llx
+import "./mathutils"
+
+func main() int {
+    mathutils.Add(1, 2)      // fine
+    mathutils.double(1)      // error: mathutils.double is not exported
+
+    p := mathutils.Point{1, 2}
+    _ = p.X                  // fine
+    _ = p.secret             // error: secret is not exported
+}
+```
+
+Constructing a struct value with an unexported field (`mathutils.Point{1,
+2}` above) is deliberately still allowed even though `Point` has an
+unexported field - only actual member *access* is enforced, not
+construction (a most-permissive default; see `BLOCKERS.md` if this is ever
+tightened to match Go's own stricter same-literal rule).
+
+A package-qualified name can also appear in **type position**
+(`var p mathutils.Point`, a composite literal's type `mathutils.Point{...}`)
+- the exact same export rule applies there too.
+
+**Within one package, nothing here changes:** case still never matters for
+same-package visibility (see the "Multi-file packages" section above) -
+`Exported`/export enforcement only ever applies to a name reached through an
+actual package qualifier.

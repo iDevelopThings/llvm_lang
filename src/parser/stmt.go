@@ -71,7 +71,11 @@ func (p *Parser) parseBlock() ast.NodeIndex {
 }
 
 // parseTypeExpr parses a type reference: a bare identifier (int, string,
-// bool, or a struct name), an array type `[N]T` (fixed-size) / `[]T`
+// bool, or a struct name), a package-qualified name (`pkg.Name` - an
+// imported package's exported struct type, see LANGUAGE.md's "Imports"
+// section; parsed as a MemberExpr node, the exact same shape a value-level
+// `a.b` already uses - sema.typeFromNode/resolveType tell the two apart by
+// context, not by grammar), an array type `[N]T` (fixed-size) / `[]T`
 // (dynamic - parsed now, rejected later at a semantic stage once one
 // exists, so the grammar doesn't need to change when dynamic arrays land),
 // or a function type `func(T1, T2) R` (see parseFuncType) - first-class
@@ -96,7 +100,16 @@ func (p *Parser) parseTypeExpr() ast.NodeIndex {
 		return p.parseFuncType()
 	}
 	nameTok := p.expectIdent()
-	return p.tree.NewNode(enums.NodeKinds.Ident, nameTok, tokenSpan(nameTok))
+	ident := p.tree.NewNode(enums.NodeKinds.Ident, nameTok, tokenSpan(nameTok))
+	if _, ok := p.accept(enums.Lexemes.Dot); ok {
+		fieldTok := p.expectIdent()
+		span := ast.Span{
+			Start: nameTok.Start,
+			End:   fieldTok.End,
+		}
+		return p.tree.NewNode(enums.NodeKinds.MemberExpr, fieldTok, span, ident)
+	}
+	return ident
 }
 
 // parseFuncType parses a function-type expression: `func(T1, T2) R` (a

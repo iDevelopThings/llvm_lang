@@ -32,6 +32,10 @@ type Span struct {
 // that NodeKind needs instead of a dedicated field per kind:
 //   - Ident, NumberLit, StringLit, BoolLit, ThisExpr: the literal/identifier/
 //     keyword token itself (name or text via Tree.Text)
+//   - ImportDecl: the string-literal token holding the raw import path (e.g.
+//     `"./mathutils"` - decode it via File.StringValue, exactly like a
+//     StringLit expression; there's no aliasing syntax yet - see
+//     LANGUAGE.md's "Imports" section - so there's no separate name node)
 //   - BinaryExpr, UnaryExpr: the operator token (Tok.Lexeme says which)
 //   - MemberExpr: the field-name identifier token (`a.b` - Tok is `b`)
 //   - AssignStmt, IncDecStmt: the assignment/inc-dec operator token
@@ -59,6 +63,7 @@ type Span struct {
 //     expression (positional) or a KeyValueExpr (keyed)
 //   - KeyValueExpr: [key, value] - fixed arity
 //   - ThisExpr: no children (leaf)
+//   - ImportDecl: no children (leaf) - see Tok above
 //   - VarDecl: [name, type, init] - fixed arity; type and/or init may be
 //     InvalidNode (at least one must be present, but that's a sema concern,
 //     not a parse error)

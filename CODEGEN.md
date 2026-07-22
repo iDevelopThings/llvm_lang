@@ -409,28 +409,79 @@ signatures; every file's function signatures before any file's function
 bodies - see `genPackage`). `Generator.tree`/`Generator.info` still switch
 per file, but only at the top of each pass's per-file loop, never mid-body.
 
+## Imports: still one shared Module, now for the whole program
+
+See `LANGUAGE.md`'s "Imports" section for the language-level model
+(directory = package, `import "path"` resolved relative to the importing
+file, exported-only cross-package access). Nothing above changes at all:
+`GeneratePackage` is simply called with *every package's* trees/infos in the
+whole program flattened into one `[]*ast.Tree`/`map[*ast.Tree]*sema.Info`
+(built by `cmd/llvmc`'s `compileAndRunProgram` from `loader.LoadProgram`'s
+already-resolved import graph, via `sema.ResolveProgram`/`CheckProgram` -
+see their own doc comments) - there is still only ever **one shared
+`llvm.Module` for the entire program**, never one Module per package linked
+together, for exactly the same reason multi-file support already gave for
+one Module per *file*: every `*sema.Symbol`/`*sema.StructInfo` lookup
+(`Generator.funcs`/`globals`/`structLayouts`) is already keyed by pointer
+identity, not by which tree - let alone which package - originally declared
+it, so a package boundary is no more special to codegen than a file
+boundary already was. This was verified, not assumed: `genPackage`'s own
+five passes (structs, struct bodies, globals, func signatures, func bodies)
+need no changes at all to correctly cover a multi-package program, since
+they already iterate "every tree passed in" with no notion of package
+grouping.
+
+A package-qualified call (`mathutils.Add(...)`) is recognized in codegen
+(`isPackageQualifiedCall`, `src/codegen/expr.go`) the same way sema
+recognizes it (`Info.Refs` on the callee `MemberExpr`'s own object resolving
+to `sema.SymPackage`) and lowered as a **plain direct call** - `genFuncCall`,
+the exact same lowering an ordinary same-package free-function call already
+uses - since a package-qualified function call has no receiver to compute,
+unlike an ordinary method call (`genMethodCall`), which the dispatch in
+`genCallExpr` still falls through to otherwise.
+
+**Diamond dependencies are deduped by directory identity**, not re-lowered
+per import edge: `loader.LoadProgram` loads a given package directory
+exactly once regardless of how many other packages import it (see
+`src/loader`'s own doc comment), so its trees appear exactly once in the
+flattened list `GeneratePackage` receives - its functions/structs are
+declared into the shared Module exactly once, and every importer's calls
+into it resolve to that one declaration via the same pointer-keyed maps
+above. There is no separate-compilation/linking concept for this project to
+get right here at all (see `DECISIONS.md`).
+
 # The `llvmc` CLI driver (`cmd/llvmc`)
 
 The first way to actually *run* an llvm_lang program as a human, rather than
 only proving the pipeline works via `go test`: given a path (a single source
 file, or a directory - see `LANGUAGE.md`'s "Multi-file packages" section),
-it resolves the package's full file list (`src/loader`'s `Load`, backed by
-`afero.NewOsFs()`), drives every file through the full pipeline
-(`lexer.NewFile` -> `parser.ParseFile` per file, then
-`sema.ResolvePackage` -> `sema.CheckPackage` -> `codegen.GeneratePackage`
-across all of them together), and on full success JIT-executes the
-resulting module's `main` directly in this process - so the program's own
-`print` calls (real libc `printf` calls under the hood) write to this
-process's real stdout, which a `go test`-hosted JIT call can't easily show.
+it resolves the whole program's transitive import graph
+(`src/loader`'s `LoadProgram`, backed by `afero.NewOsFs()` - see
+`LANGUAGE.md`'s "Imports" section for the path-resolution/dedup/cycle rules
+this implements, and `src/loader`'s own package doc comment for why file
+*parsing* now lives there too, not just discovery), drives every package's
+files through the rest of the pipeline (`sema.ResolveProgram` ->
+`sema.CheckProgram` -> `codegen.GeneratePackage` across the whole program's
+trees flattened together - `compileAndRunProgram`/`runPipeline`), and on
+full success JIT-executes the resulting module's `main` directly in this
+process - so the program's own `print` calls (real libc `printf` calls under
+the hood) write to this process's real stdout, which a `go test`-hosted JIT
+call can't easily show.
 
-A single-file program (a directory containing exactly one `.llx` file, or a
-file whose sibling directory has no other `.llx` files) goes through this
-exact same path - there's no separate single-file code path in `llvmc`
-itself, only `compileAndRun` (used by this package's own in-process tests
-that build a source string directly, with no real file/directory on disk)
-staying as a thin one-file wrapper around `compileAndRunPackage`, the same
-relationship `codegen.Generate`/`sema.Resolve`/`sema.Check` each have to
-their own multi-file counterpart.
+A single-package, single-file program (a directory containing exactly one
+`.llx` file, or a file whose sibling directory has no other `.llx` files,
+with no `import` declarations at all) goes through this exact same path -
+there's no separate single-file/single-package code path in `llvmc` itself,
+only `compileAndRun`/`compileAndRunPackage` (used by this package's own
+in-process tests that build source strings directly, with no real
+file/directory on disk and so no need to go through `loader.LoadProgram` at
+all) staying as thin wrappers that call the same shared `runPipeline` tail
+`compileAndRunProgram` does, just fed by `sema.ResolvePackage` instead of
+`sema.ResolveProgram` (and so with no cross-package export enforcement to
+do - `runPipeline`'s own `treePackage` argument is simply nil in that case,
+see `sema.CheckProgram`'s doc comment) - the same relationship
+`codegen.Generate`/`sema.Resolve`/`sema.Check` each have to their own
+multi-file counterpart, one level further up.
 
 ## Building and running
 
@@ -509,9 +560,10 @@ directory's own doc comments).
 ## Exit codes
 
 - **2** - a usage error: no path argument, an unrecognized flag, the path
-  couldn't be resolved to a real file/directory, or its resolved directory
-  has zero `.llx` files in it (see `src/loader`'s `Load`). A short message
-  goes to stderr; nothing is compiled.
+  couldn't be resolved to a real file/directory, its resolved directory has
+  zero `.llx` files in it, an imported package directory couldn't be found,
+  or a real import cycle was detected (see `src/loader`'s `Load`/
+  `LoadProgram`). A short message goes to stderr; nothing is compiled.
 - **1** - a compile-time diagnostic from the lexer, parser, `sema.Resolve`,
   `sema.Check`, or `codegen.Generate` stage (the pipeline stops at the first
   stage reporting an error-severity diagnostic, exactly like every other

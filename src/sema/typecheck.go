@@ -79,9 +79,25 @@ type checker struct {
 	infos    map[*ast.Tree]*Info
 	allDiags map[*ast.Tree]*diag.Bag
 
+	// treePackage names which package's own top-level Scope each tree
+	// belongs to - nil for a plain single-package Check/CheckPackage call
+	// (which has no cross-package concept at all, and so never restricts
+	// anything - see checkExportedAccess). Set by CheckProgram for a real
+	// multi-package program (see ResolveProgram, which builds exactly this
+	// map for exactly this reason).
+	treePackage map[*ast.Tree]*Scope
+
 	tree  *ast.Tree
 	diags *diag.Bag
 	info  *Info
+
+	// curPkgScope is treePackage[c.tree] - refreshed every enter (never by
+	// pushTree, which only ever borrows another tree's *declaration* nodes
+	// for the duration of one lookup; the "who is doing the accessing"
+	// package identity checkExportedAccess needs always stays whatever
+	// enter last set it to). nil in the same single-package case
+	// treePackage itself is nil for.
+	curPkgScope *Scope
 
 	// declTypes memoizes the type of each var-introducing declaration
 	// (VarDecl, ShortVarDecl, Param). computingDecl is a cycle guard: a
@@ -126,6 +142,7 @@ func (c *checker) enter(tree *ast.Tree) {
 	c.tree = tree
 	c.info = c.infos[tree]
 	c.diags = c.allDiags[tree]
+	c.curPkgScope = c.treePackage[tree]
 }
 
 // pushTree switches the checker's current-file bookkeeping to owner - the
@@ -183,9 +200,31 @@ func Check(tree *ast.Tree, info *Info) *diag.Bag {
 // unbounded-input risk to guard against, so there's no error-count cap
 // here).
 func CheckPackage(trees []*ast.Tree, infos map[*ast.Tree]*Info) map[*ast.Tree]*diag.Bag {
+	return CheckProgram(trees, infos, nil)
+}
+
+// CheckProgram is CheckPackage extended for a whole multi-package program:
+// trees/infos span every package in the program at once (see
+// sema.ResolveProgram, which produces exactly that flat, merged shape - a
+// declaration only ever lives in one tree regardless of which package it
+// belongs to, so type-checking every tree in one pass needs no
+// package-boundary awareness for anything except export enforcement).
+// treePackage names which package's own top-level Scope each tree belongs
+// to (also produced by ResolveProgram) - used only by checkExportedAccess to
+// decide whether a field/method/package-member access crosses a package
+// boundary; nil disables that check entirely (the plain single-package
+// case - see CheckPackage - where nothing should ever be restricted).
+//
+// This works at all because every codegen/checker-internal lookup a cross-
+// file reference needs (funcSigForDecl, declType, typeFromNode, pushTree)
+// is already keyed by *Symbol/nodeRef pointer identity, not by which
+// package a tree happens to belong to - see CODEGEN.md's "Multi-file
+// packages" section for the identical reasoning one layer down.
+func CheckProgram(trees []*ast.Tree, infos map[*ast.Tree]*Info, treePackage map[*ast.Tree]*Scope) map[*ast.Tree]*diag.Bag {
 	c := &checker{
 		infos:         infos,
 		allDiags:      make(map[*ast.Tree]*diag.Bag, len(trees)),
+		treePackage:   treePackage,
 		declTypes:     make(map[nodeRef]Type),
 		computingDecl: make(map[nodeRef]bool),
 		typeNodeCache: make(map[nodeRef]Type),
@@ -493,51 +532,65 @@ func (c *checker) typeFromNode(n ast.NodeIndex) Type {
 
 func (c *checker) computeTypeFromNode(n ast.NodeIndex) Type {
 	switch c.tree.Nodes[n].Kind {
-	case enums.NodeKinds.Ident:
+	case enums.NodeKinds.Ident, enums.NodeKinds.MemberExpr:
+		// A MemberExpr only ever reaches type-position here for a package-
+		// qualified type name (`pkg.Point`) - already fully resolved by
+		// Resolve (resolveTypeMemberExpr), export-checked included, so this
+		// needs no package-awareness of its own: whatever Info.Refs[n]
+		// already points to is treated exactly like a same-package Ident.
 		sym, ok := c.info.Refs[n]
 		if !ok {
 			return invalidType // undefined name; already reported by Resolve
 		}
-		switch sym.Kind {
-		case SymBuiltinType:
-			switch c.tree.Text(n) {
-			case "int", "i32":
-				return i32Type
-			case "i8":
-				return i8Type
-			case "i16":
-				return i16Type
-			case "i64":
-				return i64Type
-			case "f32":
-				return f32Type
-			case "f64":
-				return f64Type
-			case "string":
-				return stringType
-			case "bool":
-				return boolType
-			default:
-				return invalidType
-			}
-		case SymStruct:
-			info, ok := c.info.Structs[c.tree.Text(n)]
-			if !ok {
-				return invalidType
-			}
-			return Type{
-				Kind:   TypeStruct,
-				Struct: info,
-			}
-		default:
-			return invalidType // "not a type"; already reported by Resolve
-		}
+		return c.typeFromSymbol(sym)
 	case enums.NodeKinds.ArrayType:
 		return c.arrayTypeFromNode(n)
 	case enums.NodeKinds.FuncType:
 		return c.funcTypeFromNode(n)
 	default:
 		return invalidType
+	}
+}
+
+// typeFromSymbol converts a resolved type-position Symbol (SymBuiltinType or
+// SymStruct - anything else means "not a type", already reported by
+// Resolve) into a Type - shared by computeTypeFromNode's Ident and
+// MemberExpr (package-qualified) cases, since both ultimately just name a
+// builtin or struct type symbol. Uses sym.Name (not the node's own text) so
+// this works identically regardless of which node kind resolved to sym.
+func (c *checker) typeFromSymbol(sym *Symbol) Type {
+	switch sym.Kind {
+	case SymBuiltinType:
+		switch sym.Name {
+		case "int", "i32":
+			return i32Type
+		case "i8":
+			return i8Type
+		case "i16":
+			return i16Type
+		case "i64":
+			return i64Type
+		case "f32":
+			return f32Type
+		case "f64":
+			return f64Type
+		case "string":
+			return stringType
+		case "bool":
+			return boolType
+		default:
+			return invalidType
+		}
+	case SymStruct:
+		if sym.StructInfo == nil {
+			return invalidType
+		}
+		return Type{
+			Kind:   TypeStruct,
+			Struct: sym.StructInfo,
+		}
+	default:
+		return invalidType // "not a type"; already reported by Resolve
 	}
 }
 
@@ -931,13 +984,25 @@ func (c *checker) checkIdentExpr(n ast.NodeIndex) Type {
 	if !ok {
 		return invalidType // undefined name; already reported by Resolve
 	}
+	return c.typeOfSymbolValue(n, sym)
+}
+
+// typeOfSymbolValue types a reference to sym used as a value - shared
+// between a bare identifier (checkIdentExpr) and a package-qualified
+// reference (`pkg.Name`, checkMemberExpr's package branch/funcSigForCall):
+// both name exactly the same kinds of top-level declaration, so the same
+// var/func/type/package dispatch applies either way. n is only used for its
+// source position and (via c.tree.Text) the name text in a diagnostic - for
+// a MemberExpr this is still correct, since a MemberExpr's own Tok is the
+// field-name token (see ast.Node's doc comment).
+func (c *checker) typeOfSymbolValue(n ast.NodeIndex, sym *Symbol) Type {
 	switch sym.Kind {
 	case SymVar, SymParam:
-		// sym may be declared in a different file than the one currently
-		// being checked (a package-level var referenced from another file -
-		// see LANGUAGE.md's "Multi-file packages" section) - pushTree
-		// switches to its own owning file for the duration of declType,
-		// which reads that file's own declaration/initializer nodes.
+		// sym may be declared in a different file (or package) than the one
+		// currently being checked - see LANGUAGE.md's "Multi-file packages"
+		// and "Imports" sections - pushTree switches to its own owning file
+		// for the duration of declType, which reads that file's own
+		// declaration/initializer nodes.
 		restore := c.pushTree(sym.Tree)
 		t := c.declType(sym.Decl)
 		restore()
@@ -953,6 +1018,9 @@ func (c *checker) checkIdentExpr(n ast.NodeIndex) Type {
 		return funcType(sig)
 	case SymStruct, SymBuiltinType:
 		c.errorAt(n, "%s is a type, not a value", c.tree.Text(n))
+		return invalidType
+	case SymPackage:
+		c.errorAt(n, "%s is a package, not a value", c.tree.Text(n))
 		return invalidType
 	default:
 		return invalidType
@@ -1224,13 +1292,22 @@ func (c *checker) checkIndexExpr(n ast.NodeIndex) Type {
 	return *tt.Elem
 }
 
-// checkMemberExpr types a plain field access (`p.field`, not a call). See
-// resolveMember for how the field name itself gets resolved - the work
-// Resolve deliberately deferred to this pass.
+// checkMemberExpr types a plain field/package-member access (`p.field`, or
+// `pkg.Name`, not a call). See resolveMember for how the name itself gets
+// resolved - the work Resolve deliberately deferred to this pass for a
+// struct-value field/method (unlike a package member, already resolved by
+// Resolve itself - see resolve.go's resolvePackageMemberExpr).
 func (c *checker) checkMemberExpr(n ast.NodeIndex) Type {
 	sym, ok := c.resolveMember(n)
 	if !ok {
 		return invalidType
+	}
+	if c.memberObjectIsPackage(n) {
+		// A package export can be any top-level kind (var, func, struct
+		// type) - handle it exactly like a bare identifier reference, not
+		// like "must be a field" (that restriction only makes sense for an
+		// actual struct-value member).
+		return c.typeOfSymbolValue(n, sym)
 	}
 	if sym.Kind != SymField {
 		c.errorAt(n, "%s is a method, not a field (call it with ())", c.tree.Text(n))
@@ -1244,6 +1321,19 @@ func (c *checker) checkMemberExpr(n ast.NodeIndex) Type {
 	return t
 }
 
+// memberObjectIsPackage reports whether n (a MemberExpr) is a
+// package-qualified access (`pkg.Name`) - its object is a bare Ident already
+// resolved (by Resolve, lexically) to a SymPackage symbol - as opposed to an
+// ordinary struct-value field/method access.
+func (c *checker) memberObjectIsPackage(n ast.NodeIndex) bool {
+	object := c.tree.Child(n, 0)
+	if c.tree.Nodes[object].Kind != enums.NodeKinds.Ident {
+		return false
+	}
+	sym, ok := c.info.Refs[object]
+	return ok && sym.Kind == SymPackage
+}
+
 // resolveMember infers a MemberExpr's object type, requires it to be a
 // struct, and looks its name (n's Tok - see ast.Node's doc comment) up in
 // that struct's Fields/Methods catalog, recording whichever it finds into
@@ -1252,7 +1342,18 @@ func (c *checker) checkMemberExpr(n ast.NodeIndex) Type {
 // field access (checkMemberExpr) and a method-call callee
 // (methodSigForCallee), which differ only in which kind of symbol they
 // require the result to be.
+//
+// A package-qualified access (`pkg.Name`) is a completely different
+// resolution path - Resolve itself already fully resolved it (see
+// resolve.go's resolvePackageMemberExpr, which needs no type information at
+// all) - so this just reads back whatever Info.Refs[n] already holds
+// instead of doing any struct-value lookup of its own.
 func (c *checker) resolveMember(n ast.NodeIndex) (*Symbol, bool) {
+	if c.memberObjectIsPackage(n) {
+		sym, ok := c.info.Refs[n]
+		return sym, ok
+	}
+
 	object := c.tree.Child(n, 0)
 	objType := c.checkValueExpr(object)
 	name := c.tree.Text(n)
@@ -1266,16 +1367,45 @@ func (c *checker) resolveMember(n ast.NodeIndex) (*Symbol, bool) {
 	}
 
 	info := objType.Struct
+	var found *Symbol
 	if sym, ok := info.Fields[name]; ok {
-		c.info.Refs[n] = sym
-		return sym, true
+		found = sym
+	} else if sym, ok := info.Methods[name]; ok {
+		found = sym
+	} else {
+		c.errorAt(n, "%s has no field or method %s", info.Symbol.Name, name)
+		return nil, false
 	}
-	if sym, ok := info.Methods[name]; ok {
-		c.info.Refs[n] = sym
-		return sym, true
+	if !c.checkExportedAccess(n, found) {
+		return nil, false
 	}
-	c.errorAt(n, "%s has no field or method %s", info.Symbol.Name, name)
-	return nil, false
+	c.info.Refs[n] = found
+	return found, true
+}
+
+// checkExportedAccess enforces export visibility (see LANGUAGE.md's
+// "Imports" section) for a struct field/method found by name on a value:
+// an unexported (lowercase-first-letter) one is only accessible from within
+// its own declaring package. Same-package access is always allowed
+// regardless of case, matching the pre-existing (pre-imports) multi-file
+// guarantee - see LANGUAGE.md's "Multi-file packages" section - and, when
+// c.curPkgScope is nil (single-package Check/CheckPackage, with no
+// cross-package concept at all - see CheckProgram's doc comment), nothing
+// is ever restricted, matching that pre-existing behavior exactly.
+//
+// A package-qualified access's own export check happens earlier, during
+// Resolve (resolve.go's resolvePackageMemberExpr/resolveTypeMemberExpr) -
+// this only covers a struct-value field/method access, resolved here in
+// Check because it needs the value's type.
+func (c *checker) checkExportedAccess(n ast.NodeIndex, sym *Symbol) bool {
+	if c.curPkgScope == nil || sym.Exported {
+		return true
+	}
+	if packageScopeOf(sym.Scope) == c.curPkgScope {
+		return true
+	}
+	c.errorAt(n, "%s is not exported", sym.Name)
+	return false
 }
 
 // checkCallExpr type-checks a call: builtin print (special-cased - see
@@ -1474,18 +1604,27 @@ func (c *checker) funcSigForCall(callee ast.NodeIndex) (funcSignature, bool) {
 	return funcSignature{Params: t.Params, Return: *t.Return}, true
 }
 
+// methodSigForCallee resolves a call's callee when it's a MemberExpr -
+// either an ordinary method call (`p.move()`) or a package-qualified
+// function call (`mathutils.Add()`, see resolve.go's
+// resolvePackageMemberExpr) - both go through resolveMember, which already
+// tells the two apart internally.
 func (c *checker) methodSigForCallee(callee ast.NodeIndex) (funcSignature, bool) {
 	sym, ok := c.resolveMember(callee)
 	if !ok {
 		return funcSignature{}, false
 	}
 	if sym.Kind != SymFunc {
-		c.errorAt(callee, "%s is a field, not a method (cannot be called)", c.tree.Text(callee))
+		if c.memberObjectIsPackage(callee) {
+			c.errorAt(callee, "cannot call %s (%s is not a function)", c.tree.Text(callee), sym.Kind)
+		} else {
+			c.errorAt(callee, "%s is a field, not a method (cannot be called)", c.tree.Text(callee))
+		}
 		return funcSignature{}, false
 	}
-	// The method may be declared in a different file than this call site
-	// (its own file need not match its receiver struct's - see
-	// LANGUAGE.md's "Multi-file packages" section).
+	// The method/function may be declared in a different file - or, for a
+	// package-qualified call, a different package entirely - than this call
+	// site (see LANGUAGE.md's "Multi-file packages" and "Imports" sections).
 	restore := c.pushTree(sym.Tree)
 	sig := c.funcSigForDecl(sym.Decl)
 	restore()

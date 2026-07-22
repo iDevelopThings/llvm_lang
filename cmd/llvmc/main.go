@@ -125,13 +125,13 @@ func run(args []string, stderr io.Writer) int {
 	}
 
 	path := fs.Arg(0)
-	files, err := loader.Load(afero.NewOsFs(), path)
+	prog, err := loader.LoadProgram(afero.NewOsFs(), path)
 	if err != nil {
 		fmt.Fprintf(stderr, "llvmc: %v\n", err)
 		return exitUsage
 	}
 
-	return compileAndRunPackage(files, stderr, *emitLLVM)
+	return compileAndRunProgram(prog, stderr, *emitLLVM)
 }
 
 // compileAndRun drives the full pipeline for a single source file - the
@@ -144,26 +144,23 @@ func compileAndRun(name, src string, stderr io.Writer, emitLLVM bool) int {
 }
 
 // compileAndRunPackage drives the full pipeline for every file in files, as
-// one package (see LANGUAGE.md's "Multi-file packages" section):
-// lexer.NewFile -> parser.ParseFile per file, then sema.ResolvePackage ->
-// sema.CheckPackage -> codegen.GeneratePackage across all of them at once,
-// stopping at the first stage that reports an error-severity diagnostic in
-// any file (any diagnostics from a stage - warnings included - are printed
-// even when that stage doesn't itself report an error, so nothing collected
-// along the way is silently dropped). On full success, it verifies the
-// generated module and then either JIT-executes its `main` (the default), or
-// - when emitLLVM is set (the `-emit-llvm` flag) - prints the module's LLVM
-// IR text to stdout and returns 0 without ever executing anything.
+// one package with no imports of its own (see LANGUAGE.md's "Multi-file
+// packages" section): lexer.NewFile -> parser.ParseFile per file, then
+// sema.ResolvePackage -> runPipeline. Kept as its own entry point (rather
+// than routing through loader.LoadProgram/compileAndRunProgram) purely so
+// this package's existing in-process tests, which build source strings
+// directly with no real file/directory on disk, don't need one - see
+// compileAndRunProgram for the real multi-*package* (import-aware) driver
+// run actually uses.
 func compileAndRunPackage(files []loader.SourceFile, stderr io.Writer, emitLLVM bool) int {
-	lexFiles := make([]*lexer.File, len(files))
 	trees := make([]*ast.Tree, len(files))
 	anyParseErrors := false
 
 	for i, f := range files {
-		lexFiles[i] = lexer.NewFile(f.Name, f.Src)
-		tree, pdiags := parser.ParseFile(lexFiles[i])
+		lf := lexer.NewFile(f.Name, f.Src)
+		tree, pdiags := parser.ParseFile(lf)
 		if pdiags.Len() > 0 {
-			printDiags(stderr, lexFiles[i], pdiags)
+			printDiags(stderr, lf, pdiags)
 		}
 		if pdiags.HasErrors() {
 			anyParseErrors = true
@@ -175,20 +172,111 @@ func compileAndRunPackage(files []loader.SourceFile, stderr io.Writer, emitLLVM 
 	}
 
 	infos, rdiags := sema.ResolvePackage(trees)
-	if printAnyDiags(stderr, trees, lexFiles, rdiags) {
-		return exitCompile
-	}
-
-	cdiags := sema.CheckPackage(trees, infos)
-	if printAnyDiags(stderr, trees, lexFiles, cdiags) {
-		return exitCompile
-	}
-
 	// moduleName matches this driver's own single-file convention of using
 	// the compiled path as the module's name - the package's first file is
-	// as reasonable a choice as any for a multi-file package.
-	mod, gdiags := codegen.GeneratePackage(trees, infos, files[0].Name)
-	if printAnyDiags(stderr, trees, lexFiles, gdiags) {
+	// as reasonable a choice as any for a multi-file package. treePackage is
+	// nil - a single package has no cross-package export enforcement to do
+	// at all (see sema.CheckProgram's own doc comment).
+	return runPipeline(trees, infos, rdiags, nil, files[0].Name, stderr, emitLLVM)
+}
+
+// compileAndRunProgram drives the full pipeline for prog - a whole program,
+// potentially spanning several packages linked by `import` declarations
+// (see loader.LoadProgram, which discovers/parses/dedups/cycle-checks the
+// entire transitive import graph up front - every file's own parse
+// diagnostics were already collected then, not here).
+//
+// prog.Order already lists every package in dependency order (see its own
+// doc comment), which is exactly the order sema.ResolveProgram needs: each
+// package's own PackageUnit is built and resolved before any package that
+// imports it, so a FileImport's TargetKey (this driver uses each package's
+// own resolved Dir as that key) always names an already-resolved unit.
+//
+// Every package's trees are then flattened into one slice and driven through
+// the exact same sema.CheckProgram/codegen.GeneratePackage/verify/execute
+// tail every other entry point in this file shares (runPipeline) - see
+// CODEGEN.md's "Multi-file packages" section for why one shared Module needs
+// no package-boundary awareness at all, the same reasoning extended one
+// level up unchanged.
+func compileAndRunProgram(prog *loader.Program, stderr io.Writer, emitLLVM bool) int {
+	var trees []*ast.Tree
+	units := make([]*sema.PackageUnit, 0, len(prog.Order))
+	anyParseErrors := false
+
+	for _, pkg := range prog.Order {
+		unitTrees := make([]*ast.Tree, len(pkg.Files))
+		var fileImports map[*ast.Tree][]sema.FileImport
+
+		for i, f := range pkg.Files {
+			unitTrees[i] = f.Tree
+			trees = append(trees, f.Tree)
+
+			if f.Diags.Len() > 0 {
+				printDiags(stderr, f.Tree.File, f.Diags)
+			}
+			if f.Diags.HasErrors() {
+				anyParseErrors = true
+			}
+
+			if len(f.Imports) == 0 {
+				continue
+			}
+			if fileImports == nil {
+				fileImports = make(map[*ast.Tree][]sema.FileImport, len(pkg.Files))
+			}
+			imps := make([]sema.FileImport, len(f.Imports))
+			for j, imp := range f.Imports {
+				imps[j] = sema.FileImport{
+					LocalName: imp.LocalName,
+					TargetKey: imp.Package.Dir,
+				}
+			}
+			fileImports[f.Tree] = imps
+		}
+
+		units = append(units, &sema.PackageUnit{
+			Key:         pkg.Dir,
+			Name:        pkg.Name,
+			Trees:       unitTrees,
+			FileImports: fileImports,
+		})
+	}
+	if anyParseErrors {
+		return exitCompile
+	}
+
+	infos, rdiags, _, treePackage := sema.ResolveProgram(units)
+	// moduleName matches compileAndRunPackage's own convention: the entry
+	// package's first file is as reasonable a choice as any for the whole
+	// program's module name.
+	moduleName := prog.Entry.Files[0].Name
+	return runPipeline(trees, infos, rdiags, treePackage, moduleName, stderr, emitLLVM)
+}
+
+// runPipeline drives the shared tail of the compiler pipeline, once trees
+// have already been resolved (infos/rdiags) by whichever of
+// compileAndRunPackage/compileAndRunProgram's own sema entry point:
+// sema.CheckProgram (treePackage nil disables its cross-package export
+// enforcement entirely - see its own doc comment - exactly right for
+// compileAndRunPackage's plain single, import-less package) ->
+// codegen.GeneratePackage -> LLVM's own module verifier -> either
+// JIT-execution (the default) or -emit-llvm's IR dump, stopping at the
+// first stage that reports an error-severity diagnostic in any file (any
+// diagnostics from a stage - warnings included - are printed even when that
+// stage doesn't itself report an error, so nothing collected along the way
+// is silently dropped).
+func runPipeline(trees []*ast.Tree, infos map[*ast.Tree]*sema.Info, rdiags map[*ast.Tree]*diag.Bag, treePackage map[*ast.Tree]*sema.Scope, moduleName string, stderr io.Writer, emitLLVM bool) int {
+	if printAnyDiags(stderr, trees, rdiags) {
+		return exitCompile
+	}
+
+	cdiags := sema.CheckProgram(trees, infos, treePackage)
+	if printAnyDiags(stderr, trees, cdiags) {
+		return exitCompile
+	}
+
+	mod, gdiags := codegen.GeneratePackage(trees, infos, moduleName)
+	if printAnyDiags(stderr, trees, gdiags) {
 		mod.Dispose()
 		return exitCompile
 	}
@@ -221,18 +309,18 @@ func compileAndRunPackage(files []loader.SourceFile, stderr io.Writer, emitLLVM 
 }
 
 // printAnyDiags prints every file's diagnostics (see printDiags) from a
-// per-tree diagnostic map - trees/lexFiles are aligned by index, giving each
-// tree's diagnostics the one *lexer.File that can actually decode their
-// Pos values into a line/column (see diag.Bag's own doc comment: a
-// diagnostic's position is only meaningful relative to the file it was
-// reported against). Reports whether any file had at least one error-
-// severity diagnostic, so the caller knows whether to stop the pipeline.
-func printAnyDiags(w io.Writer, trees []*ast.Tree, lexFiles []*lexer.File, diags map[*ast.Tree]*diag.Bag) bool {
+// per-tree diagnostic map, using each tree's own *lexer.File (ast.Tree.File)
+// to decode its diagnostics' Pos values into a line/column (see diag.Bag's
+// own doc comment: a diagnostic's position is only meaningful relative to
+// the file it was reported against). Reports whether any file had at least
+// one error-severity diagnostic, so the caller knows whether to stop the
+// pipeline.
+func printAnyDiags(w io.Writer, trees []*ast.Tree, diags map[*ast.Tree]*diag.Bag) bool {
 	hasErrors := false
-	for i, tree := range trees {
+	for _, tree := range trees {
 		b := diags[tree]
 		if b.Len() > 0 {
-			printDiags(w, lexFiles[i], b)
+			printDiags(w, tree.File, b)
 		}
 		if b.HasErrors() {
 			hasErrors = true

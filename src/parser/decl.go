@@ -7,13 +7,16 @@ import (
 	"llvm_lang/src/lexer"
 )
 
-// parseTopLevelItem parses one file-scope declaration: var (a real global,
-// not a script statement), func, or struct. Nothing else is legal here -
-// LLVM has no notion of "just run a statement at global scope," only
-// static data initializers, so executable logic needs an actual entry
-// point (func main()) same as Go/C/Rust; see AGENTS.md's "Top level" section.
+// parseTopLevelItem parses one file-scope declaration: import (must come
+// first in the file - see parseFile), var (a real global, not a script
+// statement), func, or struct. Nothing else is legal here - LLVM has no
+// notion of "just run a statement at global scope," only static data
+// initializers, so executable logic needs an actual entry point (func
+// main()) same as Go/C/Rust; see AGENTS.md's "Top level" section.
 func (p *Parser) parseTopLevelItem() ast.NodeIndex {
 	switch {
+	case p.atKeyword(enums.Keywords.Import):
+		return p.parseImportDecl()
 	case p.atKeyword(enums.Keywords.Var):
 		return p.parseVarDecl()
 	case p.atKeyword(enums.Keywords.Func):
@@ -22,20 +25,50 @@ func (p *Parser) parseTopLevelItem() ast.NodeIndex {
 		return p.parseStructDecl()
 	default:
 		tok := p.tok
-		p.errorAt(tok.Start, "expected a top-level declaration (var, func, or struct), found %s", p.describe(tok))
+		p.errorAt(tok.Start, "expected a top-level declaration (import, var, func, or struct), found %s", p.describe(tok))
 		p.sync(enums.Lexemes.Semicolon)
 		return p.badNode(tok)
 	}
+}
+
+// parseImportDecl parses `import "path"` - see LANGUAGE.md's "Imports"
+// section for the language-level rule (path resolution relative to the
+// importing file, last-path-segment local naming, no aliasing yet). The
+// path itself is kept as the node's own Tok (a String token, decoded via
+// File.StringValue exactly like a StringLit expression - see ast.Node's own
+// doc comment) rather than a child StringLit node, since there's nothing
+// else for an ImportDecl to hold.
+func (p *Parser) parseImportDecl() ast.NodeIndex {
+	kwTok := p.expectKeyword(enums.Keywords.Import)
+	pathTok := p.expect(enums.Lexemes.String)
+	span := ast.Span{
+		Start: kwTok.Start,
+		End:   pathTok.End,
+	}
+	return p.tree.NewNode(enums.NodeKinds.ImportDecl, pathTok, span)
 }
 
 // parseFile parses a whole source file: a sequence of top-level
 // declarations (see parseTopLevelItem) through EOF. Same separator rule as
 // parseBlock (required between declarations, optional right before the
 // terminator - here EOF instead of `}`).
+//
+// Every ImportDecl must come before any other top-level declaration -
+// matching Go's own ordering rule (see LANGUAGE.md's "Imports" section):
+// simplest to parse/read, and there's no real downside to requiring it. A
+// later import is still parsed (so the rest of the file still gets checked
+// normally) but reported as an error at its own position.
 func (p *Parser) parseFile() ast.NodeIndex {
 	start := p.tok.Start
 	var decls []ast.NodeIndex
+	sawNonImport := false
 	for !p.at(enums.Lexemes.EOF) {
+		if p.atKeyword(enums.Keywords.Import) && sawNonImport {
+			p.errorAt(p.tok.Start, "import declarations must come before all other top-level declarations")
+		}
+		if !p.atKeyword(enums.Keywords.Import) {
+			sawNonImport = true
+		}
 		decls = append(decls, p.parseTopLevelItem())
 		if p.at(enums.Lexemes.EOF) {
 			break

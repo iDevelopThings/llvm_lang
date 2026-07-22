@@ -1,0 +1,245 @@
+package sema
+
+import (
+	"strings"
+	"testing"
+
+	"llvm_lang/src/ast"
+	"llvm_lang/src/lexer"
+	"llvm_lang/src/parser"
+)
+
+// mustParseFile parses (name, src) and fails the test immediately if
+// parsing itself produced an error - a parse error here means the test
+// source is broken, not the imports machinery under test.
+func mustParseFile(t *testing.T, name, src string) *ast.Tree {
+	t.Helper()
+	tree, diags := parser.ParseFile(lexer.NewFile(name, src))
+	if diags.HasErrors() {
+		t.Fatalf("unexpected parse errors in %s: %v", name, diags.All())
+	}
+	return tree
+}
+
+// resolveAndCheckProgram runs ResolveProgram then CheckProgram over units,
+// returning every diagnostic collected across every file in every unit
+// (resolve-phase and check-phase diagnostics merged together, in no
+// particular order) - tests that expect success assert this is empty; tests
+// that expect a specific failure search it for their expected message.
+func resolveAndCheckProgram(t *testing.T, units []*PackageUnit) []string {
+	t.Helper()
+	infos, rdiags, _, treePackage := ResolveProgram(units)
+
+	var allTrees []*ast.Tree
+	for _, u := range units {
+		allTrees = append(allTrees, u.Trees...)
+	}
+
+	var msgs []string
+	for _, tree := range allTrees {
+		for _, d := range rdiags[tree].All() {
+			msgs = append(msgs, d.Msg)
+		}
+	}
+
+	cdiags := CheckProgram(allTrees, infos, treePackage)
+	for _, tree := range allTrees {
+		for _, d := range cdiags[tree].All() {
+			msgs = append(msgs, d.Msg)
+		}
+	}
+	return msgs
+}
+
+func requireNoDiags(t *testing.T, msgs []string) {
+	t.Helper()
+	if len(msgs) != 0 {
+		t.Fatalf("expected no diagnostics, got: %v", msgs)
+	}
+}
+
+func requireDiagContaining(t *testing.T, msgs []string, substr string) {
+	t.Helper()
+	for _, m := range msgs {
+		if strings.Contains(m, substr) {
+			return
+		}
+	}
+	t.Fatalf("expected a diagnostic containing %q, got: %v", substr, msgs)
+}
+
+// TestImports_CrossPackageCallToExportedFunction covers the core positive
+// case (see LANGUAGE.md's "Imports" section): a package importing another
+// and calling one of its exported (capitalized) free functions.
+func TestImports_CrossPackageCallToExportedFunction(t *testing.T) {
+	mathTree := mustParseFile(t, "math/add.llx", "func Add(a int, b int) int {\n\treturn a + b\n}\n")
+	mainTree := mustParseFile(t, "app/main.llx", "import \"./math\"\n\nfunc main() int {\n\treturn mathutils.Add(1, 2)\n}\n")
+
+	units := []*PackageUnit{
+		{
+			Key:   "math",
+			Name:  "math",
+			Trees: []*ast.Tree{mathTree},
+		},
+		{
+			Key:   "app",
+			Name:  "app",
+			Trees: []*ast.Tree{mainTree},
+			FileImports: map[*ast.Tree][]FileImport{
+				mainTree: {{LocalName: "mathutils", TargetKey: "math"}},
+			},
+		},
+	}
+
+	requireNoDiags(t, resolveAndCheckProgram(t, units))
+}
+
+// TestImports_CrossPackageStructType covers a struct type declared in one
+// package, used (as a var's declared type and a composite literal) from
+// another - the "structs (as types)" half of export enforcement.
+func TestImports_CrossPackageStructType(t *testing.T) {
+	shapesTree := mustParseFile(t, "shapes/point.llx", "struct Point {\n\tX int\n\tY int\n}\n")
+	mainTree := mustParseFile(t, "app/main.llx", `import "./shapes"
+
+func main() int {
+	var p shapes.Point = shapes.Point{1, 2}
+	return p.X + p.Y
+}
+`)
+
+	units := []*PackageUnit{
+		{Key: "shapes", Name: "shapes", Trees: []*ast.Tree{shapesTree}},
+		{
+			Key:   "app",
+			Name:  "app",
+			Trees: []*ast.Tree{mainTree},
+			FileImports: map[*ast.Tree][]FileImport{
+				mainTree: {{LocalName: "shapes", TargetKey: "shapes"}},
+			},
+		},
+	}
+
+	requireNoDiags(t, resolveAndCheckProgram(t, units))
+}
+
+// TestImports_UnexportedFunctionIsError covers referencing an unexported
+// (lowercase) top-level function through a package qualifier - must be
+// rejected.
+func TestImports_UnexportedFunctionIsError(t *testing.T) {
+	mathTree := mustParseFile(t, "math/add.llx", "func add(a int, b int) int {\n\treturn a + b\n}\n")
+	mainTree := mustParseFile(t, "app/main.llx", "import \"./math\"\n\nfunc main() int {\n\treturn mathutils.add(1, 2)\n}\n")
+
+	units := []*PackageUnit{
+		{Key: "math", Name: "math", Trees: []*ast.Tree{mathTree}},
+		{
+			Key:   "app",
+			Name:  "app",
+			Trees: []*ast.Tree{mainTree},
+			FileImports: map[*ast.Tree][]FileImport{
+				mainTree: {{LocalName: "mathutils", TargetKey: "math"}},
+			},
+		},
+	}
+
+	requireDiagContaining(t, resolveAndCheckProgram(t, units), "not exported")
+}
+
+// TestImports_UnexportedStructTypeIsError covers a package-qualified type
+// reference (`pkg.point`) naming an unexported struct.
+func TestImports_UnexportedStructTypeIsError(t *testing.T) {
+	shapesTree := mustParseFile(t, "shapes/point.llx", "struct point {\n\tX int\n}\n")
+	mainTree := mustParseFile(t, "app/main.llx", "import \"./shapes\"\n\nfunc main() {\n\tvar p shapes.point\n\t_ = p\n}\n")
+
+	units := []*PackageUnit{
+		{Key: "shapes", Name: "shapes", Trees: []*ast.Tree{shapesTree}},
+		{
+			Key:   "app",
+			Name:  "app",
+			Trees: []*ast.Tree{mainTree},
+			FileImports: map[*ast.Tree][]FileImport{
+				mainTree: {{LocalName: "shapes", TargetKey: "shapes"}},
+			},
+		},
+	}
+
+	requireDiagContaining(t, resolveAndCheckProgram(t, units), "not exported")
+}
+
+// TestImports_UnexportedFieldAccessIsError covers accessing an unexported
+// field of a struct value whose type belongs to another package - the
+// "methods/fields accessed via a value whose struct type belongs to another
+// package" half of export enforcement (see typecheck.go's
+// checkExportedAccess). Point itself is exported; only its "secret" field
+// is not.
+func TestImports_UnexportedFieldAccessIsError(t *testing.T) {
+	shapesTree := mustParseFile(t, "shapes/point.llx", "struct Point {\n\tX int\n\tsecret int\n}\n")
+	mainTree := mustParseFile(t, "app/main.llx", `import "./shapes"
+
+func main() int {
+	p := shapes.Point{1, 2}
+	return p.secret
+}
+`)
+
+	units := []*PackageUnit{
+		{Key: "shapes", Name: "shapes", Trees: []*ast.Tree{shapesTree}},
+		{
+			Key:   "app",
+			Name:  "app",
+			Trees: []*ast.Tree{mainTree},
+			FileImports: map[*ast.Tree][]FileImport{
+				mainTree: {{LocalName: "shapes", TargetKey: "shapes"}},
+			},
+		},
+	}
+
+	requireDiagContaining(t, resolveAndCheckProgram(t, units), "not exported")
+}
+
+// TestImports_SamePackageCaseInsensitivityStillHolds is a regression check:
+// within one package (even when checked via the new ResolveProgram/
+// CheckProgram multi-package path, not just plain ResolvePackage/
+// CheckPackage), an unexported (lowercase) name declared in one file must
+// still be freely usable from a sibling file in the *same* package,
+// unaffected by export enforcement - see LANGUAGE.md's "Multi-file
+// packages" section: case must never matter for same-package visibility.
+func TestImports_SamePackageCaseInsensitivityStillHolds(t *testing.T) {
+	pointTree := mustParseFile(t, "app/point.llx", "struct point {\n\tx int\n\ty int\n}\n\nfunc newPoint() point {\n\treturn point{1, 2}\n}\n")
+	mainTree := mustParseFile(t, "app/main.llx", "func main() int {\n\tp := newPoint()\n\treturn p.x + p.y\n}\n")
+
+	units := []*PackageUnit{
+		{
+			Key:   "app",
+			Name:  "app",
+			Trees: []*ast.Tree{pointTree, mainTree},
+		},
+	}
+
+	requireNoDiags(t, resolveAndCheckProgram(t, units))
+}
+
+// TestImports_FileScopedNotPackageScoped covers the file-scoping rule
+// itself (see LANGUAGE.md's "Imports" section and ScopeFile's doc comment):
+// an import declared in one file of a package is NOT visible from a sibling
+// file in the same package that didn't itself write that import - here,
+// main.llx imports "./math" but a sibling file, other.llx, tries to use the
+// same qualifier without importing it itself, and must fail as undefined.
+func TestImports_FileScopedNotPackageScoped(t *testing.T) {
+	mathTree := mustParseFile(t, "math/add.llx", "func Add(a int, b int) int {\n\treturn a + b\n}\n")
+	mainTree := mustParseFile(t, "app/main.llx", "import \"./math\"\n\nfunc main() int {\n\treturn mathutils.Add(1, 2)\n}\n")
+	otherTree := mustParseFile(t, "app/other.llx", "func other() int {\n\treturn mathutils.Add(3, 4)\n}\n")
+
+	units := []*PackageUnit{
+		{Key: "math", Name: "math", Trees: []*ast.Tree{mathTree}},
+		{
+			Key:   "app",
+			Name:  "app",
+			Trees: []*ast.Tree{mainTree, otherTree},
+			FileImports: map[*ast.Tree][]FileImport{
+				mainTree: {{LocalName: "mathutils", TargetKey: "math"}},
+			},
+		},
+	}
+
+	requireDiagContaining(t, resolveAndCheckProgram(t, units), "undefined: mathutils")
+}

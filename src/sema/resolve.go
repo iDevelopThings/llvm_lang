@@ -41,6 +41,16 @@ type Info struct {
 	Types   map[ast.NodeIndex]Type
 }
 
+// boundImport is one file's own import binding with its target already
+// resolved to a real *PackageResult - the resolver's own internal shape
+// (see resolver.fileImports); the public sema.FileImport (program.go) names
+// its target only indirectly (TargetKey), since ResolveProgram may not have
+// resolved that target unit yet at the point the caller builds its input.
+type boundImport struct {
+	LocalName string
+	Target    *PackageResult
+}
+
 // resolver's tree/info/bag fields always describe "whichever file is
 // currently being walked" - see enterFile. Resolve itself never needs to
 // follow a Symbol into a different file than the one currently being walked
@@ -55,6 +65,29 @@ type resolver struct {
 
 	pkg     *Scope                 // shared package scope, every file's top-level names
 	structs map[string]*StructInfo // shared struct catalog, every file's structs
+
+	// fileImports is this package's input (nil for a plain single-package
+	// ResolvePackage call, which has no imports at all): each file's own
+	// already-resolved `import "path"` bindings, keyed by that file's own
+	// Tree - see PackageUnit.FileImports's doc comment for why this is
+	// file-scoped rather than a plain package-wide list. Unlike the public
+	// FileImport (which names its target only indirectly, by TargetKey - see
+	// ResolveProgram), each boundImport here already carries its target's
+	// real *PackageResult - ResolveProgram resolves TargetKey against its
+	// own accumulating results table before ever calling resolveOnePackage.
+	fileImports map[*ast.Tree][]boundImport
+
+	// fileScopes is this package's own per-file ScopeFile scopes (built by
+	// buildFileScope, one per tree, before any of the three main passes
+	// run), each holding that file's own import bindings - see ScopeKind's
+	// doc comment. Every per-file resolution pass (resolveVarDeclBody,
+	// resolveFuncBody, resolveStructFieldTypes) looks names up starting from
+	// this scope instead of r.pkg directly, so an import is visible in the
+	// file that declared it and nowhere else, while every top-level
+	// package-level name remains visible everywhere in the package exactly
+	// as before (declareStruct/declareLocal/declareFunc still declare
+	// directly into the shared r.pkg, never a fileScope).
+	fileScopes map[*ast.Tree]*Scope
 
 	tree *ast.Tree
 	info *Info
@@ -94,15 +127,31 @@ func Resolve(tree *ast.Tree) (*Info, *diag.Bag) {
 // file is processed first or which order trees is given in (see
 // LANGUAGE.md's "Multi-file packages" section).
 //
+// This package has no imports of its own (fileImports is nil) - see
+// ResolveProgram for the multi-package entry point that does.
+//
 // Returns one *Info and one *diag.Bag per input tree, keyed by the tree
 // itself - a diagnostic's Pos is only meaningful relative to the one file
 // it's reported against (see diag.Bag's own doc comment), so unlike Structs/
 // the package Scope, diagnostics are never merged across files.
 func ResolvePackage(trees []*ast.Tree) (map[*ast.Tree]*Info, map[*ast.Tree]*diag.Bag) {
+	infos, bags, _ := resolveOnePackage("", trees, nil)
+	return infos, bags
+}
+
+// resolveOnePackage is the shared guts of ResolvePackage/ResolveProgram: it
+// resolves one package's files (with its own fresh universe-rooted package
+// Scope - never shared with any other package, so two packages can declare
+// the same name with no collision) and also returns a *PackageResult
+// exposing that package's own Scope/Structs catalog, for a second package's
+// import binding (see ResolveProgram) to be wired up against.
+func resolveOnePackage(name string, trees []*ast.Tree, fileImports map[*ast.Tree][]boundImport) (map[*ast.Tree]*Info, map[*ast.Tree]*diag.Bag, *PackageResult) {
 	r := &resolver{
-		infos:   make(map[*ast.Tree]*Info, len(trees)),
-		bags:    make(map[*ast.Tree]*diag.Bag, len(trees)),
-		structs: make(map[string]*StructInfo),
+		infos:       make(map[*ast.Tree]*Info, len(trees)),
+		bags:        make(map[*ast.Tree]*diag.Bag, len(trees)),
+		structs:     make(map[string]*StructInfo),
+		fileImports: fileImports,
+		fileScopes:  make(map[*ast.Tree]*Scope, len(trees)),
 	}
 	universe := universeScope()
 	r.pkg = newScope(ScopePackage, universe, ast.InvalidNode)
@@ -124,27 +173,40 @@ func ResolvePackage(trees []*ast.Tree) (map[*ast.Tree]*Info, map[*ast.Tree]*diag
 		out[tree] = r.infos[tree]
 		diags[tree] = r.bags[tree]
 	}
-	return out, diags
+	return out, diags, &PackageResult{
+		Name:    name,
+		Scope:   r.pkg,
+		Structs: r.structs,
+	}
 }
 
 func (r *resolver) errorAt(n ast.NodeIndex, format string, a ...any) {
 	r.bag.Errorf(r.tree.SpanOf(n).Start, format, a...)
 }
 
-// resolvePackage processes every file in trees in three passes, so
+// resolvePackage processes every file in trees in four passes, so
 // declaration order both within a file and across the whole package never
 // matters (Go allows top-level declarations to reference each other
 // regardless of which comes first, or which file declares them) - the same
 // guarantee the single-file resolveFile used to provide one level down, now
 // applied across every file before any file's bodies are resolved:
+//  0. every file's own ScopeFile, populated with that file's own import
+//     bindings (see buildFileScope) - needs nothing but r.pkg to exist
+//     already, so it can run before any declaration is processed at all.
 //  1. every file's struct type names and field catalogs, so methods (pass 2)
 //     and type positions (pass 3) can always find them regardless of which
 //     file declares the struct
 //  2. every file's top-level var/free-function names, and every method
 //     (attached to the struct catalog pass 1 already built)
 //  3. every file's own declaration content - types, initializers, function
-//     bodies - now that every top-level name in the whole package is known
+//     bodies - now that every top-level name in the whole package is known.
+//     Uses each file's own fileScope (not r.pkg directly) as the base scope,
+//     so an import is visible only in the file that declared it.
 func (r *resolver) resolvePackage(trees []*ast.Tree) {
+	for _, tree := range trees {
+		r.enterFile(tree)
+		r.buildFileScope(tree)
+	}
 	for _, tree := range trees {
 		r.enterFile(tree)
 		for _, decl := range tree.Children(tree.Root) {
@@ -166,16 +228,58 @@ func (r *resolver) resolvePackage(trees []*ast.Tree) {
 	}
 	for _, tree := range trees {
 		r.enterFile(tree)
+		fileScope := r.fileScopes[tree]
 		for _, decl := range tree.Children(tree.Root) {
 			switch tree.Nodes[decl].Kind {
 			case enums.NodeKinds.VarDecl:
-				r.resolveVarDeclBody(r.pkg, decl)
+				r.resolveVarDeclBody(fileScope, decl)
 			case enums.NodeKinds.FuncDecl:
-				r.resolveFuncBody(r.pkg, decl)
+				r.resolveFuncBody(fileScope, decl)
 			case enums.NodeKinds.StructDecl:
-				r.resolveStructFieldTypes(r.pkg, decl)
+				r.resolveStructFieldTypes(fileScope, decl)
 			}
 		}
+	}
+}
+
+// buildFileScope creates tree's own ScopeFile scope (child of r.pkg) and
+// populates it with every import binding tree's own ImportDecl nodes
+// declared, zipped in file order against fileImports[tree] (already
+// resolved to a target *PackageResult by whoever built this resolver's
+// input - the loader package for a real program, or a test's own fixture -
+// sema has no filesystem/path-resolution logic of its own; see
+// PackageUnit's doc comment). A duplicate local name (two imports resolving
+// to the same local name in one file) is reported as a redeclaration, same
+// as any other Scope.Define conflict.
+func (r *resolver) buildFileScope(tree *ast.Tree) {
+	fileScope := newScope(ScopeFile, r.pkg, tree.Root)
+	r.fileScopes[tree] = fileScope
+
+	imports := r.fileImports[tree]
+	idx := 0
+	for _, decl := range tree.Children(tree.Root) {
+		if tree.Nodes[decl].Kind != enums.NodeKinds.ImportDecl {
+			continue
+		}
+		if idx >= len(imports) {
+			break // an unresolved import - already reported by the loader
+		}
+		imp := imports[idx]
+		idx++
+
+		sym := &Symbol{
+			Name:    imp.LocalName,
+			Kind:    SymPackage,
+			Decl:    decl,
+			Tree:    tree,
+			Scope:   fileScope,
+			Package: imp.Target,
+		}
+		if _, redeclared := fileScope.Define(sym); redeclared {
+			r.errorAt(decl, "%s redeclared in this file (previously imported)", sym.Name)
+			continue
+		}
+		r.info.Refs[decl] = sym
 	}
 }
 
@@ -183,12 +287,14 @@ func (r *resolver) resolvePackage(trees []*ast.Tree) {
 // Param - anything whose first child is its name Ident) into scope,
 // reporting a redeclaration and recording the Ident's Ref either way.
 func (r *resolver) declareLocal(scope *Scope, n, nameNode ast.NodeIndex, kind SymbolKind) *Symbol {
+	name := r.tree.Text(nameNode)
 	sym := &Symbol{
-		Name:  r.tree.Text(nameNode),
-		Kind:  kind,
-		Decl:  n,
-		Tree:  r.tree,
-		Scope: scope,
+		Name:     name,
+		Kind:     kind,
+		Decl:     n,
+		Tree:     r.tree,
+		Scope:    scope,
+		Exported: isExportedName(name),
 	}
 	if prior, redeclared := scope.Define(sym); redeclared {
 		r.errorAt(n, "%s redeclared in this scope (previously declared as %s)", sym.Name, prior.Kind)
@@ -206,17 +312,19 @@ func (r *resolver) declareStruct(pkg *Scope, decl ast.NodeIndex) {
 		Fields:  make(map[string]*Symbol),
 		Methods: make(map[string]*Symbol),
 	}
+	sym.StructInfo = info
 	r.info.Structs[sym.Name] = info
 
 	for _, field := range r.tree.Children(decl)[1:] {
 		fieldNameNode := r.tree.Child(field, 0)
 		fieldName := r.tree.Text(fieldNameNode)
 		fieldSym := &Symbol{
-			Name:  fieldName,
-			Kind:  SymField,
-			Decl:  field,
-			Tree:  r.tree,
-			Scope: pkg,
+			Name:     fieldName,
+			Kind:     SymField,
+			Decl:     field,
+			Tree:     r.tree,
+			Scope:    pkg,
+			Exported: isExportedName(fieldName),
 		}
 		if _, exists := info.Fields[fieldName]; exists {
 			r.errorAt(field, "field %s redeclared in struct %s", fieldName, sym.Name)
@@ -246,11 +354,13 @@ func (r *resolver) declareFunc(pkg *Scope, decl ast.NodeIndex) {
 		return
 	}
 
+	name := r.tree.Text(nameNode)
 	sym := &Symbol{
-		Name: r.tree.Text(nameNode),
-		Kind: SymFunc,
-		Decl: decl,
-		Tree: r.tree,
+		Name:     name,
+		Kind:     SymFunc,
+		Decl:     decl,
+		Tree:     r.tree,
+		Exported: isExportedName(name),
 	}
 	r.info.Refs[nameNode] = sym
 	r.addMethod(receiver, sym)
@@ -424,6 +534,8 @@ func (r *resolver) resolveType(scope *Scope, n ast.NodeIndex) {
 			r.errorAt(n, "%s is not a type (declared as %s)", name, sym.Kind)
 		}
 		r.info.Refs[n] = sym
+	case enums.NodeKinds.MemberExpr:
+		r.resolveTypeMemberExpr(scope, n)
 	case enums.NodeKinds.ArrayType:
 		if size := r.tree.Child(n, 0); size != ast.InvalidNode {
 			r.resolveExpr(scope, size)
@@ -438,6 +550,50 @@ func (r *resolver) resolveType(scope *Scope, n ast.NodeIndex) {
 			r.resolveType(scope, ret)
 		}
 	}
+}
+
+// resolveTypeMemberExpr resolves a package-qualified type reference
+// (`pkg.Point` - parsed as a MemberExpr node in type position, see
+// parser.parseTypeExpr) - the type-position counterpart to
+// resolvePackageMemberExpr below. Unlike an ordinary struct field/method
+// access, this needs no type information at all (a package's own scope is
+// already fully built by the time anything imports it - see
+// ResolveProgram's dependency-ordering guarantee), so - unlike a value-level
+// MemberExpr - it resolves entirely here, during Resolve, not deferred to
+// Check.
+func (r *resolver) resolveTypeMemberExpr(scope *Scope, n ast.NodeIndex) {
+	object := r.tree.Child(n, 0)
+	if r.tree.Nodes[object].Kind != enums.NodeKinds.Ident {
+		r.errorAt(n, "invalid type expression")
+		return
+	}
+	objName := r.tree.Text(object)
+	objSym, ok := scope.Lookup(objName)
+	if !ok {
+		r.errorAt(object, "undefined: %s", objName)
+		return
+	}
+	r.info.Refs[object] = objSym
+	if objSym.Kind != SymPackage {
+		r.errorAt(n, "%s is not a package", objName)
+		return
+	}
+
+	name := r.tree.Text(n)
+	sym, ok := objSym.Package.Scope.LookupLocal(name)
+	if !ok {
+		r.errorAt(n, "undefined: %s.%s", objName, name)
+		return
+	}
+	if !sym.Kind.IsType() {
+		r.errorAt(n, "%s.%s is not a type (declared as %s)", objName, name, sym.Kind)
+		return
+	}
+	if !sym.Exported {
+		r.errorAt(n, "%s.%s is not exported", objName, name)
+		return
+	}
+	r.info.Refs[n] = sym
 }
 
 // resolveExpr resolves n as a value expression. See Info's doc comment for
@@ -477,9 +633,19 @@ func (r *resolver) resolveExpr(scope *Scope, n ast.NodeIndex) {
 		r.resolveExpr(scope, r.tree.Child(n, 0))
 		r.resolveExpr(scope, r.tree.Child(n, 1))
 	case enums.NodeKinds.MemberExpr:
-		// Only the object resolves lexically; the field name (Tok) needs
-		// the object's type, resolved by type-checking, not here.
-		r.resolveExpr(scope, r.tree.Child(n, 0))
+		// The object always resolves lexically first. A package-qualified
+		// access (`mathutils.Add` - the object is a bare Ident that
+		// resolves to an import binding) is fully resolved right here, same
+		// as resolveTypeMemberExpr's type-position counterpart - it needs no
+		// type information, unlike a struct field/method access, which is
+		// deliberately left for type-checking (needs the object's type).
+		object := r.tree.Child(n, 0)
+		r.resolveExpr(scope, object)
+		if r.tree.Nodes[object].Kind == enums.NodeKinds.Ident {
+			if objSym, ok := r.info.Refs[object]; ok && objSym.Kind == SymPackage {
+				r.resolvePackageMemberExpr(n, objSym)
+			}
+		}
 	case enums.NodeKinds.ArrayType:
 		// Reachable only via a parse-error recovery path (a bare array
 		// type used where an expression was expected, already flagged by
@@ -488,6 +654,28 @@ func (r *resolver) resolveExpr(scope *Scope, n ast.NodeIndex) {
 	case enums.NodeKinds.CompositeLit:
 		r.resolveCompositeLit(scope, n)
 	}
+}
+
+// resolvePackageMemberExpr resolves a package-qualified value reference
+// (`mathutils.Add`, `mathutils.SomeExportedVar`) - n is the MemberExpr node
+// itself, pkgSym its already-resolved object (a SymPackage symbol). Looked
+// up directly in the target package's own top-level scope (LookupLocal, not
+// Lookup - see its own doc comment for why a plain outward-walking lookup
+// would be wrong here) and, since this is always a genuine cross-package
+// access by construction (the only way to reach this at all is through a
+// real import binding), always export-checked.
+func (r *resolver) resolvePackageMemberExpr(n ast.NodeIndex, pkgSym *Symbol) {
+	name := r.tree.Text(n)
+	sym, ok := pkgSym.Package.Scope.LookupLocal(name)
+	if !ok {
+		r.errorAt(n, "undefined: %s.%s", pkgSym.Name, name)
+		return
+	}
+	if !sym.Exported {
+		r.errorAt(n, "%s.%s is not exported", pkgSym.Name, name)
+		return
+	}
+	r.info.Refs[n] = sym
 }
 
 func (r *resolver) resolveCompositeLit(scope *Scope, n ast.NodeIndex) {

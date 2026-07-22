@@ -1,0 +1,23 @@
+// main.llx - the entry point for examples/imports: imports the sibling
+// mathutils package, relative to *this file's own* directory
+// (examples/imports/app), not the examples/imports directory itself - see
+// LANGUAGE.md's "Imports" section for the exact path-resolution rule this
+// demonstrates ("../mathutils" resolves to examples/imports/mathutils).
+//
+// Compile the whole program with either:
+//
+//	llvmc examples/imports/app
+//	llvmc examples/imports/app/main.llx
+
+import "../mathutils"
+
+func main() int {
+	sum := mathutils.Add(10, 20)
+	print(sum)
+
+	p := mathutils.Point{1, 2}
+	p.Scale(5)
+	print(p.X + p.Y)
+
+	return sum
+}

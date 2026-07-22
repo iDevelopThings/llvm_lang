@@ -1,0 +1,24 @@
+// mathutils.llx - the imported package for examples/imports: an exported
+// Add function and an exported Point struct with a method, plus an
+// unexported helper (double) that only this package's own code can ever
+// call - see LANGUAGE.md's "Imports" section: an unexported (lowercase)
+// name simply isn't reachable through a package qualifier from outside this
+// package, it doesn't need to not exist.
+
+func Add(a int, b int) int {
+	return a + b
+}
+
+func double(x int) int {
+	return x * 2
+}
+
+struct Point {
+	X int
+	Y int
+}
+
+func (Point) Scale(factor int) {
+	this.X = this.X * factor
+	this.Y = this.Y * factor
+}

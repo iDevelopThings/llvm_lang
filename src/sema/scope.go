@@ -1,20 +1,24 @@
 package sema
 
 import (
+	"unicode"
+	"unicode/utf8"
+
 	"llvm_lang/src/ast"
 )
 
 // ScopeKind classifies a Scope by what introduces it, mirroring Go's own
 // scope hierarchy (universe > package > file > function > block). A
-// package's ScopePackage scope is now genuinely shared across every file in
+// package's ScopePackage scope is genuinely shared across every file in
 // that package (see LANGUAGE.md's "Multi-file packages" section and
 // ResolvePackage) - every file's top-level struct/var/func names are
 // declared into the exact same Scope instance, which is exactly what makes
 // a name declared in one file visible when resolving another's body,
-// regardless of file order. ScopeFile (import bindings) is still meant to be
-// additive later, once real cross-package import syntax exists - that's a
-// separate, still-unimplemented scope level from ScopePackage, not the same
-// thing under a different name.
+// regardless of file order. ScopeFile now holds every import binding that
+// file itself declared (see LANGUAGE.md's "Imports" section and
+// resolver.buildFileScope, resolve.go) - file-scoped, not package-scoped:
+// a sibling file that doesn't itself write `import "./x"` can't see that
+// binding, even within the same package.
 type ScopeKind int
 
 const (
@@ -75,6 +79,38 @@ func (s *Scope) Lookup(name string) (*Symbol, bool) {
 	return nil, false
 }
 
+// LookupLocal resolves name directly in s, without walking outward to any
+// enclosing scope - used for a package-qualified access (`pkg.Name`, see
+// resolve.go's resolvePackageMemberExpr/resolveTypeMemberExpr): a name must
+// be genuinely declared in that package's own top-level scope, not merely
+// reachable via scopes *it* encloses (every package scope's own parent is
+// eventually the universe scope - see ResolvePackage - so a plain Lookup
+// would incorrectly let `somepkg.int` resolve, since "int" is reachable by
+// walking up from any package's scope at all).
+func (s *Scope) LookupLocal(name string) (*Symbol, bool) {
+	sym, ok := s.names[name]
+	return sym, ok
+}
+
+// packageScopeOf returns the nearest ScopePackage ancestor of s - a
+// package-level symbol's own Symbol.Scope already IS that package scope
+// directly (see declareLocal/declareStruct/declareFunc/addMethod, all of
+// which declare into the shared package scope); this walks up through any
+// nested function/block scope for the (rarer) case of a symbol declared
+// somewhere nested. Used purely to decide "does this symbol belong to the
+// same package as the code accessing it" for export enforcement (see
+// typecheck.go's checkExportedAccess) - every package gets its own fresh
+// Scope instance (one per sema.ResolveProgram unit), so pointer identity
+// alone decides this.
+func packageScopeOf(s *Scope) *Scope {
+	for sc := s; sc != nil; sc = sc.Parent {
+		if sc.Kind == ScopePackage {
+			return sc
+		}
+	}
+	return nil
+}
+
 // nearestFunc walks up from scope to the nearest enclosing ScopeFunc, or
 // nil if scope isn't inside any function.
 func nearestFunc(scope *Scope) *Scope {
@@ -97,6 +133,11 @@ const (
 	SymField
 	SymBuiltinType
 	SymReceiver
+	// SymPackage is an import binding (`import "./mathutils"` - see
+	// LANGUAGE.md's "Imports" section): a name that resolves to another
+	// package's exported surface (Symbol.Package), not a value or a type of
+	// its own. File-scoped, not package-scoped - see ScopeFile.
+	SymPackage
 )
 
 func (k SymbolKind) String() string {
@@ -115,6 +156,8 @@ func (k SymbolKind) String() string {
 		return "builtin type"
 	case SymReceiver:
 		return "receiver"
+	case SymPackage:
+		return "package"
 	default:
 		return "symbol"
 	}
@@ -160,12 +203,43 @@ type Symbol struct {
 	// its receiver struct's own scope (package scope today).
 	Scope *Scope
 
-	// Exported is a hook for a future visibility rule, not enforced by
-	// anything yet - there's no cross-package access to check without
-	// modules/imports existing. Whether the policy ends up being Go-style
-	// name-case or an explicit keyword isn't decided; this field exists so
-	// that decision doesn't require touching every Symbol construction site.
+	// Exported reports whether this symbol is visible from another package
+	// (see LANGUAGE.md's "Imports" section): Go-style name-case - a
+	// capitalized first letter. Computed once at declaration time
+	// (isExportedName) for every top-level func/struct/field/method symbol;
+	// meaningless (left false) for a local var/param, which can never be
+	// referenced cross-package at all. Enforced by typecheck.go's
+	// checkExportedAccess/resolve.go's resolvePackageMemberExpr /
+	// resolveTypeMemberExpr - never by anything in codegen, which assumes an
+	// already-fully-checked tree (see AGENTS.md's codegen section).
 	Exported bool
+
+	// StructInfo is set only for a SymStruct symbol - a direct back-pointer
+	// to the same StructInfo that already points forward to this Symbol
+	// (StructInfo.Symbol), so any consumer holding a struct-type *Symbol*
+	// (e.g. one resolved through a package qualifier - see
+	// resolveTypeMemberExpr) can reach its Fields/Methods catalog directly,
+	// without a name-based lookup into some package's own (possibly not
+	// currently-in-scope) Structs map.
+	StructInfo *StructInfo
+
+	// Package is set only for a SymPackage symbol (an import binding) - the
+	// imported package's own resolved surface (its shared top-level Scope
+	// and struct catalog), already built by the time this binding is
+	// created (see ResolveProgram: packages are processed in dependency
+	// order, so an importer's own imports are always already-resolved
+	// PackageResults by the time its file scope is built).
+	Package *PackageResult
+}
+
+// isExportedName reports whether name is exported by this language's
+// Go-style name-case convention: a capitalized first rune. Used the moment
+// every top-level func/struct/field/method Symbol is constructed, so
+// Exported never needs recomputing later (see checkExportedAccess/
+// resolvePackageMemberExpr/resolveTypeMemberExpr, the only readers).
+func isExportedName(name string) bool {
+	r, _ := utf8.DecodeRuneInString(name)
+	return r != utf8.RuneError && unicode.IsUpper(r)
 }
 
 // StructInfo catalogs one struct's fields and methods by name, built

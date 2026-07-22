@@ -288,7 +288,15 @@ func parseMemberExpr(p *Parser, object ast.NodeIndex) ast.NodeIndex {
 		Start: p.tree.SpanOf(object).Start,
 		End:   nameTok.End,
 	}
-	return p.tree.NewNode(enums.NodeKinds.MemberExpr, nameTok, span, object)
+	member := p.tree.NewNode(enums.NodeKinds.MemberExpr, nameTok, span, object)
+	// A package-qualified composite literal (`shapes.Point{...}` - see
+	// LANGUAGE.md's "Imports" section) - same brace-ambiguity guard
+	// parseIdentExpr's own plain-Ident composite-literal check uses (see
+	// exprLev's own doc comment on Parser).
+	if p.exprLev >= 0 && p.at(enums.Lexemes.LeftBrace) {
+		return p.finishCompositeLit(member)
+	}
+	return member
 }
 
 // parseArrayTypeLit is the prefix rule for a bare `[` starting an
