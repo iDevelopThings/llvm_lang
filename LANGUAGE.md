@@ -89,6 +89,42 @@ func (Point) move(dx int, dy int) {
 }
 ```
 
+## Constructors
+
+A struct may also declare one or more `constructor(params) { body }` blocks, nested directly inside the struct declaration - a deliberate, narrow exception to "structs are data-only, methods declared separately" above:
+
+```go
+struct Point {
+    x int
+
+    constructor() {
+        this.x = 99
+    }
+    constructor(v int) {
+        this.x = v
+    }
+}
+
+func main() int {
+    a := Point(5)   // calls the one-arg constructor, a.x == 5
+    b := Point()    // calls the zero-arg constructor, b.x == 99
+    c := Point{1}   // composite literal, completely unaffected/unchanged
+    return a.x + b.x + c.x
+}
+```
+
+`this` inside a constructor body refers to the struct instance being constructed, exactly like inside an ordinary method - there's no separate receiver clause to write, since a constructor's receiver is always the struct it's nested inside.
+
+**Overloaded by argument count only.** Multiple constructors on the same struct are distinguished purely by how many parameters they declare - never by parameter type. Two constructors declaring the same parameter count on one struct is a compile-time error, reported right at struct-declaration time (not call time): it's a structural problem with the struct itself, regardless of whether either constructor is ever actually called.
+
+This is a **deliberate, narrow exception** to this language having no general function/method overloading anywhere else - it exists specifically to keep construction bound to the type itself and distinct from an ordinary function call, not as a precedent for overloading free functions or methods generally. Nothing else about "no overloading" changes: two free functions or two methods with the same name are still always a redeclaration error, regardless of their parameter lists.
+
+**`Name(args)` calls a constructor; `Name{...}` never does.** A call-expression on a struct type name (`Point(5)`) invokes whichever constructor's declared parameter count matches `len(args)`, type-checking `args` against that constructor's parameters exactly like an ordinary function call. If no constructor's parameter count matches, or the struct declares zero constructors at all, this remains exactly as illegal as a struct-type call always was (see "Explicit conversions" above: a non-numeric conversion target is rejected) - this feature only adds a *new* legal case, it doesn't change what was already illegal. A composite literal (`Point{...}`, positional or keyed) is **completely unchanged** - it always means raw structural construction, bypassing constructors entirely, regardless of whether the struct has any constructors declared; both construction paths coexist freely on the same type.
+
+A bare, uncalled struct type name (not followed by `(` or `{`) still means exactly what it means today - a type reference, valid only in type position - regardless of whether the struct has constructors.
+
+**Export/visibility.** A constructor doesn't get its own independent export bit - it isn't individually named beyond the `constructor` keyword. A struct's constructors are usable cross-package if and only if the struct type itself is exported, exactly the same rule its fields and methods already follow (see "Imports" below).
+
 ## Assignment
 
 `=` assigns to any lvalue: an identifier, `.field`, or `[index]`. Compound assignment and increment/decrement are supported: `+=  -=  *=  /=  ++  --`.

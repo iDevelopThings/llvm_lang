@@ -110,6 +110,89 @@ func TestDeclShape(t *testing.T) {
 	}
 }
 
+// TestConstructorDeclShape covers a struct with zero, one, and multiple
+// constructors - see LANGUAGE.md's "Constructors" section for the language
+// feature and ast.Node's own StructDecl/ConstructorDecl doc comments for the
+// shapes asserted here: a ConstructorDecl is [paramList, body], with no
+// name/receiver/return-type children, interspersed among a StructDecl's
+// ordinary Field children in declaration order.
+func TestConstructorDeclShape(t *testing.T) {
+	tests := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{
+			name: "struct with zero constructors is unaffected",
+			src:  "struct Point {\n\tx int\n}",
+			want: "" +
+				"StructDecl \"struct\"\n" +
+				"  Ident \"Point\"\n" +
+				"  Field\n" +
+				"    Ident \"x\"\n" +
+				"    Ident \"int\"\n",
+		},
+		{
+			name: "struct with one zero-arg constructor",
+			src:  "struct Point {\n\tx int\n\n\tconstructor() {\n\t\tthis.x = 99\n\t}\n}",
+			want: "" +
+				"StructDecl \"struct\"\n" +
+				"  Ident \"Point\"\n" +
+				"  Field\n" +
+				"    Ident \"x\"\n" +
+				"    Ident \"int\"\n" +
+				"  ConstructorDecl \"constructor\"\n" +
+				"    ParamList\n" +
+				"    Block\n" +
+				"      AssignStmt \"=\"\n" +
+				"        MemberExpr \"x\"\n" +
+				"          ThisExpr \"this\"\n" +
+				"        NumberLit \"99\"\n",
+		},
+		{
+			name: "struct with multiple constructors overloaded by arg count",
+			src: "struct Point {\n" +
+				"\tx int\n\n" +
+				"\tconstructor() {\n\t\tthis.x = 99\n\t}\n" +
+				"\tconstructor(v int) {\n\t\tthis.x = v\n\t}\n" +
+				"}",
+			want: "" +
+				"StructDecl \"struct\"\n" +
+				"  Ident \"Point\"\n" +
+				"  Field\n" +
+				"    Ident \"x\"\n" +
+				"    Ident \"int\"\n" +
+				"  ConstructorDecl \"constructor\"\n" +
+				"    ParamList\n" +
+				"    Block\n" +
+				"      AssignStmt \"=\"\n" +
+				"        MemberExpr \"x\"\n" +
+				"          ThisExpr \"this\"\n" +
+				"        NumberLit \"99\"\n" +
+				"  ConstructorDecl \"constructor\"\n" +
+				"    ParamList\n" +
+				"      Param\n" +
+				"        Ident \"v\"\n" +
+				"        Ident \"int\"\n" +
+				"    Block\n" +
+				"      AssignStmt \"=\"\n" +
+				"        MemberExpr \"x\"\n" +
+				"          ThisExpr \"this\"\n" +
+				"        Ident \"v\"\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tree, n := parseDeclSrc(t, tt.src)
+			got := tree.Dump(n)
+			if got != tt.want {
+				t.Errorf("Dump(%q):\n got:\n%s\nwant:\n%s", tt.src, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestArrayTypeAndCompositeLitShape(t *testing.T) {
 	tests := []struct {
 		name string

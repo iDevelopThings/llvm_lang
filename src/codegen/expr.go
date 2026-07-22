@@ -496,6 +496,9 @@ func (g *Generator) genCallExpr(n ast.NodeIndex) llvm.Value {
 		g.genPrintCall(argNodes[0])
 		return llvm.Value{}
 	}
+	if g.isConstructorCall(calleeNode) {
+		return g.genConstructorCall(calleeNode, argNodes)
+	}
 	if g.isConversionCall(calleeNode) {
 		return g.genConversion(n, argNodes[0])
 	}
@@ -582,6 +585,44 @@ func (g *Generator) genIndirectCall(calleeNode ast.NodeIndex, argNodes []ast.Nod
 		args[i] = g.genExpr(a)
 	}
 	return g.builder.CreateCall(fnType, fnPtr, args, "")
+}
+
+// isConstructorCall mirrors sema's own recognition of `Name(args)` as
+// constructing a struct via one of its declared constructors (see
+// LANGUAGE.md's "Constructors" section and sema's checkConstructorCall) -
+// the callee (an Ident for a same-package struct type, or a MemberExpr for a
+// package-qualified one) resolves, via Info.Refs, directly to the specific
+// constructor Symbol sema already selected by argument count - not merely
+// "the struct type", the way a bare, uncalled struct-type reference or an
+// unmatched conversion call's callee still would.
+func (g *Generator) isConstructorCall(calleeNode ast.NodeIndex) bool {
+	sym, ok := g.info.Refs[calleeNode]
+	return ok && sym.Kind == sema.SymConstructor
+}
+
+// genConstructorCall lowers `Name(args)`: allocate a fresh stack slot for
+// the struct being built - the same alloca-then-load approach a struct
+// composite literal already uses (genAddr's CompositeLit case) - call the
+// selected constructor, reusing the exact same implicit-first-pointer-
+// parameter convention an ordinary method call already uses (genMethodCall,
+// and CODEGEN.md's "Method receivers" section) with the alloca's own address
+// as the constructor's `this`, then load and return the now-populated value,
+// matching how this package already returns struct/array/string values by
+// value elsewhere (see CODEGEN.md's "Structs/arrays/strings are passed and
+// returned as real LLVM aggregate types" section).
+func (g *Generator) genConstructorCall(calleeNode ast.NodeIndex, argNodes []ast.NodeIndex) llvm.Value {
+	sym := g.info.Refs[calleeNode]
+	entry := g.ctors[sym]
+	layout := g.structLayouts[sym.StructInfo]
+
+	dst := g.createEntryAlloca(layout.llvmType, "ctor")
+	args := make([]llvm.Value, len(argNodes)+1)
+	args[0] = dst
+	for i, a := range argNodes {
+		args[i+1] = g.genExpr(a)
+	}
+	g.builder.CreateCall(entry.fnType, entry.fn, args, "")
+	return g.builder.CreateLoad(layout.llvmType, dst, "")
 }
 
 // isConversionCall mirrors sema's own recognition of `T(x)` as an explicit

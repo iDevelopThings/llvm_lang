@@ -247,3 +247,41 @@ path-resolution/binding machinery this round already built - it wasn't worth
 the extra grammar/scope-binding surface now on spec alone.
 
 **Status:** deferred, not shipped. See `LANGUAGE.md`'s "Imports" section.
+
+---
+
+## 2026-07-22 - Struct constructors: overloading scoped to constructors only, no Go precedent
+
+**Decision:** a struct may declare one or more `constructor(params) { body }`
+blocks nested directly inside the struct declaration, invoked via
+`Name(args)` call syntax (distinct from the unchanged `Name{...}` composite
+literal). Multiple constructors on the same struct are overloaded by
+argument count only - not by argument type - and this overloading is
+explicitly, deliberately scoped to constructors alone: it is **not** a
+precedent for general function/method overloading anywhere else in the
+language. Two free functions or two methods sharing a name remain a
+redeclaration error, unchanged.
+
+**Why:** this is a genuine language-design fork with no Go precedent to fall
+back on, unlike almost everything else built this session (numeric widths,
+first-class functions, multi-file packages, imports - each of those had a
+direct, uncontroversial Go analogue to adopt as-is). Go itself has no
+constructors and no overloading of any kind, so this couldn't be settled by
+"do what Go does" the way every other round this session was. The user's own
+reasoning, stated explicitly when confirming this design: scoping the
+overload resolution to constructors specifically keeps it "bound to the type
+explicit and differ it from a regular function" - a constructor call is
+already type-directed (its own struct type name is the callee), so
+overloading it by arity is a contained, narrow special case rather than an
+opening for arbitrary function/method overloading, which brings its own,
+much larger set of design questions (name mangling, overload resolution
+ambiguity across argument *types* not just counts, interaction with
+first-class function values) that were never asked for and remain
+deliberately out of scope.
+
+**Status:** shipped. See `LANGUAGE.md`'s "Constructors" section for the full
+language-level rule and `CODEGEN.md`'s "Constructors" section for the
+lowering (each constructor becomes its own real LLVM function, reusing the
+implicit-receiver-pointer convention an ordinary method already uses, named
+`Struct.constructor.N` since a constructor has no name of its own to draw
+from).

@@ -34,3 +34,5 @@ values:
     string: "this"
   - name: Import
     string: "import"
+  - name: Constructor
+    string: "constructor"

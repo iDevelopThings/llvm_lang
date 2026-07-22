@@ -1,0 +1,32 @@
+// constructors.llx - a struct with multiple constructors, overloaded by
+// argument count only (see LANGUAGE.md's "Constructors" section), alongside
+// a plain composite literal on the same type - both construction paths
+// coexist. Returns an int, which becomes this process's own exit code (see
+// cmd/llvmc's package doc comment).
+//
+// Run with:
+//   .\llvmc.exe examples\constructors\constructors.llx
+//   echo $LASTEXITCODE   # (PowerShell) -> 105
+
+struct Point {
+    x int
+
+    constructor() {
+        this.x = 99
+    }
+    constructor(v int) {
+        this.x = v
+    }
+}
+
+func main() int {
+    a := Point(5)   // calls the one-arg constructor, a.x == 5
+    b := Point()    // calls the zero-arg constructor, b.x == 99
+    c := Point{1}   // composite literal, completely unaffected/unchanged
+
+    print(a.x)   // 5
+    print(b.x)   // 99
+    print(c.x)   // 1
+
+    return a.x + b.x + c.x   // 5 + 99 + 1 = 105
+}

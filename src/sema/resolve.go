@@ -3,6 +3,8 @@
 package sema
 
 import (
+	"fmt"
+
 	"llvm_lang/src/ast"
 	"llvm_lang/src/diag"
 	"llvm_lang/src/enums"
@@ -204,15 +206,17 @@ func (r *resolver) errorAtLabel(n ast.NodeIndex, label, format string, a ...any)
 //  0. every file's own ScopeFile, populated with that file's own import
 //     bindings (see buildFileScope) - needs nothing but r.pkg to exist
 //     already, so it can run before any declaration is processed at all.
-//  1. every file's struct type names and field catalogs, so methods (pass 2)
-//     and type positions (pass 3) can always find them regardless of which
-//     file declares the struct
+//  1. every file's struct type names, field catalogs, and constructor
+//     catalogs (see declareConstructor), so methods (pass 2) and type
+//     positions (pass 3) can always find them regardless of which file
+//     declares the struct
 //  2. every file's top-level var/free-function names, and every method
 //     (attached to the struct catalog pass 1 already built)
-//  3. every file's own declaration content - types, initializers, function
-//     bodies - now that every top-level name in the whole package is known.
-//     Uses each file's own fileScope (not r.pkg directly) as the base scope,
-//     so an import is visible only in the file that declared it.
+//  3. every file's own declaration content - types, initializers, function/
+//     constructor bodies - now that every top-level name in the whole
+//     package is known. Uses each file's own fileScope (not r.pkg directly)
+//     as the base scope, so an import is visible only in the file that
+//     declared it.
 func (r *resolver) resolvePackage(trees []*ast.Tree) {
 	for _, tree := range trees {
 		r.enterFile(tree)
@@ -246,6 +250,7 @@ func (r *resolver) resolvePackage(trees []*ast.Tree) {
 				r.resolveFuncBody(fileScope, decl)
 			case enums.NodeKinds.StructDecl:
 				r.resolveStructFieldTypes(fileScope, decl)
+				r.resolveStructConstructors(fileScope, decl)
 			}
 		}
 	}
@@ -314,9 +319,10 @@ func (r *resolver) declareStruct(pkg *Scope, decl ast.NodeIndex) {
 	sym := r.declareLocal(pkg, decl, nameNode, SymStruct)
 
 	info := &StructInfo{
-		Symbol:  sym,
-		Fields:  make(map[string]*Symbol),
-		Methods: make(map[string]*Symbol),
+		Symbol:       sym,
+		Fields:       make(map[string]*Symbol),
+		Methods:      make(map[string]*Symbol),
+		Constructors: make(map[int]*Symbol),
 	}
 	sym.StructInfo = info
 	r.info.Structs[sym.Name] = info
@@ -339,12 +345,86 @@ func (r *resolver) declareStruct(pkg *Scope, decl ast.NodeIndex) {
 		}
 		r.info.Refs[fieldNameNode] = fieldSym
 	}
+
+	for ctor := range r.tree.StructConstructors(decl) {
+		r.declareConstructor(info, ctor)
+	}
+}
+
+// declareConstructor catalogs one `constructor(params) {...}` block nested
+// inside a StructDecl, keyed by its declared parameter count (see
+// StructInfo.Constructors' own doc comment for why arity is the key).
+// Constructors are overloaded by argument count only, deliberately scoped to
+// this one construct - see LANGUAGE.md's "Constructors" section - so two
+// constructors sharing the same arity is rejected right here, at struct-
+// declaration time, exactly like a redeclared field/method name above: it's
+// a structural problem regardless of whether either constructor is ever
+// called.
+func (r *resolver) declareConstructor(info *StructInfo, ctor ast.NodeIndex) {
+	arity := len(r.tree.Children(r.tree.ConstructorParamList(ctor)))
+	ctorSym := &Symbol{
+		Name: fmt.Sprintf("%s.constructor(%d)", info.Symbol.Name, arity),
+		Kind: SymConstructor,
+		Decl: ctor,
+		Tree: r.tree,
+		// Scope mirrors a method's own Symbol.Scope (see addMethod) - the
+		// receiver struct's own scope, not that this is ever looked up by
+		// name (a constructor has none): kept only for consistency with
+		// every other Symbol.
+		Scope:      info.Symbol.Scope,
+		StructInfo: info,
+	}
+	r.info.Refs[ctor] = ctorSym
+
+	if _, exists := info.Constructors[arity]; exists {
+		r.errorAt(ctor, "struct %s already has a constructor taking %d argument(s)", info.Symbol.Name, arity)
+		return
+	}
+	info.Constructors[arity] = ctorSym
 }
 
 func (r *resolver) resolveStructFieldTypes(pkg *Scope, decl ast.NodeIndex) {
 	for _, field := range r.tree.StructFields(decl) {
 		r.resolveType(pkg, r.tree.Child(field, 1))
 	}
+}
+
+// resolveStructConstructors resolves every constructor nested inside decl -
+// its parameters (declared into a fresh function scope, exactly like an
+// ordinary method's) and its body, with `this` resolving to the struct being
+// constructed exactly like inside an ordinary method (see resolveFuncBody's
+// identical Receiver setup).
+func (r *resolver) resolveStructConstructors(pkg *Scope, decl ast.NodeIndex) {
+	nameNode := r.tree.Child(decl, 0)
+	info, ok := r.info.Structs[r.tree.Text(nameNode)]
+	if !ok {
+		return
+	}
+	for ctor := range r.tree.StructConstructors(decl) {
+		r.resolveConstructorBody(pkg, info, ctor)
+	}
+}
+
+func (r *resolver) resolveConstructorBody(pkg *Scope, info *StructInfo, ctor ast.NodeIndex) {
+	paramList := r.tree.ConstructorParamList(ctor)
+	body := r.tree.ConstructorBody(ctor)
+
+	fnScope := newScope(ScopeFunc, pkg, ctor)
+	r.info.Scopes[ctor] = fnScope
+	fnScope.Receiver = &Symbol{
+		Name:  "this",
+		Kind:  SymReceiver,
+		Decl:  info.Symbol.Decl,
+		Tree:  info.Symbol.Tree,
+		Scope: fnScope,
+	}
+
+	for _, param := range r.tree.Children(paramList) {
+		r.declareLocal(fnScope, param, r.tree.Child(param, 0), SymParam)
+		r.resolveType(fnScope, r.tree.Child(param, 1))
+	}
+
+	r.resolveBlock(fnScope, body)
 }
 
 // declareFunc registers a free function into package scope, or - if it has

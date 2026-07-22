@@ -28,14 +28,55 @@ func (t *Tree) TopLevelDeclsOfKind(kind enums.NodeKind) iter.Seq[NodeIndex] {
 }
 
 // StructFields returns decl's (a StructDecl's) Field children, skipping its
-// leading name child - see Node's own StructDecl doc comment for the
-// [name, field0, field1, ...] shape this indexes into. A plain slice, not
-// iter.Seq: every real caller needs indexed/random access (a positional
-// composite literal's i-th field, or a field-count comparison against
-// len(elems)), not just a single forward pass - see AGENTS.md's Standards
-// section for when a plain slice is the right call over an iterator.
+// leading name child and filtering out any interspersed ConstructorDecl
+// children (see Node's own StructDecl doc comment for the
+// [name, member0, member1, ...] shape this indexes into, and
+// LANGUAGE.md's "Constructors" section for why a constructor can appear
+// there too now). A plain slice, not iter.Seq: every real caller needs
+// indexed/random access (a positional composite literal's i-th field, or a
+// field-count comparison against len(elems)), not just a single forward
+// pass - see AGENTS.md's Standards section for when a plain slice is the
+// right call over an iterator.
 func (t *Tree) StructFields(decl NodeIndex) []NodeIndex {
-	return t.Children(decl)[1:]
+	children := t.Children(decl)[1:]
+	fields := make([]NodeIndex, 0, len(children))
+	for _, c := range children {
+		if t.Nodes[c].Kind == enums.NodeKinds.Field {
+			fields = append(fields, c)
+		}
+	}
+	return fields
+}
+
+// StructConstructors yields decl's (a StructDecl's) ConstructorDecl children,
+// in declaration order - the constructor-kind counterpart to StructFields
+// (see LANGUAGE.md's "Constructors" section). iter.Seq, not a plain slice:
+// every real caller (cataloging constructors during resolve, declaring/
+// generating each one's LLVM signature/body during codegen) is a single
+// forward pass, never indexed access - see AGENTS.md's Standards section.
+func (t *Tree) StructConstructors(decl NodeIndex) iter.Seq[NodeIndex] {
+	return func(yield func(NodeIndex) bool) {
+		for _, c := range t.Children(decl)[1:] {
+			if t.Nodes[c].Kind != enums.NodeKinds.ConstructorDecl {
+				continue
+			}
+			if !yield(c) {
+				return
+			}
+		}
+	}
+}
+
+// ConstructorParamList returns ctor's (a ConstructorDecl's) ParamList child -
+// see Node's own ConstructorDecl doc comment for the [paramList, body] shape
+// these two accessors index into.
+func (t *Tree) ConstructorParamList(ctor NodeIndex) NodeIndex {
+	return t.Child(ctor, 0)
+}
+
+// ConstructorBody returns ctor's (a ConstructorDecl's) body child.
+func (t *Tree) ConstructorBody(ctor NodeIndex) NodeIndex {
+	return t.Child(ctor, 1)
 }
 
 // CompositeLitElems splits n's (a CompositeLit's) children into its leading

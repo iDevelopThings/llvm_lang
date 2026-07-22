@@ -312,6 +312,69 @@ func TestImports_SamePackageCaseInsensitivityStillHolds(t *testing.T) {
 	requireNoDiags(t, resolveAndCheckProgram(t, units))
 }
 
+// TestImports_ConstructorUsableCrossPackageWhenStructExported covers
+// LANGUAGE.md's "Constructors" section's export rule: a constructor doesn't
+// get its own independent export bit - a struct's constructors are usable
+// cross-package if and only if the struct type itself is exported, exactly
+// like its fields/methods already work. Point is exported, so
+// `shapes.Point(1)` (a package-qualified constructor call - a MemberExpr
+// callee, not a bare Ident) must resolve and type-check cleanly.
+func TestImports_ConstructorUsableCrossPackageWhenStructExported(t *testing.T) {
+	shapesTree := mustParseFile(t, "shapes/point.llx", "struct Point {\n\tX int\n\n\tconstructor(v int) {\n\t\tthis.X = v\n\t}\n}\n")
+	mainTree := mustParseFile(t, "app/main.llx", `import "./shapes"
+
+func main() int {
+	p := shapes.Point(5)
+	return p.X
+}
+`)
+
+	units := []*PackageUnit{
+		{Key: "shapes", Name: "shapes", Trees: []*ast.Tree{shapesTree}},
+		{
+			Key:   "app",
+			Name:  "app",
+			Trees: []*ast.Tree{mainTree},
+			FileImports: map[*ast.Tree][]FileImport{
+				mainTree: {{LocalName: "shapes", TargetKey: "shapes"}},
+			},
+		},
+	}
+
+	requireNoDiags(t, resolveAndCheckProgram(t, units))
+}
+
+// TestImports_ConstructorNotUsableCrossPackageWhenStructUnexported covers
+// the other half: an unexported struct's constructor is unreachable from
+// another package - same as any other unexported-struct-type reference
+// (TestImports_UnexportedStructTypeIsError) - since the struct type name
+// itself is never resolvable through the package qualifier in the first
+// place.
+func TestImports_ConstructorNotUsableCrossPackageWhenStructUnexported(t *testing.T) {
+	shapesTree := mustParseFile(t, "shapes/point.llx", "struct point {\n\tx int\n\n\tconstructor(v int) {\n\t\tthis.x = v\n\t}\n}\n")
+	mainTree := mustParseFile(t, "app/main.llx", `import "./shapes"
+
+func main() int {
+	p := shapes.point(5)
+	return p.x
+}
+`)
+
+	units := []*PackageUnit{
+		{Key: "shapes", Name: "shapes", Trees: []*ast.Tree{shapesTree}},
+		{
+			Key:   "app",
+			Name:  "app",
+			Trees: []*ast.Tree{mainTree},
+			FileImports: map[*ast.Tree][]FileImport{
+				mainTree: {{LocalName: "shapes", TargetKey: "shapes"}},
+			},
+		},
+	}
+
+	requireDiagContaining(t, resolveAndCheckProgram(t, units), "not exported")
+}
+
 // TestImports_FileScopedNotPackageScoped covers the file-scoping rule
 // itself (see LANGUAGE.md's "Imports" section and ScopeFile's doc comment):
 // an import declared in one file of a package is NOT visible from a sibling

@@ -152,6 +152,19 @@ type Generator struct {
 	// entirely - the same reasoning globals/structLayouts already apply.
 	funcs map[*sema.Symbol]funcEntry
 
+	// ctors is funcs' counterpart for constructors (see LANGUAGE.md's
+	// "Constructors" section) - kept as its own map, rather than folded into
+	// funcs, since a constructor's Symbol (sema.SymConstructor) is a
+	// distinct kind from an ordinary free-function/method's (sema.SymFunc):
+	// keying both kinds into one map would work (the two Symbol pointer
+	// spaces never collide), but a dedicated map keeps "which of these two
+	// completely different declaration shapes does this call resolve to"
+	// obvious at every read site, the same reason structLayouts/globals are
+	// each their own map rather than one generic "everything" map. Populated
+	// by declareConstructorSignature, read by genConstructorCall - see
+	// func.go.
+	ctors map[*sema.Symbol]funcEntry
+
 	// locals is reset at the start of every function (see genFuncBody) -
 	// every VarDecl/ShortVarDecl/Param declaration node produces its own
 	// distinct *sema.Symbol (see sema/resolve.go's declareLocal), so a flat
@@ -262,6 +275,7 @@ func GeneratePackage(trees []*ast.Tree, infos map[*ast.Tree]*sema.Info, moduleNa
 		structLayouts: make(map[*sema.StructInfo]*structLayout),
 		globals:       make(map[*sema.Symbol]llvm.Value),
 		funcs:         make(map[*sema.Symbol]funcEntry),
+		ctors:         make(map[*sema.Symbol]funcEntry),
 		strLiterals:   make(map[string]llvm.Value),
 	}
 	for _, tree := range trees {
@@ -294,11 +308,16 @@ func (g *Generator) enter(tree *ast.Tree) {
 
 // genPackage drives the whole module in passes across every file in trees,
 // mirroring sema's own resolvePackage/checkPackage shape (struct catalogs,
-// then globals, then function signatures, then bodies - each pass covering
-// every file before the next begins) so declaration order never matters,
-// either within one file or across the whole package: a function can call
-// another declared later (in the same file or a different one), and a
-// global's type can name a struct declared later (ditto).
+// then globals, then function/constructor signatures, then function/
+// constructor bodies - each pass covering every file before the next begins)
+// so declaration order never matters, either within one file or across the
+// whole package: a function can call another declared later (in the same
+// file or a different one), a global's type can name a struct declared
+// later (ditto), and a constructor call can reach a constructor declared
+// later, or on a struct in a different file/package entirely (see
+// LANGUAGE.md's "Constructors" section) - every constructor's signature is
+// declared across the whole program before any function/constructor body is
+// generated, exactly like an ordinary function's.
 func (g *Generator) genPackage(trees []*ast.Tree) {
 	for _, tree := range trees {
 		g.enter(tree)
@@ -323,11 +342,21 @@ func (g *Generator) genPackage(trees []*ast.Tree) {
 		for d := range tree.TopLevelDeclsOfKind(enums.NodeKinds.FuncDecl) {
 			g.declareFuncSignature(d)
 		}
+		for d := range tree.TopLevelDeclsOfKind(enums.NodeKinds.StructDecl) {
+			for ctor := range tree.StructConstructors(d) {
+				g.declareConstructorSignature(ctor)
+			}
+		}
 	}
 	for _, tree := range trees {
 		g.enter(tree)
 		for d := range tree.TopLevelDeclsOfKind(enums.NodeKinds.FuncDecl) {
 			g.genFuncBody(d)
+		}
+		for d := range tree.TopLevelDeclsOfKind(enums.NodeKinds.StructDecl) {
+			for ctor := range tree.StructConstructors(d) {
+				g.genConstructorBody(ctor)
+			}
 		}
 	}
 }

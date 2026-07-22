@@ -13,52 +13,55 @@ import (
 type Keyword string
 
 const (
-	KeywordVar      Keyword = "Var"
-	KeywordIf       Keyword = "If"
-	KeywordElse     Keyword = "Else"
-	KeywordFor      Keyword = "For"
-	KeywordBreak    Keyword = "Break"
-	KeywordContinue Keyword = "Continue"
-	KeywordReturn   Keyword = "Return"
-	KeywordFunc     Keyword = "Func"
-	KeywordTrue     Keyword = "True"
-	KeywordFalse    Keyword = "False"
-	KeywordStruct   Keyword = "Struct"
-	KeywordThis     Keyword = "This"
-	KeywordImport   Keyword = "Import"
+	KeywordVar         Keyword = "Var"
+	KeywordIf          Keyword = "If"
+	KeywordElse        Keyword = "Else"
+	KeywordFor         Keyword = "For"
+	KeywordBreak       Keyword = "Break"
+	KeywordContinue    Keyword = "Continue"
+	KeywordReturn      Keyword = "Return"
+	KeywordFunc        Keyword = "Func"
+	KeywordTrue        Keyword = "True"
+	KeywordFalse       Keyword = "False"
+	KeywordStruct      Keyword = "Struct"
+	KeywordThis        Keyword = "This"
+	KeywordImport      Keyword = "Import"
+	KeywordConstructor Keyword = "Constructor"
 )
 
 type KeywordContainer struct {
-	Var      Keyword
-	If       Keyword
-	Else     Keyword
-	For      Keyword
-	Break    Keyword
-	Continue Keyword
-	Return   Keyword
-	Func     Keyword
-	True     Keyword
-	False    Keyword
-	Struct   Keyword
-	This     Keyword
-	Import   Keyword
+	Var         Keyword
+	If          Keyword
+	Else        Keyword
+	For         Keyword
+	Break       Keyword
+	Continue    Keyword
+	Return      Keyword
+	Func        Keyword
+	True        Keyword
+	False       Keyword
+	Struct      Keyword
+	This        Keyword
+	Import      Keyword
+	Constructor Keyword
 }
 
 // Keywords is the entry point for the Keyword enum.
 var Keywords = KeywordContainer{
-	Var:      KeywordVar,
-	If:       KeywordIf,
-	Else:     KeywordElse,
-	For:      KeywordFor,
-	Break:    KeywordBreak,
-	Continue: KeywordContinue,
-	Return:   KeywordReturn,
-	Func:     KeywordFunc,
-	True:     KeywordTrue,
-	False:    KeywordFalse,
-	Struct:   KeywordStruct,
-	This:     KeywordThis,
-	Import:   KeywordImport,
+	Var:         KeywordVar,
+	If:          KeywordIf,
+	Else:        KeywordElse,
+	For:         KeywordFor,
+	Break:       KeywordBreak,
+	Continue:    KeywordContinue,
+	Return:      KeywordReturn,
+	Func:        KeywordFunc,
+	True:        KeywordTrue,
+	False:       KeywordFalse,
+	Struct:      KeywordStruct,
+	This:        KeywordThis,
+	Import:      KeywordImport,
+	Constructor: KeywordConstructor,
 }
 
 // KeywordInfo is the static metadata attached to a Keyword.
@@ -134,6 +137,11 @@ var keywordInfos = map[Keyword]KeywordInfo{
 		Name:    "Import",
 		String:  "import",
 	},
+	KeywordConstructor: {
+		Keyword: KeywordConstructor,
+		Name:    "Constructor",
+		String:  "constructor",
+	},
 }
 
 var keywordValues = []Keyword{
@@ -150,22 +158,24 @@ var keywordValues = []Keyword{
 	KeywordStruct,
 	KeywordThis,
 	KeywordImport,
+	KeywordConstructor,
 }
 
 var keywordByName = map[string]Keyword{
-	"var":      KeywordVar,
-	"if":       KeywordIf,
-	"else":     KeywordElse,
-	"for":      KeywordFor,
-	"break":    KeywordBreak,
-	"continue": KeywordContinue,
-	"return":   KeywordReturn,
-	"func":     KeywordFunc,
-	"true":     KeywordTrue,
-	"false":    KeywordFalse,
-	"struct":   KeywordStruct,
-	"this":     KeywordThis,
-	"import":   KeywordImport,
+	"var":         KeywordVar,
+	"if":          KeywordIf,
+	"else":        KeywordElse,
+	"for":         KeywordFor,
+	"break":       KeywordBreak,
+	"continue":    KeywordContinue,
+	"return":      KeywordReturn,
+	"func":        KeywordFunc,
+	"true":        KeywordTrue,
+	"false":       KeywordFalse,
+	"struct":      KeywordStruct,
+	"this":        KeywordThis,
+	"import":      KeywordImport,
+	"constructor": KeywordConstructor,
 }
 
 // Values returns every declared value in declaration order.

@@ -302,6 +302,64 @@ func (c *checker) checkStructDecl(decl ast.NodeIndex) {
 	for _, field := range c.tree.StructFields(decl) {
 		c.typeFromNode(c.tree.Child(field, 1))
 	}
+	for ctor := range c.tree.StructConstructors(decl) {
+		c.checkConstructorDecl(ctor)
+	}
+}
+
+// checkConstructorDecl type-checks one constructor's params and body -
+// mirroring checkFuncDecl's own shape, but simpler: a constructor has no
+// name, no receiver clause, and (see LANGUAGE.md's "Constructors" section)
+// no declared return type at all - it "returns" the struct being
+// constructed implicitly, by populating `this` - so it's checked exactly
+// like an ordinary void function/method body: c.curFunc.hasReturn stays
+// false the whole time, so a bare `return` is fine (an early exit) but
+// `return expr` is rejected by checkReturnStmt's existing rule, and there's
+// no "missing return" check to run at all (that only ever applies when
+// hasReturn is true).
+func (c *checker) checkConstructorDecl(ctor ast.NodeIndex) {
+	paramList := c.tree.ConstructorParamList(ctor)
+	body := c.tree.ConstructorBody(ctor)
+
+	for _, param := range c.tree.Children(paramList) {
+		c.declType(param)
+	}
+
+	prevFunc := c.curFunc
+	c.curFunc = &enclosingFunc{hasReturn: false}
+	c.checkBlock(body)
+	c.curFunc = prevFunc
+}
+
+// constructorSigForDecl returns ctor's (a ConstructorDecl's) signature -
+// its declared parameter types, plus the struct type it constructs as its
+// "return" type (never actually returned via a return statement - see
+// checkConstructorDecl - but the shape checkConstructorCall's argument
+// type-checking needs is identical to an ordinary call's) - computed and
+// cached on first use, same as funcSigForDecl. Reuses c.funcSigs: a
+// ConstructorDecl node's own NodeIndex never collides with a FuncDecl's (see
+// nodeRef), so one memoization map safely serves both.
+func (c *checker) constructorSigForDecl(ctor ast.NodeIndex) funcSignature {
+	key := nodeRef{c.tree, ctor}
+	if sig, ok := c.funcSigs[key]; ok {
+		return sig
+	}
+	sig := c.computeConstructorSig(ctor)
+	c.funcSigs[key] = sig
+	return sig
+}
+
+func (c *checker) computeConstructorSig(ctor ast.NodeIndex) funcSignature {
+	paramNodes := c.tree.Children(c.tree.ConstructorParamList(ctor))
+	params := make([]Type, len(paramNodes))
+	for i, param := range paramNodes {
+		params[i] = c.declType(param)
+	}
+	structInfo := c.info.Refs[ctor].StructInfo
+	return funcSignature{
+		Params: params,
+		Return: Type{Kind: TypeStruct, Struct: structInfo},
+	}
 }
 
 func (c *checker) checkFuncDecl(decl ast.NodeIndex) {
@@ -1501,6 +1559,9 @@ func (c *checker) checkCallExpr(n ast.NodeIndex) Type {
 	if c.isPrintCall(callee) {
 		return c.checkPrintCall(n, args)
 	}
+	if t, ok := c.checkConstructorCall(n, callee, args); ok {
+		return t
+	}
 	if t, ok := c.checkConversionCall(n, callee, args); ok {
 		return t
 	}
@@ -1556,6 +1617,66 @@ func (c *checker) checkPrintCall(n ast.NodeIndex, args []ast.NodeIndex) Type {
 		c.defaultIfUntyped(a, c.checkValueExpr(a))
 	}
 	return voidType
+}
+
+// checkConstructorCall recognizes and type-checks `Name(args)` where Name
+// resolves to a struct type with at least one declared constructor (see
+// LANGUAGE.md's "Constructors" section) - callee may be a plain Ident (a
+// same-package struct type) or a MemberExpr (a package-qualified one,
+// `pkg.Point(args)` - resolved to the struct's own Symbol already, during
+// Resolve's resolvePackageMemberExpr, exactly like `pkg.SomeFunc` or
+// `pkg.SomeVar` - see resolve.go). A struct with *zero* declared
+// constructors is deliberately left unclaimed here (ok=false) - it falls
+// through to checkConversionCall's existing handling completely unchanged,
+// which is exactly the pre-existing "not a numeric conversion target"
+// diagnostic a bare struct-type call already produced before this feature
+// existed (see LANGUAGE.md: this feature only adds a new legal case, it
+// doesn't touch the zero-constructor case at all).
+//
+// Once a match is found, the selected constructor's own Symbol (not just the
+// struct's) is recorded over callee's own Info.Refs entry - codegen needs to
+// know exactly *which* constructor a call resolved to, not just that the
+// callee names a struct with some constructor, the same reason an ordinary
+// method call's callee gets its own specific Symbol recorded (resolveMember)
+// rather than merely "this is a MemberExpr naming a struct value".
+func (c *checker) checkConstructorCall(n, callee ast.NodeIndex, args []ast.NodeIndex) (Type, bool) {
+	switch c.tree.Nodes[callee].Kind {
+	case enums.NodeKinds.Ident, enums.NodeKinds.MemberExpr:
+	default:
+		return invalidType, false
+	}
+	sym, ok := c.info.Refs[callee]
+	if !ok || sym.Kind != SymStruct || sym.StructInfo == nil || len(sym.StructInfo.Constructors) == 0 {
+		return invalidType, false
+	}
+
+	info := sym.StructInfo
+	ctorSym, ok := info.Constructors[len(args)]
+	if !ok {
+		c.errorAtNodes(args, n, "%s has no constructor taking %d argument(s)", info.Symbol.Name, len(args))
+		for _, a := range args {
+			c.checkValueExpr(a)
+		}
+		c.info.Types[n] = invalidType
+		return invalidType, true
+	}
+
+	// The constructor may be declared in a different file - or, for a
+	// package-qualified call, a different package entirely - than this call
+	// site (see LANGUAGE.md's "Multi-file packages" and "Imports" sections).
+	restore := c.pushTree(ctorSym.Tree)
+	sig := c.constructorSigForDecl(ctorSym.Decl)
+	restore()
+
+	for i, a := range args {
+		at := c.checkValueExpr(a)
+		c.checkAssignable(a, sig.Params[i], at, fmt.Sprintf("argument %d", i+1))
+	}
+
+	c.info.Refs[callee] = ctorSym
+	target := Type{Kind: TypeStruct, Struct: info}
+	c.info.Types[n] = target
+	return target, true
 }
 
 // checkConversionCall recognizes and type-checks `T(x)` - an explicit

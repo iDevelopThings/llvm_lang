@@ -18,6 +18,7 @@ values:
   - name: Param
   - name: StructDecl
   - name: Field
+  - name: ConstructorDecl
   - name: Block
   - name: ExprStmt
   - name: ReturnStmt

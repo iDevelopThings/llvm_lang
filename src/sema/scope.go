@@ -138,6 +138,17 @@ const (
 	// package's exported surface (Symbol.Package), not a value or a type of
 	// its own. File-scoped, not package-scoped - see ScopeFile.
 	SymPackage
+	// SymConstructor names one constructor nested inside a struct
+	// declaration (see LANGUAGE.md's "Constructors" section) - never itself
+	// bound into any lexical Scope (a constructor has no name to look up;
+	// it's selected by argument count - see StructInfo.Constructors), so
+	// this Symbol only ever exists as the value a constructor-call callee's
+	// Info.Refs entry is overwritten to point at once sema.Check has
+	// resolved which constructor a call selected (see checkConstructorCall,
+	// typecheck.go) - the same "record which specific declaration a call
+	// resolved to" idea an ordinary method call's Info.Refs entry already
+	// captures.
+	SymConstructor
 )
 
 func (k SymbolKind) String() string {
@@ -158,6 +169,8 @@ func (k SymbolKind) String() string {
 		return "receiver"
 	case SymPackage:
 		return "package"
+	case SymConstructor:
+		return "constructor"
 	default:
 		return "symbol"
 	}
@@ -214,13 +227,24 @@ type Symbol struct {
 	// already-fully-checked tree (see AGENTS.md's codegen section).
 	Exported bool
 
-	// StructInfo is set only for a SymStruct symbol - a direct back-pointer
-	// to the same StructInfo that already points forward to this Symbol
+	// StructInfo is set for a SymStruct symbol - a direct back-pointer to the
+	// same StructInfo that already points forward to this Symbol
 	// (StructInfo.Symbol), so any consumer holding a struct-type *Symbol*
 	// (e.g. one resolved through a package qualifier - see
-	// resolveTypeMemberExpr) can reach its Fields/Methods catalog directly,
-	// without a name-based lookup into some package's own (possibly not
-	// currently-in-scope) Structs map.
+	// resolveTypeMemberExpr) can reach its Fields/Methods/Constructors
+	// catalog directly, without a name-based lookup into some package's own
+	// (possibly not currently-in-scope, or - for a constructor call resolved
+	// cross-package - not even the *current* package's) Structs map. Also
+	// set for a SymConstructor symbol, pointing at the struct it constructs -
+	// the same direct-pointer reasoning applies there even more: codegen
+	// needs the constructed struct's own layout (g.structLayouts) from a
+	// constructor-call callee's resolved Symbol, and by construction that
+	// callee may belong to any package in the program (see LANGUAGE.md's
+	// "Constructors" section: a struct's constructors are usable
+	// cross-package iff the struct itself is exported) - a name-based lookup
+	// through whichever tree's own Info.Structs happens to be active would
+	// be wrong the moment the constructor was declared in a different
+	// package's file than the call site.
 	StructInfo *StructInfo
 
 	// Package is set only for a SymPackage symbol (an import binding) - the
@@ -242,16 +266,31 @@ func isExportedName(name string) bool {
 	return r != utf8.RuneError && unicode.IsUpper(r)
 }
 
-// StructInfo catalogs one struct's fields and methods by name, built
-// directly from its declaration - no type inference needed for either,
-// since both are just child nodes of the StructDecl/FuncDecl themselves.
-// Field/method *use* sites (`p.field`, `p.method()`) aren't resolved
-// against this catalog by this package - that needs to know p's type,
-// which is what the type-checking pass this feeds into is for.
+// StructInfo catalogs one struct's fields, methods, and constructors, built
+// directly from its declaration - no type inference needed for any of the
+// three, since all are just child nodes of the StructDecl/FuncDecl/
+// ConstructorDecl themselves. Field/method *use* sites (`p.field`,
+// `p.method()`) aren't resolved against this catalog by this package - that
+// needs to know p's type, which is what the type-checking pass this feeds
+// into is for.
 type StructInfo struct {
 	Symbol  *Symbol
 	Fields  map[string]*Symbol
 	Methods map[string]*Symbol
+
+	// Constructors catalogs each declared `constructor(params) {...}` block
+	// (see LANGUAGE.md's "Constructors" section), keyed by its declared
+	// parameter count - constructors are overloaded by argument count only,
+	// deliberately scoped to this one construct (not a general overloading
+	// mechanism - see LANGUAGE.md), so a single map keyed by arity is enough
+	// to both catalog every constructor and answer "which one does a call
+	// with N arguments mean" in one lookup (checkConstructorCall,
+	// typecheck.go). Built by declareConstructor at struct-declaration time,
+	// which also rejects two constructors sharing the same arity right
+	// there, as a real diagnostic - a structural problem regardless of
+	// whether either is ever called. May be empty (most structs have no
+	// constructors at all).
+	Constructors map[int]*Symbol
 }
 
 // universeScope holds the language's predeclared names - built-in

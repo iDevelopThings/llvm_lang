@@ -42,9 +42,9 @@ type Span struct {
 //     (=, +=, -=, *=, /=, ++, --)
 //   - ShortVarDecl: the `:=` token
 //   - VarDecl, FuncDecl, StructDecl, IfStmt, ForStmt, ReturnStmt, BreakStmt,
-//     ContinueStmt, FuncType: the leading keyword token (FuncType's is the
-//     `func` that introduces a function-type expression, e.g. `func(int) int`,
-//     see LANGUAGE.md's Types section)
+//     ContinueStmt, FuncType, ConstructorDecl: the leading keyword token
+//     (FuncType's is the `func` that introduces a function-type expression,
+//     e.g. `func(int) int`, see LANGUAGE.md's Types section)
 //   - everything else (File, Block, ParamList, Param, Field, CallExpr,
 //     ParenExpr, IndexExpr, ArrayType, CompositeLit, KeyValueExpr, ExprStmt,
 //     ParamTypeList): unused, left as the zero Token
@@ -92,9 +92,20 @@ type Span struct {
 //     ParamList is its own variable-arity node for exactly the reason
 //     CompositeLit's elements or Block's statements are, just wrapped so
 //     FuncDecl itself can stay fixed-arity
-//   - StructDecl: [name, field0, field1, ...] - variable arity, name always
+//   - StructDecl: [name, member0, member1, ...] - variable arity, name always
 //     first (same CallExpr-style shape - nothing follows the variable part,
-//     unlike FuncDecl, so no wrapper is needed here)
+//     unlike FuncDecl, so no wrapper is needed here). Each member is either a
+//     Field or a ConstructorDecl, interspersed in declaration order - see
+//     ast.Tree's StructFields/StructConstructors, which each filter the full
+//     member list down to their own kind.
+//   - ConstructorDecl: [paramList, body] - fixed arity. A constructor is a
+//     narrow, deliberate exception to "structs are data-only, methods
+//     declared separately" (see LANGUAGE.md's "Constructors" section): it's
+//     nested directly inside its StructDecl, has no name of its own (it's
+//     selected by argument count, not called by name), no receiver clause
+//     (its receiver is always the struct being constructed - `this` inside
+//     its body resolves exactly like inside an ordinary method), and no
+//     return type (it "returns" the struct implicitly by populating `this`).
 //   - File: [decl0, decl1, ...] - variable arity (the parse tree root)
 //   - ParamTypeList: [type0, type1, ...] - variable arity, each child a bare
 //     type-position node (an Ident, ArrayType, or another FuncType - no name,

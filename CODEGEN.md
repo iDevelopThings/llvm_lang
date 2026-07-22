@@ -329,6 +329,73 @@ a mutating method's writes are visible to the caller. `this` inside the
 method body is that same pointer parameter directly - it needs no `alloca`
 of its own, since it already *is* an address.
 
+## Constructors
+
+See `LANGUAGE.md`'s "Constructors" section for the language-level feature
+(`constructor(params) { body }` blocks nested inside a struct declaration,
+overloaded by argument count only, invoked via `Name(args)` call syntax
+distinct from a `Name{...}` composite literal).
+
+**Each constructor lowers to its own real LLVM function**, reusing the
+*exact same* implicit-first-pointer-parameter convention an ordinary
+method's receiver already uses (see "Method receivers" above) - a
+constructor's own declared parameters follow that implicit pointer, and its
+LLVM return type is always `void`: a constructor never declares (or needs) a
+return type of its own, since it "returns" the struct being constructed
+implicitly, by populating `this` through that same implicit pointer, exactly
+like a mutating method's writes are visible to its caller. A bare `return`
+inside a constructor body lowers to `ret void`, same as any other void
+function/method (`genReturnStmt`) - sema rejects `return expr` at check time
+(see `LANGUAGE.md`), so codegen never needs to consider that case.
+
+**Naming**: a constructor has no name of its own in the source (see
+`LANGUAGE.md`: it's selected by argument count, not called by name), so its
+generated LLVM function is named `Struct.constructor.N` (`N` its declared
+parameter count) - the same `Type.MethodName` convention an ordinary
+method's own generated function already uses (`declareFuncSignature`),
+adapted for a constructor's lack of a name: arity already uniquely
+identifies a struct's constructor (see `StructInfo.Constructors`, keyed by
+arity for exactly this reason), so it doubles as the disambiguating suffix
+here too.
+
+**Declared in its own pass**, mirroring `declareFuncSignature`/`genFuncBody`'s
+own split into a signature-declaration pass and a body-generation pass
+(`declareConstructorSignature`/`genConstructorBody`, `src/codegen/func.go`):
+every constructor in the whole program is declared before any function or
+constructor body is generated, so a constructor call reaches its callee
+already declared regardless of declaration order - another constructor
+calling it first, a call from a different file, or (since a struct's
+constructors are usable cross-package the moment the struct itself is
+exported - see `LANGUAGE.md`) a call from a different package entirely.
+
+**Lowering a call** (`genConstructorCall`, `src/codegen/expr.go`): sema
+already resolved *which* constructor a call selected, recording that
+specific constructor's own `*sema.Symbol` (`sema.SymConstructor`) directly
+onto the call's callee node in `Info.Refs` (`checkConstructorCall`,
+`sema/typecheck.go`) - the same "record which specific declaration a call
+resolved to" idea an ordinary method call's callee already carries. Codegen
+recognizes this the same way it recognizes every other sema-resolved call
+shape - a plain `Info.Refs` kind check (`isConstructorCall`) - and lowers it
+by: allocating a fresh stack slot for the struct being built (the same
+alloca-then-load approach a struct composite literal already uses -
+`genAddr`'s `CompositeLit` case), calling the selected constructor with that
+alloca's own address as the implicit `this` argument followed by the call's
+own evaluated arguments, then loading and returning the now-populated value
+- matching how this package already returns struct/array/string values by
+value everywhere else (see "Structs/arrays/strings are passed and returned
+as real LLVM aggregate types" below). This works identically whether the
+call's callee is a bare `Ident` (a same-package struct type) or a
+`MemberExpr` (a package-qualified one, `pkg.Point(args)`) - `isConstructorCall`
+never needs to branch on the callee's own node kind, only on what
+`Info.Refs` resolved it to.
+
+`Generator.ctors` is `Generator.funcs`' dedicated counterpart for
+constructors - kept as its own map (rather than folded into `funcs`) purely
+for read-site clarity: a constructor's `*sema.Symbol` (`sema.SymConstructor`)
+is a completely different declaration shape from an ordinary free function's
+or method's (`sema.SymFunc`), even though the two Symbol pointer spaces never
+actually collide.
+
 ## Structs/arrays/strings are passed and returned as real LLVM aggregate
 ## types, not manual `sret`/by-ref tricks
 

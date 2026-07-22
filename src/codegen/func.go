@@ -1,6 +1,8 @@
 package codegen
 
 import (
+	"fmt"
+
 	"llvm_lang/src/ast"
 	"llvm_lang/src/sema"
 
@@ -146,6 +148,95 @@ func (g *Generator) emitFallbackTerminator() {
 	default:
 		g.builder.CreateUnreachable()
 	}
+}
+
+// declareConstructorSignature declares ctor's (a ConstructorDecl's) LLVM
+// function signature, with no body yet - split from genConstructorBody for
+// the same reason declareFuncSignature is split from genFuncBody: a
+// constructor call appearing anywhere else in the whole program (another
+// constructor, an ordinary function body, a struct in a different file or
+// package) must always find its callee already declared, regardless of
+// declaration order (see LANGUAGE.md's "Constructors" section).
+//
+// A constructor reuses the exact same implicit-first-pointer-parameter
+// convention an ordinary method's receiver already uses (see
+// declareFuncSignature above and CODEGEN.md's "Method receivers" section) -
+// the struct being constructed, addressed, not loaded - followed by its own
+// declared parameters, and always returns void: a constructor never
+// declares (or needs) a return type of its own, since it "returns" the
+// struct implicitly by populating `this` (see genConstructorCall, which
+// does the actual by-value handoff to the call site, exactly like a
+// composite literal already does).
+//
+// Each constructor's generated LLVM function is named
+// "Struct.constructor.N" (N its declared parameter count) - the same
+// "Type.MethodName" convention declareFuncSignature already uses for an
+// ordinary method, adapted for a constructor's lack of a name of its own:
+// arity is the one thing that already uniquely identifies a struct's
+// constructor (see StructInfo.Constructors), so it doubles as the
+// disambiguating suffix here too.
+func (g *Generator) declareConstructorSignature(ctor ast.NodeIndex) {
+	sym := g.info.Refs[ctor]
+	structInfo := sym.StructInfo
+	layout := g.structLayouts[structInfo]
+
+	paramListNode := g.tree.ConstructorParamList(ctor)
+	paramNodes := g.tree.Children(paramListNode)
+
+	paramTypes := make([]llvm.Type, 0, len(paramNodes)+1)
+	paramTypes = append(paramTypes, llvm.PointerType(layout.llvmType, 0))
+	for _, paramNode := range paramNodes {
+		paramTypes = append(paramTypes, g.llvmType(g.info.Types[g.tree.Child(paramNode, 1)]))
+	}
+
+	fnType := llvm.FunctionType(g.voidTy, paramTypes, false)
+	name := fmt.Sprintf("%s.constructor.%d", structInfo.Symbol.Name, len(paramNodes))
+	g.ctors[sym] = funcEntry{
+		fn:       llvm.AddFunction(g.mod, name, fnType),
+		fnType:   fnType,
+		retType:  sema.Type{Kind: sema.TypeVoid},
+		isMethod: true,
+	}
+}
+
+// genConstructorBody lowers ctor's body, given its signature already
+// declared (see declareConstructorSignature) - mirrors genFuncBody almost
+// exactly, except a constructor's receiver parameter is always present
+// (param 0, unconditionally - a constructor without an implicit `this`
+// wouldn't be a constructor) and it never declares a return type, so
+// emitFallbackTerminator's "no declared return type" branch (`ret void`) is
+// always the right fallback for one, the same as an ordinary void
+// function/method.
+func (g *Generator) genConstructorBody(ctor ast.NodeIndex) {
+	sym := g.info.Refs[ctor]
+	entry := g.ctors[sym]
+	paramListNode := g.tree.ConstructorParamList(ctor)
+	body := g.tree.ConstructorBody(ctor)
+
+	g.curFn = entry.fn
+	g.entryBlock = g.ctx.AddBasicBlock(g.curFn, "entry")
+	g.builder.SetInsertPointAtEnd(g.entryBlock)
+	g.locals = make(map[*sema.Symbol]llvm.Value)
+	g.loopStack = nil
+	g.curReceiver = g.curFn.Param(0)
+
+	for i, paramNode := range g.tree.Children(paramListNode) {
+		psym := g.info.Refs[g.tree.Child(paramNode, 0)]
+		pllt := g.llvmType(g.info.Types[g.tree.Child(paramNode, 1)])
+		addr := g.createEntryAlloca(pllt, psym.Name)
+		g.builder.CreateStore(g.curFn.Param(1+i), addr)
+		g.locals[psym] = addr
+	}
+
+	g.curFunc = &funcCtx{
+		isMain:    false,
+		hasReturn: false,
+	}
+
+	if !g.genBlock(body) {
+		g.emitFallbackTerminator()
+	}
+	g.curFunc = nil
 }
 
 // createEntryAlloca allocates a stack slot of type t in the current

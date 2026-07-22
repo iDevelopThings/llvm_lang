@@ -152,25 +152,39 @@ func (p *Parser) parseParam() ast.NodeIndex {
 	return p.tree.NewNode(enums.NodeKinds.Param, lexer.Token{}, span, name, typ)
 }
 
-// parseStructDecl parses `struct Name { field Type ... }` - data-only, no
-// nested methods (see AGENTS.md: methods are declared separately via
-// `func (Name) method() {...}`, to keep multi-file organization like Go's
-// receiver methods, and to keep this grammar rule from ever needing to
-// parse a function body).
+// parseStructDecl parses `struct Name { field Type ... }` - data-only aside
+// from one narrow, deliberate exception: a `constructor(params) { body }`
+// block may also appear directly inside the braces (see LANGUAGE.md's
+// "Constructors" section) - everything else (an ordinary method) is still
+// declared separately via `func (Name) method() {...}`, to keep multi-file
+// organization like Go's receiver methods, and to keep this grammar rule
+// from ever needing to parse a full method's signature (name, receiver,
+// return type).
 func (p *Parser) parseStructDecl() ast.NodeIndex {
 	kwTok := p.expectKeyword(enums.Keywords.Struct)
 	nameTok := p.expectIdent()
 	name := p.tree.NewNode(enums.NodeKinds.Ident, nameTok, tokenSpan(nameTok))
 
 	p.expect(enums.Lexemes.LeftBrace)
-	fields := append([]ast.NodeIndex{name}, p.parseSemiList(enums.Lexemes.RightBrace, p.parseField)...)
+	members := append([]ast.NodeIndex{name}, p.parseSemiList(enums.Lexemes.RightBrace, p.parseStructMember)...)
 	closeTok := p.expect(enums.Lexemes.RightBrace)
 
 	span := ast.Span{
 		Start: kwTok.Start,
 		End:   closeTok.End,
 	}
-	return p.tree.NewNode(enums.NodeKinds.StructDecl, kwTok, span, fields...)
+	return p.tree.NewNode(enums.NodeKinds.StructDecl, kwTok, span, members...)
+}
+
+// parseStructMember parses one element of a struct body - either an
+// ordinary field, or (the one exception - see parseStructDecl) a
+// constructor block, disambiguated by whether the element starts with the
+// `constructor` keyword.
+func (p *Parser) parseStructMember() ast.NodeIndex {
+	if p.atKeyword(enums.Keywords.Constructor) {
+		return p.parseConstructorDecl()
+	}
+	return p.parseField()
 }
 
 func (p *Parser) parseField() ast.NodeIndex {
@@ -182,4 +196,21 @@ func (p *Parser) parseField() ast.NodeIndex {
 		End:   p.tree.SpanOf(typ).End,
 	}
 	return p.tree.NewNode(enums.NodeKinds.Field, lexer.Token{}, span, name, typ)
+}
+
+// parseConstructorDecl parses `constructor(params) { body }` - see
+// ast.Node's own ConstructorDecl doc comment for the [paramList, body] shape:
+// no name (it's overload-resolved by argument count, not called by name -
+// see LANGUAGE.md's "Constructors" section), no receiver clause, and no
+// return type, unlike a full `parseFuncDecl`.
+func (p *Parser) parseConstructorDecl() ast.NodeIndex {
+	kwTok := p.expectKeyword(enums.Keywords.Constructor)
+	params := p.parseParamList()
+	body := p.parseBlock()
+
+	span := ast.Span{
+		Start: kwTok.Start,
+		End:   p.tree.SpanOf(body).End,
+	}
+	return p.tree.NewNode(enums.NodeKinds.ConstructorDecl, kwTok, span, params, body)
 }
