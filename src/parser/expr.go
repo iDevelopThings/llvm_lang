@@ -367,17 +367,48 @@ func (p *Parser) parseMakeArgs() []ast.NodeIndex {
 	return args
 }
 
+// parseIndexExpr parses both `s[i]` (IndexExpr) and a Go-style slice
+// expression `s[a:b]` / `s[:b]` / `s[a:]` / `s[:]` (SliceExpr) - see
+// LANGUAGE.md's "Slicing" section and ast.Node's own SliceExpr doc comment
+// for the [object, low, high] shape. The two share one `[` infix rule: after
+// `[`, an optional low-bound expression is parsed (skipped entirely when the
+// very next token is already `:`, i.e. the low bound was omitted), then a
+// following `:` disambiguates a slice expression from a plain index - parse
+// an optional high-bound expression (skipped when `]` follows immediately)
+// and build a SliceExpr; with no `:`, the already-parsed expression is the
+// ordinary index and this is the existing IndexExpr path, unchanged. This
+// deliberately doesn't support Go's less-common 3-index `s[a:b:c]` form - not
+// needed, out of scope for this round (see LANGUAGE.md).
 func parseIndexExpr(p *Parser, target ast.NodeIndex) ast.NodeIndex {
 	p.expect(enums.Lexemes.LeftBracket)
 	p.exprLev++
-	index := p.parseExpr(precLowest)
+
+	low := ast.InvalidNode
+	if !p.at(enums.Lexemes.Colon) {
+		low = p.parseExpr(precLowest)
+	}
+
+	if _, ok := p.accept(enums.Lexemes.Colon); ok {
+		high := ast.InvalidNode
+		if !p.at(enums.Lexemes.RightBracket) {
+			high = p.parseExpr(precLowest)
+		}
+		p.exprLev--
+		closeTok := p.expect(enums.Lexemes.RightBracket)
+		span := ast.Span{
+			Start: p.tree.SpanOf(target).Start,
+			End:   closeTok.End,
+		}
+		return p.tree.NewNode(enums.NodeKinds.SliceExpr, lexer.Token{}, span, target, low, high)
+	}
+
 	p.exprLev--
 	closeTok := p.expect(enums.Lexemes.RightBracket)
 	span := ast.Span{
 		Start: p.tree.SpanOf(target).Start,
 		End:   closeTok.End,
 	}
-	return p.tree.NewNode(enums.NodeKinds.IndexExpr, lexer.Token{}, span, target, index)
+	return p.tree.NewNode(enums.NodeKinds.IndexExpr, lexer.Token{}, span, target, low)
 }
 
 func parseMemberExpr(p *Parser, object ast.NodeIndex) ast.NodeIndex {

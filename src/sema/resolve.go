@@ -743,6 +743,14 @@ func (r *resolver) resolveExpr(scope *Scope, n ast.NodeIndex) {
 	case enums.NodeKinds.IndexExpr:
 		r.resolveExpr(scope, r.tree.Child(n, 0))
 		r.resolveExpr(scope, r.tree.Child(n, 1))
+	case enums.NodeKinds.SliceExpr:
+		// [object, low, high] (see LANGUAGE.md's "Slicing" section) - low/high
+		// may each be ast.InvalidNode when omitted (`s[:b]`/`s[a:]`/`s[:]`);
+		// resolveExpr already no-ops on ast.InvalidNode, so this needs no
+		// extra guard of its own.
+		r.resolveExpr(scope, r.tree.Child(n, 0))
+		r.resolveExpr(scope, r.tree.Child(n, 1))
+		r.resolveExpr(scope, r.tree.Child(n, 2))
 	case enums.NodeKinds.MemberExpr:
 		// The object always resolves lexically first. A package-qualified
 		// access (`mathutils.Add` - the object is a bare Ident that

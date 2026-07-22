@@ -298,6 +298,80 @@ test binary as a child process and asserts the *child* exits abnormally -
 the same `GO_WANT_HELPER_PROCESS` pattern `os/exec`'s own test suite uses -
 rather than ever tripping the trap in-process.
 
+## Slicing
+
+See `LANGUAGE.md`'s "Slicing" section for the language-level feature (a Go-
+style slice expression producing a fresh header value that shares its
+operand's backing memory - no copy) and `ast.Node`'s own `SliceExpr` doc
+comment for the `[object, low, high]` grammar shape (`low`/`high` are
+`ast.InvalidNode` when omitted). Recognized in codegen (`genSliceExpr`,
+`src/codegen/expr.go`) the same way sema's own `checkSliceExpr` dispatches -
+on the operand's already-resolved `sema.Type` - to one of three lowering
+paths, each building a fresh `{ptr, len, cap}` (dynamic array) or `{ptr,
+len}` (string) value with no allocation and no copy:
+
+- **A dynamic array operand** (`genDynArraySlice`): `ptr = GEP(s.ptr, low *
+  elemSize)`, `len = high - low`, `cap = s.cap - low` - reusing the exact
+  same `{ptr, len, cap}` construction `genMakeCall`/`genAppendCall` already
+  build, just derived from an existing slice's own fields instead of a fresh
+  arena allocation.
+- **A string operand** (`genStringSlice`): `ptr = GEP(s.ptr, low)`, `len =
+  high - low` - a fresh `{ptr, len}` value, same no-copy sharing; strings are
+  immutable (see the `string` representation section above), so this sharing
+  is read-only in practice, unlike the dynamic-array case.
+- **A fixed-size array operand** (`genFixedArraySlice`): takes the array's
+  own address (`genAddr` - the exact same helper `&`/a method receiver/an
+  ordinary index already use to get a real, addressable location - this is
+  exactly why sema's own `checkArraySliceAddressable` requires the operand to
+  be addressable in the first place), then the same `{ptr, len, cap}`
+  construction the dynamic-array case uses, with `cap = N - low` (`N` the
+  array's own compile-time-known `Size`).
+
+**The bounds check generalizes from a single index to a range.**
+`genBoundsCheck` (above) checks one `0 <= idx < size` condition; a slice
+expression needs a genuine *range* check instead - `genSliceRangeCheck`
+checks `0 <= low`, `low <= high`, and `high <= max` all at once (three
+`ICmp`s ANDed together), trapping via the identical `llvm.trap`+
+`unreachable` mechanism/basic-block shape `genBoundsCheck`/
+`genMakeSizeCheck` already use on any violation. `max` is an arbitrary
+already-computed i32 `llvm.Value`, not necessarily a compile-time constant -
+mirroring `genBoundsCheck`'s own `size` parameter, generalized the same way
+dynamic arrays already generalized it once before (see "Array bounds
+checking" above): a dynamic array's caller passes its own runtime `cap`
+field (not `len` - see `LANGUAGE.md`'s "Slicing" section for why a reslice's
+upper bound is checked against capacity, not length), a string's caller
+passes its own runtime `len` field, and a fixed-size array's caller passes a
+plain `ConstInt` built from its own compile-time-known `Size`.
+
+`genSliceBounds` is the shared "resolve omitted defaults, then range-check"
+helper every one of the three paths above calls into: an omitted low
+(`ast.InvalidNode`) defaults to a plain `ConstInt` `0`; an omitted high
+defaults to whatever `defaultHigh` the caller passed in (the operand's own
+runtime `len` for a dynamic array/string, or a `ConstInt` `N` for a fixed
+array) - notably *not* always the same value as the range check's own `max`
+upper bound (a dynamic array passes `len` as `defaultHigh` but `cap` as
+`max` - the one place these two genuinely differ, per `LANGUAGE.md`'s own
+called-out rule).
+
+Once a slice value is correctly constructed, `len(...)`/`append(...)` on it
+just work unchanged - a sliced dynamic array/string is an ordinary value of
+the same type afterward, nothing about it needed any special-casing in
+`genLenCall`/`genAppendCall`'s own existing logic (`TestSliceLenAndAppendOnSlicedValue`,
+`src/codegen/slice_test.go`, exercises exactly this).
+
+```go
+s := []int{10, 20, 30, 40, 50}
+mid := s[1:4]      // {ptr = GEP(s.ptr, 1), len = 3, cap = s.cap - 1}
+mid[0] = 99        // writes through the same backing buffer s.ptr points at
+```
+
+See `TestSliceDynamicArrayAliasing`/`TestSliceFixedArrayAliasing`
+(`src/codegen/slice_test.go`) for the aliasing proof this representation is
+actually built for - mutating through a slice and reading back through the
+original (and vice versa) - and `TestSliceRangeCheckTraps` (same file) for
+the range-check's own actual trap behavior, using the same re-exec-as-a-
+child-process pattern `TestOutOfBoundsIndexTraps` above already established.
+
 ## Global `var` initializers
 
 A top-level `var`'s initializer can be any well-typed expression now -

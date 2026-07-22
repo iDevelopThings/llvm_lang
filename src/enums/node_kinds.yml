@@ -48,3 +48,4 @@ values:
   - name: PointerType
   - name: NewExpr
   - name: DeleteStmt
+  - name: SliceExpr

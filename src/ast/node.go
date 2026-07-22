@@ -152,6 +152,17 @@ type Span struct {
 //     value-producing call, the same way BreakStmt/ContinueStmt/ReturnStmt
 //     are their own dedicated statement forms rather than call-shaped
 //     builtins.
+//   - SliceExpr: [object, low, high] - fixed arity; a Go-style slice
+//     expression (`s[a:b]`, `s[:b]`, `s[a:]`, `s[:]` - see LANGUAGE.md's
+//     "Slicing" section). low/high are each InvalidNode when omitted (the
+//     same "reserve the positional slot" convention every other optional
+//     child already uses - e.g. FuncDecl's own optional return-type slot),
+//     defaulting to 0 / the operand's own length-or-capacity respectively -
+//     a sema/codegen concern, not a grammar one. Parsed by the same `[`
+//     infix rule IndexExpr already is (parser/expr.go's parseIndexExpr):
+//     after `[`, an optional low expression (absent when the very next token
+//     is `:`), then a `:` disambiguates this from a plain IndexExpr - no `:`
+//     following the first expression means IndexExpr, unchanged.
 //   - a fixed-arity kind may reserve a positional slot as InvalidNode for an
 //     omitted optional child (e.g. VarDecl's type annotation); a
 //     variable-arity kind (Block's statements, CallExpr's arguments) is

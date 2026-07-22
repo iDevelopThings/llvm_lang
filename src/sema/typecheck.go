@@ -1156,6 +1156,8 @@ func (c *checker) inferExpr(n ast.NodeIndex) Type {
 		return c.checkCallExpr(n)
 	case enums.NodeKinds.IndexExpr:
 		return c.checkIndexExpr(n)
+	case enums.NodeKinds.SliceExpr:
+		return c.checkSliceExpr(n)
 	case enums.NodeKinds.MemberExpr:
 		return c.checkMemberExpr(n)
 	case enums.NodeKinds.CompositeLit:
@@ -1674,6 +1676,103 @@ func (c *checker) checkIndexExpr(n ast.NodeIndex) Type {
 		return invalidType
 	}
 	return *tt.Elem
+}
+
+// checkSliceExpr types a Go-style slice expression `s[a:b]` / `s[:b]` /
+// `s[a:]` / `s[:]` (see LANGUAGE.md's "Slicing" section) - low/high (n's
+// second/third child) may each be ast.InvalidNode when omitted (see
+// ast.Node's own SliceExpr doc comment). Three different operand shapes
+// share this one grammar, each producing a different result type:
+//   - a dynamic array (`[]T`) slices to another `[]T` - the exact same Type,
+//     a fresh header sharing the same backing memory, no copy.
+//   - a string slices to another `string`, same no-copy sharing.
+//   - a fixed-size array (`[N]T`) slices to a genuine `[]T` (a dynamic
+//     array), not another fixed-size array, matching Go's own real behavior
+//   - and requires its operand to be addressable (checkArraySliceAddressable),
+//     since the resulting slice needs a real, stable backing address to
+//     alias into; a bare fixed-array rvalue (e.g. a function call's result)
+//     has no such storage.
+//
+// low/high are ordinary runtime `int`-typed expressions (checkSliceBound),
+// not required to be compile-time constants, mirroring make's own n/cap
+// (checkMakeSizeArg) - the actual `0 <= low <= high <= cap-or-len-or-N`
+// range check is a codegen-level runtime trap (see CODEGEN.md), not
+// something sema can reject here in general.
+func (c *checker) checkSliceExpr(n ast.NodeIndex) Type {
+	objNode := c.tree.Child(n, 0)
+	lowNode := c.tree.Child(n, 1)
+	highNode := c.tree.Child(n, 2)
+
+	objType := c.checkValueExpr(objNode)
+	c.checkSliceBound(lowNode)
+	c.checkSliceBound(highNode)
+
+	if objType.IsInvalid() {
+		return invalidType
+	}
+
+	switch {
+	case objType.Kind == TypeArray && objType.Dynamic:
+		return objType
+	case objType.Kind == TypeArray:
+		if !c.checkArraySliceAddressable(objNode) {
+			c.errorAt(objNode, "cannot slice a non-addressable array value")
+			return invalidType
+		}
+		return Type{
+			Kind:    TypeArray,
+			Dynamic: true,
+			Elem:    objType.Elem,
+		}
+	case objType.Kind == TypeString:
+		return stringType
+	default:
+		c.errorAt(n, "cannot slice %s (not an array or string)", objType)
+		return invalidType
+	}
+}
+
+// checkArraySliceAddressable reports whether objNode - already type-checked
+// by checkSliceExpr's own checkValueExpr call as a fixed-size array - has one
+// of the expression shapes checkAddressable/checkLValue already recognize as
+// a real addressable location (an Ident naming a var/param, a MemberExpr, an
+// IndexExpr, or a "*" UnaryExpr dereference): slicing a fixed array needs a
+// real, stable backing address to alias into (see LANGUAGE.md's "Slicing"
+// section), exactly the same requirement `&` has. This is a pure shape
+// check with no re-type-checking side effect of its own (unlike
+// checkAddressable, which both type-checks and shape-checks its operand in
+// one call) - objNode was already fully checked by the caller.
+func (c *checker) checkArraySliceAddressable(objNode ast.NodeIndex) bool {
+	switch c.tree.Nodes[objNode].Kind {
+	case enums.NodeKinds.Ident:
+		sym := c.info.Refs[objNode]
+		return sym.Kind == SymVar || sym.Kind == SymParam
+	case enums.NodeKinds.MemberExpr, enums.NodeKinds.IndexExpr:
+		return true
+	case enums.NodeKinds.UnaryExpr:
+		return c.tree.Text(objNode) == "*"
+	default:
+		return false
+	}
+}
+
+// checkSliceBound type-checks one of a SliceExpr's own low/high bound
+// expressions - a no-op when node is ast.InvalidNode (the bound was
+// omitted). Any integer type works, with an untyped constant defaulting to
+// int exactly like make's own n/cap (checkMakeSizeArg) - there's no
+// int-width restriction beyond "integer", matching every other int-typed
+// position in this language.
+func (c *checker) checkSliceBound(node ast.NodeIndex) {
+	if node == ast.InvalidNode {
+		return
+	}
+	t := c.defaultIfUntyped(node, c.checkValueExpr(node))
+	if t.IsInvalid() {
+		return
+	}
+	if t.Kind != TypeI32 {
+		c.errorAt(node, "slice bound must be int, got %s", t)
+	}
 }
 
 // checkMemberExpr types a plain field/package-member access (`p.field`, or

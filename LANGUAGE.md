@@ -184,6 +184,65 @@ only allows comparing a slice against `nil`, a concept this language doesn't
 have yet) - there's no slice equality semantics invented here that Go itself
 doesn't have.
 
+## Slicing
+
+Go-style slice expressions: `s[a:b]`, `s[:b]` (low bound omitted, defaults to
+`0`), `s[a:]` (high bound omitted, defaults to the operand's own length), and
+`s[:]` (both omitted). A slice expression produces a **new header value
+sharing the same backing memory** as the original - no copy - matching Go's
+own real slicing semantics exactly: mutating through the result is visible
+through the original, and vice versa. This deliberately doesn't cover Go's
+less-common 3-index form (`s[a:b:c]`) - not needed, out of scope.
+
+Three different operand types share this one grammar, each with its own
+result type and its own bounds rule:
+
+- **A dynamic array (`[]T`)** slices to another `[]T` - the exact same type
+  as the operand. Bounds (when given) must satisfy `0 <= a <= b <= cap(s)` -
+  note this is checked against **capacity**, not length: Go's own real rule
+  allows a reslice to extend past the current length into spare capacity
+  (the idiom Go's own slice-growth code relies on). The omitted-*high*
+  default is still `len(s)`, not `cap(s)` - only an *explicit* high bound may
+  reach into spare capacity.
+- **A `string`** slices to another `string`, sharing the same backing bytes
+  read-only (strings are immutable - see the `string` representation
+  section in `CODEGEN.md`). Bounds must satisfy `0 <= a <= b <= len(s)` -
+  strings have no separate capacity concept.
+- **A fixed-size array (`[N]T`)** slices to a genuine **dynamic array**
+  (`[]T`), not another `[N]T` - matching Go's own behavior exactly (slicing
+  an array produces a slice). This requires the array operand to be
+  **addressable** (an lvalue - the same rule `&`/a method receiver/an
+  assignment target already follow) - a non-addressable fixed-array rvalue
+  (e.g. a function call's own return value) can't be sliced, since the
+  resulting slice needs a real, stable backing address to alias into. Bounds
+  must satisfy `0 <= a <= b <= N` (`N` is the array's own compile-time-known
+  size).
+
+`a`/`b` are ordinary runtime `int`-typed expressions (or an untyped constant
+adapting to `int`) - neither is required to be a compile-time constant,
+mirroring `make`'s own `n`/`cap`. The actual `0 <= a <= b <= <bound>` range
+check happens at runtime (see `CODEGEN.md`'s "Slicing" section) - a violation
+traps immediately, the same hard-abort mechanism an out-of-range index or a
+bad `make` size already use.
+
+```go
+s := []int{10, 20, 30, 40, 50}
+mid := s[1:4]        // [20 30 40] - shares s's own backing array
+print(mid)
+print(len(mid))       // 3
+mid[0] = 99
+print(s[1])            // 99 - the write is visible through the original too
+
+str := "hello world"
+print(str[6:])         // "world" - str[a:] omits the high bound (defaults to len)
+print(str[:5])         // "hello" - str[:b] omits the low bound (defaults to 0)
+
+arr := [5]int{1, 2, 3, 4, 5}
+view := arr[1:3]        // [2 3] - slicing a fixed array produces a real []int
+view[0] = 100
+print(arr[1])           // 100 - shares the fixed array's own storage
+```
+
 ## Structs
 
 Data-only declarations - no nested methods:

@@ -523,3 +523,55 @@ declaration-order behavior asserted directly. A real dependency-graph sort
 (matching Go's spec exactly) remains a reasonable future upgrade if a program
 ever needs it, without changing anything about the language-level feature
 itself - only which order this same synthesized function runs its stores in.
+
+---
+
+## 2026-07-22 - Slicing: reusing `{ptr, len, cap}`/`{ptr, len}` directly, and a range check generalized from `genBoundsCheck`
+
+**Decision:** a slice expression (`s[a:b]`, `LANGUAGE.md`'s "Slicing"
+section) never allocates or copies anything - it builds a fresh `{ptr, len,
+cap}` (dynamic array) or `{ptr, len}` (string) value directly from its
+operand's own already-existing fields (or, for a fixed array, its own real
+address), reusing the exact same struct shapes `make`/string literals
+already use rather than inventing a distinct "slice view" representation.
+The single-index bounds check (`genBoundsCheck`) is generalized to a genuine
+range check (`genSliceRangeCheck`: `0 <= low <= high <= max`) rather than
+reusing `genBoundsCheck` twice (once for `low`, once for `high`) - two
+separate single-bound checks can't express `low <= high` at all, which is
+exactly as real a violation as either endpoint being individually
+out-of-range (`s[3:1]` must trap even though both `3` and `1` are
+individually in-range for a length-5 slice).
+
+The one genuinely non-obvious wrinkle: for a dynamic array specifically, the
+omitted-high *default* and the range check's own upper *bound* are
+deliberately two different values - `len(s)` and `cap(s)`, respectively.
+Getting this backwards (defaulting the high bound to `cap(s)` instead of
+`len(s)`) would silently expose a slice's spare capacity to any bare
+`s[a:]`, which is not what Go itself does (confirmed directly against Go's
+own spec before implementing, per this task's own explicit instruction not
+to get this backwards) - Go's real rule is "a reslice's upper bound is
+allowed to reach into spare capacity only when written explicitly", not "an
+omitted upper bound reaches into it automatically". `genSliceBounds`
+threads `defaultHigh` and `max` as two separate parameters for exactly this
+reason, even though they happen to coincide for a string/fixed-array operand
+(neither has a separate capacity concept, so both are simply `len`/`N`).
+
+**Why:** no allocation/copy matches this feature's entire reason for
+existing (`LANGUAGE.md`'s own opening line: "a slice expression produces a
+new header value sharing the same backing memory as the original") - copying
+would be a strictly different, and strictly less useful, feature. Reusing
+the existing struct shapes needed no new LLVM type and no change to
+`len`/`append`'s own existing logic at all (a sliced value is simply an
+ordinary value of the same type afterward - see `CODEGEN.md`'s "Slicing"
+section). A dedicated range-check helper (rather than composing two
+single-bound checks, or generalizing `genBoundsCheck` itself to take a
+lower bound parameter) keeps `genBoundsCheck`'s own existing call sites
+(plain indexing) completely unchanged, while still sharing its exact
+trap/`unreachable` mechanism and `CreateCondBr` basic-block shape.
+
+**Status:** shipped. See `CODEGEN.md`'s "Slicing" section for the three
+lowering paths (`genDynArraySlice`/`genStringSlice`/`genFixedArraySlice`,
+`src/codegen/expr.go`) and `genSliceRangeCheck`/`genSliceBounds`'s own doc
+comments for the range-check/defaulting mechanics; `TestSliceDynamicArrayReslicePastLenWithinCap`
+(`src/codegen/slice_test.go`) is the regression test that would catch the
+len-vs-cap default direction being flipped.

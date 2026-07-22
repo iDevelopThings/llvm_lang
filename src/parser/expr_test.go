@@ -221,6 +221,61 @@ func TestExprShape(t *testing.T) {
 				"  CallExpr\n" +
 				"    Ident \"a\"\n",
 		},
+		{
+			name: "plain index still parses as IndexExpr, unchanged",
+			src:  "s[1]",
+			want: "" +
+				"IndexExpr\n" +
+				"  Ident \"s\"\n" +
+				"  NumberLit \"1\"\n",
+		},
+		{
+			name: "slice with both bounds",
+			src:  "s[1:4]",
+			want: "" +
+				"SliceExpr\n" +
+				"  Ident \"s\"\n" +
+				"  NumberLit \"1\"\n" +
+				"  NumberLit \"4\"\n",
+		},
+		{
+			name: "slice with low bound omitted",
+			src:  "s[:4]",
+			want: "" +
+				"SliceExpr\n" +
+				"  Ident \"s\"\n" +
+				"  <missing>\n" +
+				"  NumberLit \"4\"\n",
+		},
+		{
+			name: "slice with high bound omitted",
+			src:  "s[1:]",
+			want: "" +
+				"SliceExpr\n" +
+				"  Ident \"s\"\n" +
+				"  NumberLit \"1\"\n" +
+				"  <missing>\n",
+		},
+		{
+			name: "slice with both bounds omitted",
+			src:  "s[:]",
+			want: "" +
+				"SliceExpr\n" +
+				"  Ident \"s\"\n" +
+				"  <missing>\n" +
+				"  <missing>\n",
+		},
+		{
+			name: "slice of an index expression, chained",
+			src:  "a[0][1:2]",
+			want: "" +
+				"SliceExpr\n" +
+				"  IndexExpr\n" +
+				"    Ident \"a\"\n" +
+				"    NumberLit \"0\"\n" +
+				"  NumberLit \"1\"\n" +
+				"  NumberLit \"2\"\n",
+		},
 	}
 
 	for _, tt := range tests {

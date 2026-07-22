@@ -449,6 +449,168 @@ func (g *Generator) genBoundsCheck(idx, size llvm.Value) {
 	g.builder.SetInsertPointAtEnd(okBB)
 }
 
+// genSliceRangeCheck emits a real runtime check that low/high (i32 values)
+// satisfy `0 <= low <= high <= max` - the range-check counterpart to
+// genBoundsCheck's single-index check (see CODEGEN.md's "Slicing" section),
+// trapping immediately (llvm.trap + unreachable, same mechanism/convention
+// as genBoundsCheck/genMakeSizeCheck) rather than ever building a slice
+// header from an out-of-range pair.
+//
+// max is an arbitrary already-computed i32 llvm.Value, not necessarily a
+// compile-time constant, mirroring genBoundsCheck's own size parameter: a
+// dynamic array's caller passes its own runtime cap field (a reslice may
+// extend into spare capacity beyond the current length - see LANGUAGE.md's
+// "Slicing" section), a string's caller passes its own runtime len field
+// (strings have no separate capacity), and a fixed-size array's caller
+// passes a plain ConstInt built from its own compile-time-known Size.
+func (g *Generator) genSliceRangeCheck(low, high, max llvm.Value) {
+	zero := llvm.ConstInt(g.i32Ty, 0, true)
+	lowNonNeg := g.builder.CreateICmp(llvm.IntSGE, low, zero, "")
+	lowLEHigh := g.builder.CreateICmp(llvm.IntSLE, low, high, "")
+	highLEMax := g.builder.CreateICmp(llvm.IntSLE, high, max, "")
+	ok := g.builder.CreateAnd(lowNonNeg, lowLEHigh, "")
+	ok = g.builder.CreateAnd(ok, highLEMax, "")
+
+	trapBB := g.ctx.AddBasicBlock(g.curFn, "slice.trap")
+	okBB := g.ctx.AddBasicBlock(g.curFn, "slice.ok")
+	g.builder.CreateCondBr(ok, okBB, trapBB)
+
+	g.builder.SetInsertPointAtEnd(trapBB)
+	g.builder.CreateCall(g.trapType, g.trapFn, nil, "")
+	g.builder.CreateUnreachable()
+
+	g.builder.SetInsertPointAtEnd(okBB)
+}
+
+// genSliceBounds evaluates a SliceExpr's own low/high child nodes (either may
+// be ast.InvalidNode - see ast.Node's own SliceExpr doc comment), defaulting
+// an omitted low to 0 and an omitted high to defaultHigh, then range-checks
+// the resolved pair against max (genSliceRangeCheck) before handing both
+// back. Every one of the three slicing paths below (string/dynamic array/
+// fixed array) shares this exact "resolve defaults, then range-check" shape -
+// they differ only in what defaultHigh/max actually are (see each call site):
+// a dynamic array's high defaults to its own runtime len but range-checks
+// against its runtime cap (LANGUAGE.md's "Slicing" section - a reslice may
+// extend into spare capacity); a string's/fixed array's default and max are
+// the same value (len, or the compile-time-known N), since neither has a
+// separate capacity concept.
+func (g *Generator) genSliceBounds(lowNode, highNode ast.NodeIndex, defaultHigh, max llvm.Value) (low, high llvm.Value) {
+	low = llvm.ConstInt(g.i32Ty, 0, true)
+	if lowNode != ast.InvalidNode {
+		low = g.genExpr(lowNode)
+	}
+	high = defaultHigh
+	if highNode != ast.InvalidNode {
+		high = g.genExpr(highNode)
+	}
+	g.genSliceRangeCheck(low, high, max)
+	return low, high
+}
+
+// genSliceExpr lowers a Go-style slice expression `s[a:b]`/`s[:b]`/`s[a:]`/
+// `s[:]` (see LANGUAGE.md's "Slicing" section) - dispatching on the operand's
+// own already-resolved sema.Type to one of three lowering paths, exactly
+// mirroring sema's own checkSliceExpr dispatch.
+func (g *Generator) genSliceExpr(n ast.NodeIndex) llvm.Value {
+	objNode := g.tree.Child(n, 0)
+	lowNode := g.tree.Child(n, 1)
+	highNode := g.tree.Child(n, 2)
+	objType := g.info.Types[objNode]
+
+	switch {
+	case objType.Kind == sema.TypeString:
+		return g.genStringSlice(objNode, lowNode, highNode)
+	case objType.Kind == sema.TypeArray && objType.Dynamic:
+		return g.genDynArraySlice(objNode, objType, lowNode, highNode)
+	case objType.Kind == sema.TypeArray:
+		return g.genFixedArraySlice(objNode, objType, lowNode, highNode)
+	default:
+		// Only a string, dynamic array, or fixed-size array reach here on a
+		// tree that already passed sema.Check (see checkSliceExpr,
+		// sema/typecheck.go, and the package doc comment).
+		panic("codegen: genSliceExpr reached an unsupported operand type " + objType.String())
+	}
+}
+
+// genStringSlice lowers `s[a:b]` for a string operand: a fresh {ptr, len}
+// value sharing s's own backing bytes (GEP'd forward by low), never copied -
+// see LANGUAGE.md's "Slicing" section and "string representation" (both
+// CODEGEN.md and LANGUAGE.md). A string has no separate capacity concept, so
+// its own runtime len field serves as both the omitted-high default and the
+// range check's own upper bound.
+func (g *Generator) genStringSlice(objNode, lowNode, highNode ast.NodeIndex) llvm.Value {
+	sv := g.genExpr(objNode)
+	ptr := g.builder.CreateExtractValue(sv, 0, "")
+	length := g.builder.CreateExtractValue(sv, 1, "")
+
+	low, high := g.genSliceBounds(lowNode, highNode, length, length)
+
+	newPtr := g.builder.CreateInBoundsGEP(g.i8Ty, ptr, []llvm.Value{low}, "")
+	newLen := g.builder.CreateSub(high, low, "")
+
+	result := llvm.Undef(g.stringTy)
+	result = g.builder.CreateInsertValue(result, newPtr, 0, "")
+	result = g.builder.CreateInsertValue(result, newLen, 1, "")
+	return result
+}
+
+// genDynArraySlice lowers `s[a:b]` for a dynamic-array (`[]T`) operand: a
+// fresh {ptr, len, cap} value sharing s's own backing buffer (GEP'd forward
+// by low, using T's own LLVM element type), never copied. Per LANGUAGE.md's
+// "Slicing" section, the omitted-high default is s's own runtime *len* (not
+// cap - matching Go's real `s[a:]` rule exactly), but the range check's own
+// upper bound is s's runtime *cap* - a reslice is allowed to extend into
+// spare capacity beyond the current length, which is exactly what makes
+// Go's own slice-growth idioms work.
+func (g *Generator) genDynArraySlice(objNode ast.NodeIndex, objType sema.Type, lowNode, highNode ast.NodeIndex) llvm.Value {
+	sv := g.genExpr(objNode)
+	ptr := g.builder.CreateExtractValue(sv, 0, "")
+	length := g.builder.CreateExtractValue(sv, 1, "")
+	capacity := g.builder.CreateExtractValue(sv, 2, "")
+
+	low, high := g.genSliceBounds(lowNode, highNode, length, capacity)
+
+	elemLLType := g.llvmType(*objType.Elem)
+	newPtr := g.builder.CreateInBoundsGEP(elemLLType, ptr, []llvm.Value{low}, "")
+	newLen := g.builder.CreateSub(high, low, "")
+	newCap := g.builder.CreateSub(capacity, low, "")
+
+	result := llvm.Undef(g.dynArrTy)
+	result = g.builder.CreateInsertValue(result, newPtr, 0, "")
+	result = g.builder.CreateInsertValue(result, newLen, 1, "")
+	result = g.builder.CreateInsertValue(result, newCap, 2, "")
+	return result
+}
+
+// genFixedArraySlice lowers `arr[a:b]` for a fixed-size-array (`[N]T`)
+// operand into a genuine dynamic array (`[]T`), matching Go's own real
+// behavior (see LANGUAGE.md's "Slicing" section) - sema's own
+// checkArraySliceAddressable already guaranteed objNode is addressable, so
+// this can take its real address (genAddr, the same helper `&`/a method
+// receiver/an ordinary index already use) and alias directly into it, the
+// same {ptr, len, cap} construction genDynArraySlice uses, just built from
+// N (the array's own compile-time-known Size - both the omitted-high default
+// and the range check's own upper bound, since a fixed array has no separate
+// capacity concept of its own either) instead of a runtime len/cap pair.
+func (g *Generator) genFixedArraySlice(objNode ast.NodeIndex, objType sema.Type, lowNode, highNode ast.NodeIndex) llvm.Value {
+	base := g.genAddr(objNode)
+	sizeConst := llvm.ConstInt(g.i32Ty, uint64(objType.Size), true)
+
+	low, high := g.genSliceBounds(lowNode, highNode, sizeConst, sizeConst)
+
+	arrType := g.llvmType(objType)
+	zero := llvm.ConstInt(g.i32Ty, 0, false)
+	newPtr := g.builder.CreateInBoundsGEP(arrType, base, []llvm.Value{zero, low}, "")
+	newLen := g.builder.CreateSub(high, low, "")
+	newCap := g.builder.CreateSub(sizeConst, low, "")
+
+	result := llvm.Undef(g.dynArrTy)
+	result = g.builder.CreateInsertValue(result, newPtr, 0, "")
+	result = g.builder.CreateInsertValue(result, newLen, 1, "")
+	result = g.builder.CreateInsertValue(result, newCap, 2, "")
+	return result
+}
+
 // genExpr lowers n to its rvalue.
 func (g *Generator) genExpr(n ast.NodeIndex) llvm.Value {
 	switch g.tree.Nodes[n].Kind {
@@ -474,6 +636,8 @@ func (g *Generator) genExpr(n ast.NodeIndex) llvm.Value {
 		return g.genLoad(n)
 	case enums.NodeKinds.MemberExpr, enums.NodeKinds.IndexExpr, enums.NodeKinds.ThisExpr:
 		return g.genLoad(n)
+	case enums.NodeKinds.SliceExpr:
+		return g.genSliceExpr(n)
 	case enums.NodeKinds.NumberLit:
 		return g.genNumberLit(n)
 	case enums.NodeKinds.StringLit:
