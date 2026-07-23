@@ -110,6 +110,37 @@ Any disk I/O this compiler needs goes through `afero.Fs` (`github.com/spf13/afer
 All code should be at it's correct layer, for example no code gen logic should be inside type checker(sema), and vice versa. (This applies everywhere, not just these two examples).
 It's important to maintain and embrace this, or the project will quickly become a tangled mess of unmaintainable and difficult code.
 
+## Review process **IMPORTANT**
+
+Every round that lands new or changed code in `src/`, `cmd/`, or `std/` (a
+new language feature, a bug fix touching sema/codegen/parser, anything
+beyond a pure documentation/comment change) needs a dedicated, read-only
+review pass - checking layering violations, duplication, and strictness
+gaps - **in addition to, and separate from, functional verification**
+(build it, run it, confirm the output matches). This is not optional for
+"small" or "low-risk" changes, and it is not something to reserve only for
+rounds that feel risky in the moment - that judgment call is exactly what
+fails silently over time.
+
+Functional testing only proves the specific paths someone thought to try.
+It does not catch a `switch` over a type/kind enum that's silently
+incomplete for a case nobody happened to test, a semantic check in one
+layer that's looser than what a downstream layer can actually handle, or a
+pattern hand-rolled two or three times that should have been one shared
+helper. A concrete real example, not hypothetical: a struct/array `==`
+check accepted any field type via a bare whole-type-equality check, with no
+per-field validation - every hands-on test of the feature passed, because
+none of them happened to compare a struct holding a map or a slice field.
+The result was silently wrong (not even a crash): two structs differing
+only in a slice field's real contents compared as equal. That's the
+specific failure mode this review step exists to catch, and it survived
+across several consecutive feature rounds specifically because the review
+step was skipped in favor of "it built, it ran, the output matched."
+
+Skipping this because a change "looks straightforward" is precisely how it
+gets missed - straightforward-looking changes are exactly the ones nobody
+double-checks.
+
 
 ## Project Code Style Preferences **IMPORTANT**
 
