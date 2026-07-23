@@ -967,7 +967,18 @@ func (g *Generator) genFloatOrder(op string, lv, rv llvm.Value) llvm.Value {
 // chosen - see AGENTS.md.
 func (g *Generator) genValueEqual(t sema.Type, lv, rv llvm.Value) llvm.Value {
 	switch t.Kind {
-	case sema.TypeInt, sema.TypeBool:
+	case sema.TypeI8, sema.TypeI16, sema.TypeI32, sema.TypeI64, sema.TypeBool:
+		return g.builder.CreateICmp(llvm.IntEQ, lv, rv, "")
+	case sema.TypeF32, sema.TypeF64:
+		// OEQ alone (never UNE) is correct here even for the enclosing `!=`
+		// case: genBinaryExpr's own Neq branch wraps a struct/array's whole
+		// genValueEqual result in one CreateNot, and De Morgan's law makes
+		// Not(AND of per-field OEQ) exactly equal to (OR of per-field UNE) -
+		// the right "structs differ if any field differs" semantics - with
+		// no separate per-field UNE case needed inside this recursion at
+		// all. Mirrors genMapKeyEqual's identical choice (maps.go).
+		return g.builder.CreateFCmp(llvm.FloatOEQ, lv, rv, "")
+	case sema.TypePointer:
 		return g.builder.CreateICmp(llvm.IntEQ, lv, rv, "")
 	case sema.TypeString:
 		return g.genStringEqual(lv, rv, true)
@@ -989,9 +1000,14 @@ func (g *Generator) genValueEqual(t sema.Type, lv, rv llvm.Value) llvm.Value {
 		}
 		return result
 	default:
-		// Only int/string/bool/struct/array Types exist (see sema/types.go),
-		// and every one is handled above - unreachable on a tree that
-		// already passed sema.Check (see the package doc comment).
+		// checkEqualityOperands (sema/typecheck.go) admits == between two
+		// structs/arrays via plain Type.Equal on the whole aggregate type -
+		// it does not itself validate that every recursive field/element
+		// Kind is one this function actually implements, so this switch must
+		// cover every Kind a struct field or array element can legitimately
+		// have (every case above does, mirroring genMapKeyEqual's identical
+		// switch in maps.go, built for the same reason on the map-key side)
+		// rather than relying on sema to have pre-filtered them.
 		panic("codegen: genValueEqual reached an unsupported type " + t.String())
 	}
 }

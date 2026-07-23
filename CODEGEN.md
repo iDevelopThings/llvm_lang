@@ -483,19 +483,24 @@ since a string's length isn't known until the program runs.
 **Key equality: `genMapKeyEqual`, a dedicated, self-contained recursive
 function - not a reuse of `genValueEqual`** (the existing whole-value
 `==`/`!=` lowering, "Structs/arrays/strings..." section's own neighbor).
-This is a real, separate function because a map key must support every
-`Kind` `sema.typeIsComparableKeyType` accepts - every integer width, both
-float widths, and a pointer - while `genValueEqual`'s own switch only
-actually implements `TypeInt`(i32)/`TypeBool`/`TypeString`/`TypeStruct`/
-`TypeArray`, panicking on anything else (i8/i16/i64/f32/f64/a pointer
-field) - a real, pre-existing gap in that function, orthogonal to this
-feature (flagged separately for a future fix, not patched here, since
-widening `genValueEqual` itself is a wider change than this round's own
-map-key-comparison need). `genMapKeyEqual` implements every comparable kind
-directly instead: `ICmp` for every integer width/bool/pointer, `FCmp
-FloatOEQ` for both float widths, `genStringEqual` for `string`, and the
-same recursive field-by-field/element-by-element `And`-together shape
-`genValueEqual` already established for `TypeStruct`/`TypeArray`.
+When this map feature landed, `genValueEqual`'s own switch only actually
+implemented `TypeInt`(i32)/`TypeBool`/`TypeString`/`TypeStruct`/`TypeArray`,
+panicking on anything else (i8/i16/i64/f32/f64/a pointer field) - a real,
+pre-existing gap, flagged at the time rather than patched inline (widening
+`genValueEqual` was a wider change than this feature's own map-key-comparison
+need). **That gap has since been fixed directly** (`genValueEqual` now
+implements every `Kind` `genMapKeyEqual` does - `ICmp` for every integer
+width/bool/pointer, `FCmp FloatOEQ` for both float widths - see
+`src/codegen/expr.go`'s own doc comment for why `FloatOEQ` alone, never a
+separate `FloatUNE` case, is correct even for the enclosing `!=` operator: De
+Morgan's law over the recursive per-field `And` already produces the right
+"differs if any field differs" semantics from a single top-level `Not`), so
+the two functions' switches are now equivalent in coverage - `genMapKeyEqual`
+remains its own separate function regardless, since it exists for a
+genuinely different reason (map-key hash-table lookup) than operator
+lowering, not because of any remaining capability gap between them. Both
+still independently implement the same recursive field-by-field/
+element-by-element `And`-together shape for `TypeStruct`/`TypeArray`.
 
 **`m[k]` (read) and `m[k] = v` (write) never go through `genAddr`/`genLoad`'s
 generic array-indexing path at all** - a real, deliberate divergence from
