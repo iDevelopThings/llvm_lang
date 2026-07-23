@@ -1,6 +1,9 @@
 package codegen
 
-import "testing"
+import (
+	"testing"
+	"unsafe"
+)
 
 // This file covers this round's `map[K]V` feature end to end, JIT-executed
 // (see LANGUAGE.md's "Maps" section and CODEGEN.md's own "Maps" section for
@@ -268,6 +271,138 @@ func testDifferentStructKeysAreDistinct() int {
 	}
 	if got := jm.runInt32(t, "testDifferentStructKeysAreDistinct"); got != 30 {
 		t.Errorf("testDifferentStructKeysAreDistinct() = %d, want 30", got)
+	}
+}
+
+// TestMapChurnTombstonesTriggerGrowth covers the specific insert/remove/
+// insert-more churn pattern genMapGrowIfNeeded's tombstone accounting exists
+// for (see maps.go's own top-of-file doc comment): insert exactly
+// mapInitialBuckets - 2 (6) distinct keys into a fresh map (filling the
+// initial 8-bucket table right up to, but not past, its 0.75 load-factor
+// threshold - no grow yet), remove all but one of them (5 tombstones, only 1
+// live entry - count alone would look almost empty), then insert 2 more
+// brand-new keys.
+//
+// If tombstones weren't counted toward the load factor (the bug this fix
+// addresses), the table would stay at its initial 8 buckets: count peaks at
+// just 2 by the time the new keys are inserted, nowhere near the load-factor
+// threshold on a live-count-only check. Counting tombstones too, occupied
+// slots (1 live + 5 tombstones = 6) already sit right at the threshold
+// before either new key goes in, so the very first of the two new inserts
+// must trigger a real grow.
+//
+// Verifies both halves the task requires: (a) correctness - every still-live
+// key (including the two newly-inserted ones) reads back correctly, and
+// every removed key is genuinely gone - via churnCheck's own return code,
+// and (b) the grow genuinely fired - via churn's returned map's own raw
+// control-block memory, read directly since nothing at the language level
+// can otherwise observe bucketCount/tombstoneCount (see maps.go's
+// setupMapTypes: mapCtrlTy is {ptr buckets, i32 count, i32 bucketCount, i32
+// tombstoneCount}, and a map's own runtime value - see types.go's llvmType -
+// is just that struct's raw address; reading it here is safe precisely
+// because the JIT-executed code runs in this same test process/address
+// space).
+func TestMapChurnTombstonesTriggerGrowth(t *testing.T) {
+	const churnSrc = `
+func churn() map[int]int {
+	m := make(map[int]int)
+	i := 0
+	for i < 6 {
+		m[i] = i * 10
+		i++
+	}
+	j := 0
+	for j < 5 {
+		remove(m, j)
+		j++
+	}
+	m[100] = 1000
+	m[101] = 1001
+	return m
+}
+
+func churnCheck() int {
+	m := make(map[int]int)
+	i := 0
+	for i < 6 {
+		m[i] = i * 10
+		i++
+	}
+	j := 0
+	for j < 5 {
+		remove(m, j)
+		j++
+	}
+	m[100] = 1000
+	m[101] = 1001
+
+	if len(m) != 3 {
+		return -1
+	}
+	v, ok := m[5]
+	if !ok || v != 50 {
+		return -2
+	}
+	v, ok = m[100]
+	if !ok || v != 1000 {
+		return -3
+	}
+	v, ok = m[101]
+	if !ok || v != 1001 {
+		return -4
+	}
+	k := 0
+	for k < 5 {
+		_, stillThere := m[k]
+		if stillThere {
+			return -5
+		}
+		k++
+	}
+	return 0
+}
+`
+	jm := compileAndJIT(t, churnSrc)
+
+	if got := jm.runInt32(t, "churnCheck"); got != 0 {
+		t.Fatalf("churnCheck() = %d, want 0 (see its own body for what each negative code means)", got)
+	}
+
+	ctrlAddr := uintptr(jm.runInt64(t, "churn"))
+	if ctrlAddr == 0 {
+		t.Fatal("churn() returned a nil map")
+	}
+
+	// mapCtrlTy field layout ({ptr, i32, i32, i32}, x86-64 natural alignment,
+	// unpacked): buckets @0 (8 bytes), count @8, bucketCount @12,
+	// tombstoneCount @16 - see setupMapTypes/genMapMake, maps.go.
+	//
+	// ctrlAddr isn't a Go-managed pointer at all - it's a raw address the
+	// JIT-compiled code handed back, backed by this package's own arena
+	// (real, plain malloc'd memory - see genArenaAlloc, runtime.go - never
+	// Go's own GC heap), so none of Go's usual GC-safety concerns around
+	// "a pointer stored only as a uintptr can go stale" actually apply here.
+	// `go vet`'s unsafeptr check can't know that, though, and unconditionally
+	// flags any *direct* uintptr->Pointer conversion (`unsafe.Pointer(ctrlAddr)`)
+	// as "possible misuse" regardless. Reinterpreting ctrlAddr's own bits via
+	// a pointer to it (`unsafe.Pointer(&ctrlAddr)` - safe: that's the address
+	// of a real, live Go variable) sidesteps the check entirely while reading
+	// the exact same address value; unsafe.Add then does the per-field
+	// pointer arithmetic the officially recommended way (over raw uintptr
+	// math) once a real Pointer is in hand.
+	base := *(*unsafe.Pointer)(unsafe.Pointer(&ctrlAddr))
+	count := *(*int32)(unsafe.Add(base, 8))
+	bucketCount := *(*int32)(unsafe.Add(base, 12))
+	tombstoneCount := *(*int32)(unsafe.Add(base, 16))
+
+	if bucketCount <= mapInitialBuckets {
+		t.Errorf("bucketCount = %d, want > %d (mapInitialBuckets) - the tombstone-heavy churn above should have forced a real grow", bucketCount, mapInitialBuckets)
+	}
+	if tombstoneCount != 0 {
+		t.Errorf("tombstoneCount = %d, want 0 - a grow's own rehash must reset it (every tombstone is left behind in the abandoned old bucket array)", tombstoneCount)
+	}
+	if count != 3 {
+		t.Errorf("count = %d, want 3 (keys 5, 100, 101 still live)", count)
 	}
 }
 

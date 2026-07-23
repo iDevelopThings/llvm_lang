@@ -214,8 +214,8 @@ func main() {
 // not a plain literal or a small int a JIT-independent LLVM constant-fold
 // could just as easily produce, is the only reliable "this never actually
 // ran" signal) - the concatenation happens inside a *global*'s own
-// initializer this time, specifically exercising genGlobalCtors's lowering
-// rather than an ordinary function body's.
+// initializer this time, specifically exercising buildGlobalInitFn's
+// lowering rather than an ordinary function body's.
 func TestBinary_EmitLLVMWithNonConstantGlobalNeverExecutes(t *testing.T) {
 	src := `
 func buildGreeting() string {
@@ -572,6 +572,38 @@ func TestRun_OutputLinkFailureIsCompileError(t *testing.T) {
 	}
 	if stderr.Len() == 0 {
 		t.Error("expected a link-failure message on stderr, got none")
+	}
+}
+
+// TestRun_OutputMissingGCCIsCompileError covers -o's link step when gcc
+// isn't available on PATH at all (see AGENTS.md's "Compiling" section for
+// why mingw64's gcc/g++ must normally be on PATH) - a real coverage gap a
+// code review flagged: the actual behavior was traced by hand and found
+// already correct (a clear, diagnostic-shaped message naming the missing
+// "gcc" executable and the linking step, not a confusing crash/panic), so
+// this backs that finding with a real test rather than leaving it
+// unverified. Temporarily overrides PATH to a fresh, empty directory - t.Setenv
+// restores the real PATH automatically once this test ends, exactly like
+// every other env-var-scoped test in this file already relies on.
+func TestRun_OutputMissingGCCIsCompileError(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+
+	var stderr bytes.Buffer
+	outPath := filepath.Join(t.TempDir(), "out.exe")
+	code := run([]string{"-o", outPath, "../../examples/hello/hello.llx"}, &stderr)
+
+	if code != exitCompile {
+		t.Errorf("exit code = %d, want %d, stderr:\n%s", code, exitCompile, stderr.String())
+	}
+	got := stderr.String()
+	if !strings.Contains(got, `"gcc"`) {
+		t.Errorf("stderr = %q, want it to mention the missing \"gcc\" executable", got)
+	}
+	if !strings.Contains(got, "linking") {
+		t.Errorf("stderr = %q, want it to mention the linking step", got)
+	}
+	if strings.Contains(got, "panic:") {
+		t.Errorf("stderr = %q, want no Go panic - a missing gcc must be a clean diagnostic", got)
 	}
 }
 

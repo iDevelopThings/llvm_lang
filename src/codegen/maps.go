@@ -21,11 +21,24 @@ import (
 // Representation, in one sentence: a map value is a single opaque `ptr` -
 // exactly like a pointer (sema.TypePointer, see llvmType) - pointing at a
 // small, arena-allocated "control block" (g.mapCtrlTy: {ptr buckets, i32
-// count, i32 bucketCount}); the control block's own address never changes
-// across the map's lifetime (so every copy of the map "header" - assigning
-// one map-typed variable to another - shares the exact same buckets/count,
-// Go's own real map-is-a-reference-type behavior), only what its buckets
-// field points at (and bucketCount) changes, in place, when the table grows.
+// count, i32 bucketCount, i32 tombstoneCount}); the control block's own
+// address never changes across the map's lifetime (so every copy of the map
+// "header" - assigning one map-typed variable to another - shares the exact
+// same buckets/count/tombstoneCount, Go's own real map-is-a-reference-type
+// behavior), only what its buckets field points at (and bucketCount) changes,
+// in place, when the table grows.
+//
+// tombstoneCount tracks slots left behind by remove(m, k) (mapTagTombstone,
+// below) separately from count (live entries only): genMapGrowIfNeeded's own
+// load-factor check must trigger off how *full* the bucket array actually is
+// - live entries plus tombstones both occupy a real slot and lengthen probe
+// sequences exactly the same way - not off live count alone, or a
+// churn-heavy insert/remove/insert workload could pack the bucket array
+// almost entirely with tombstones while count stays low, degrading every
+// probe toward an O(bucketCount) scan without ever resizing. Reset to 0
+// whenever the table actually grows (genMapGrowIfNeeded's rehash starts every
+// still-occupied entry fresh into an all-empty array, carrying no
+// tombstones - see genMapRemoveCall for where it's incremented).
 
 // mapInitialBuckets is the bucket count a freshly make'd map starts with -
 // always a power of two (so future growth by doubling stays a power of two
@@ -64,7 +77,7 @@ const (
 // computes an address into the bucket array itself, never in the control
 // block's own shape.
 func (g *Generator) setupMapTypes() {
-	g.mapCtrlTy = g.ctx.StructType([]llvm.Type{g.ptrTy, g.i32Ty, g.i32Ty}, false)
+	g.mapCtrlTy = g.ctx.StructType([]llvm.Type{g.ptrTy, g.i32Ty, g.i32Ty, g.i32Ty}, false)
 	g.fmtMapNilTrap = g.defineCString(".fmt.trap.mapnil", "runtime error: assignment to entry in nil map\n")
 }
 
@@ -99,9 +112,11 @@ func (g *Generator) genMapMake(mapType sema.Type) llvm.Value {
 	bucketsAddr := g.builder.CreateStructGEP(g.mapCtrlTy, ctrlPtr, 0, "")
 	countAddr := g.builder.CreateStructGEP(g.mapCtrlTy, ctrlPtr, 1, "")
 	bucketCountAddr := g.builder.CreateStructGEP(g.mapCtrlTy, ctrlPtr, 2, "")
+	tombstoneCountAddr := g.builder.CreateStructGEP(g.mapCtrlTy, ctrlPtr, 3, "")
 	g.builder.CreateStore(bucketsPtr, bucketsAddr)
 	g.builder.CreateStore(llvm.ConstInt(g.i32Ty, 0, false), countAddr)
 	g.builder.CreateStore(initialCount, bucketCountAddr)
+	g.builder.CreateStore(llvm.ConstInt(g.i32Ty, 0, false), tombstoneCountAddr)
 
 	return ctrlPtr
 }
@@ -238,6 +253,7 @@ func (g *Generator) genMapGetOrInsertAddr(mapType sema.Type, mapVal, keyVal llvm
 	bucketsAddr := g.builder.CreateStructGEP(g.mapCtrlTy, mapVal, 0, "")
 	countAddr := g.builder.CreateStructGEP(g.mapCtrlTy, mapVal, 1, "")
 	bucketCountAddr := g.builder.CreateStructGEP(g.mapCtrlTy, mapVal, 2, "")
+	tombstoneCountAddr := g.builder.CreateStructGEP(g.mapCtrlTy, mapVal, 3, "")
 
 	bucketsPtr := g.builder.CreateLoad(g.ptrTy, bucketsAddr, "")
 	bucketCount := g.builder.CreateLoad(g.i32Ty, bucketCountAddr, "")
@@ -255,7 +271,7 @@ func (g *Generator) genMapGetOrInsertAddr(mapType sema.Type, mapVal, keyVal llvm
 	g.builder.CreateBr(contBB)
 
 	g.builder.SetInsertPointAtEnd(insertBB)
-	g.genMapGrowIfNeeded(bucketTy, keyType, valType, bucketsAddr, countAddr, bucketCountAddr)
+	g.genMapGrowIfNeeded(bucketTy, keyType, valType, bucketsAddr, countAddr, bucketCountAddr, tombstoneCountAddr)
 	newBucketsPtr := g.builder.CreateLoad(g.ptrTy, bucketsAddr, "")
 	newBucketCount := g.builder.CreateLoad(g.i32Ty, bucketCountAddr, "")
 	_, insertIdx := g.genMapProbe(keyType, bucketTy, newBucketsPtr, newBucketCount, keyVal)
@@ -305,8 +321,10 @@ func (g *Generator) genMapTrapIfNil(mapVal llvm.Value) {
 // absent key is never an error), otherwise marks the matching bucket a
 // tombstone (mapTagTombstone - not mapTagEmpty, so a probe sequence that
 // passed through this slot for some *other* still-live key continues past it
-// correctly - see this file's own top-of-file doc comment) and decrements the
-// live count.
+// correctly - see this file's own top-of-file doc comment), decrements the
+// live count, and increments tombstoneCount (so genMapGrowIfNeeded's own
+// load-factor check sees this now-unusable-until-a-grow slot too, not just
+// live entries).
 func (g *Generator) genMapRemoveCall(args []ast.NodeIndex) {
 	mapNode := args[0]
 	keyNode := args[1]
@@ -325,6 +343,7 @@ func (g *Generator) genMapRemoveCall(args []ast.NodeIndex) {
 
 	g.builder.SetInsertPointAtEnd(liveBB)
 	countAddr := g.builder.CreateStructGEP(g.mapCtrlTy, mapVal, 1, "")
+	tombstoneCountAddr := g.builder.CreateStructGEP(g.mapCtrlTy, mapVal, 3, "")
 	bucketsPtr := g.builder.CreateLoad(g.ptrTy, g.builder.CreateStructGEP(g.mapCtrlTy, mapVal, 0, ""), "")
 	bucketCount := g.builder.CreateLoad(g.i32Ty, g.builder.CreateStructGEP(g.mapCtrlTy, mapVal, 2, ""), "")
 	slotFound, slotIdx := g.genMapProbe(keyType, bucketTy, bucketsPtr, bucketCount, keyVal)
@@ -337,6 +356,8 @@ func (g *Generator) genMapRemoveCall(args []ast.NodeIndex) {
 	g.builder.CreateStore(llvm.ConstInt(g.i8Ty, mapTagTombstone, false), g.builder.CreateStructGEP(bucketTy, bucketAddr, 0, ""))
 	count := g.builder.CreateLoad(g.i32Ty, countAddr, "")
 	g.builder.CreateStore(g.builder.CreateSub(count, llvm.ConstInt(g.i32Ty, 1, false), ""), countAddr)
+	tombstoneCount := g.builder.CreateLoad(g.i32Ty, tombstoneCountAddr, "")
+	g.builder.CreateStore(g.builder.CreateAdd(tombstoneCount, llvm.ConstInt(g.i32Ty, 1, false), ""), tombstoneCountAddr)
 	g.builder.CreateBr(contBB)
 
 	g.builder.SetInsertPointAtEnd(contBB)
@@ -344,26 +365,34 @@ func (g *Generator) genMapRemoveCall(args []ast.NodeIndex) {
 
 // genMapGrowIfNeeded doubles bucketCount (and rehashes every still-occupied
 // old bucket into the fresh, all-empty array) whenever inserting one more
-// entry would push the load factor above 3/4 - see CODEGEN.md's "Maps"
-// section for exactly why this threshold. The old bucket array is simply
-// abandoned once rehashing finishes, never freed - consistent with this
-// project's already-documented "the arena never frees" design (see
-// CODEGEN.md's "The arena allocator" section) and exactly the same growth
-// pattern genAppendCall's own dynamic-array doubling already uses. A no-op
-// (contBB reached directly) when the load factor doesn't yet require it.
-func (g *Generator) genMapGrowIfNeeded(bucketTy llvm.Type, keyType, valType sema.Type, bucketsAddr, countAddr, bucketCountAddr llvm.Value) {
+// entry would push the *occupied* fraction of the bucket array - live
+// entries plus tombstones, since both occupy a real slot and lengthen probe
+// sequences identically (see this file's own top-of-file doc comment) -
+// above 3/4 - see CODEGEN.md's "Maps" section for exactly why this
+// threshold. The old bucket array is simply abandoned once rehashing
+// finishes, never freed - consistent with this project's already-documented
+// "the arena never frees" design (see CODEGEN.md's "The arena allocator"
+// section) and exactly the same growth pattern genAppendCall's own dynamic-
+// array doubling already uses. A no-op (contBB reached directly) when the
+// load factor doesn't yet require it.
+func (g *Generator) genMapGrowIfNeeded(bucketTy llvm.Type, keyType, valType sema.Type, bucketsAddr, countAddr, bucketCountAddr, tombstoneCountAddr llvm.Value) {
 	count := g.builder.CreateLoad(g.i32Ty, countAddr, "")
 	bucketCount := g.builder.CreateLoad(g.i32Ty, bucketCountAddr, "")
+	tombstoneCount := g.builder.CreateLoad(g.i32Ty, tombstoneCountAddr, "")
 
-	// Grow when (count+1)*4 > bucketCount*3 - i.e. inserting one more entry
-	// would push the load factor above 0.75. Computed in i64 to keep this
-	// simple and safe against i32 overflow for a very large map, mirroring
-	// this package's own existing "compute size arithmetic in i64" habit
-	// (genArenaAllocElems).
+	// Grow when (count+tombstoneCount+1)*4 > bucketCount*3 - i.e. inserting
+	// one more entry would push the occupied fraction above 0.75, counting
+	// both live entries and tombstones as occupied slots (see this
+	// function's own doc comment for why tombstones must count here too, not
+	// just count). Computed in i64 to keep this simple and safe against i32
+	// overflow for a very large map, mirroring this package's own existing
+	// "compute size arithmetic in i64" habit (genArenaAllocElems).
 	count64 := g.builder.CreateZExt(count, g.i64Ty, "")
+	tombstoneCount64 := g.builder.CreateZExt(tombstoneCount, g.i64Ty, "")
 	bucketCount64 := g.builder.CreateZExt(bucketCount, g.i64Ty, "")
-	nextCount64 := g.builder.CreateAdd(count64, llvm.ConstInt(g.i64Ty, 1, false), "")
-	lhs := g.builder.CreateMul(nextCount64, llvm.ConstInt(g.i64Ty, 4, false), "")
+	occupied64 := g.builder.CreateAdd(count64, tombstoneCount64, "")
+	nextOccupied64 := g.builder.CreateAdd(occupied64, llvm.ConstInt(g.i64Ty, 1, false), "")
+	lhs := g.builder.CreateMul(nextOccupied64, llvm.ConstInt(g.i64Ty, 4, false), "")
 	rhs := g.builder.CreateMul(bucketCount64, llvm.ConstInt(g.i64Ty, 3, false), "")
 	needGrow := g.builder.CreateICmp(llvm.IntUGT, lhs, rhs, "")
 
@@ -421,6 +450,10 @@ func (g *Generator) genMapGrowIfNeeded(bucketTy llvm.Type, keyType, valType sema
 	g.builder.SetInsertPointAtEnd(doneBB)
 	g.builder.CreateStore(newBucketsPtr, bucketsAddr)
 	g.builder.CreateStore(newBucketCount, bucketCountAddr)
+	// The rehash above only ever moves mapTagOccupied entries - every
+	// tombstone is left behind in the abandoned old array, so the fresh
+	// table starts with zero tombstones of its own.
+	g.builder.CreateStore(llvm.ConstInt(g.i32Ty, 0, false), tombstoneCountAddr)
 	g.builder.CreateBr(contBB)
 
 	g.builder.SetInsertPointAtEnd(contBB)
@@ -539,15 +572,15 @@ func (g *Generator) recordMapProbeCandidate(candFoundAddr, candIdxAddr, idx llvm
 // type t for equality - the map-key-specific counterpart to genValueEqual
 // (expr.go, used for a whole-value `==`/`!=`): built as its own, separate,
 // self-contained recursive function (not a reuse of genValueEqual) because a
-// map key must support every type sema's own typeIsComparableKeyType accepts
-// - every integer width, both float widths, and a pointer - while
+// map key must support every type sema's own typeIsComparable accepts -
+// every integer width, both float widths, and a pointer - while
 // genValueEqual's own switch only actually implements TypeInt (i32)/
 // TypeBool/TypeString/TypeStruct/TypeArray, panicking on anything else
 // (i8/i16/i64/f32/f64/a pointer field) - a real, pre-existing gap in that
 // function orthogonal to this feature (flagged separately, not fixed here -
 // fixing genValueEqual's own general `==`/`!=` lowering is a wider change
-// than this round's map-key-comparison needs). Every kind
-// typeIsComparableKeyType accepts is implemented directly here instead.
+// than this round's map-key-comparison needs). Every kind typeIsComparable
+// accepts is implemented directly here instead.
 func (g *Generator) genMapKeyEqual(t sema.Type, lv, rv llvm.Value) llvm.Value {
 	switch t.Kind {
 	case sema.TypeI8, sema.TypeI16, sema.TypeI32, sema.TypeI64, sema.TypeBool:
@@ -576,7 +609,7 @@ func (g *Generator) genMapKeyEqual(t sema.Type, lv, rv llvm.Value) llvm.Value {
 		}
 		return result
 	default:
-		// sema's typeIsComparableKeyType (typecheck.go) rejects every other
+		// sema's typeIsComparable (typecheck.go) rejects every other
 		// Kind (a dynamic array, a function type, another map) as a map key
 		// type outright - unreachable on a tree that already passed
 		// sema.Check (see the package doc comment).
@@ -617,7 +650,7 @@ func (g *Generator) fnvMix(seed, word llvm.Value) llvm.Value {
 // genHashInto recursively mixes v (of type t) into seed and returns the
 // updated running hash - see genMapHash's own doc comment for why this
 // recurses over v's logical structure rather than its raw bytes. Every kind
-// sema's typeIsComparableKeyType accepts is handled directly.
+// sema's typeIsComparable accepts is handled directly.
 func (g *Generator) genHashInto(t sema.Type, v, seed llvm.Value) llvm.Value {
 	switch t.Kind {
 	case sema.TypeI8, sema.TypeI16:
