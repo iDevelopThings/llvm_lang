@@ -13,15 +13,13 @@ import (
 	"tinygo.org/x/go-llvm"
 )
 
-// jitInit performs LLVM's process-global JIT setup exactly once, mirroring
-// third_party/go-llvm/executionengine_test.go's TestFactorial - every test
+// jitInit performs LLVM's process-global JIT setup exactly once - every test
 // in this file shares one process, and these calls aren't meant to run more
 // than once per process.
 var jitInit sync.Once
 
 func initJIT() {
 	jitInit.Do(func() {
-		llvm.LinkInMCJIT()
 		if err := llvm.InitializeNativeTarget(); err != nil {
 			panic(err)
 		}
@@ -36,7 +34,7 @@ func initJIT() {
 // package's Generate assumes a fully valid tree (see the package doc
 // comment), so every test source here must actually be valid llvm_lang.
 //
-// The returned Module has NOT been handed to any ExecutionEngine - a caller
+// The returned Module has NOT been handed to any LLJIT instance - a caller
 // that only wants to verify codegen (not JIT-execute) owns it outright and
 // must call Dispose. A caller that wants to JIT-execute should use
 // compileAndJIT instead (see its doc comment for why the two can't share a
@@ -89,48 +87,129 @@ func compileSrcExpectCodegenError(t *testing.T, src string) *diag.Bag {
 	return gdiags
 }
 
-// jitModule is a compiled Module already handed to a live ExecutionEngine -
-// see compileAndJIT.
-type jitModule struct {
-	mod    *Module
-	engine llvm.ExecutionEngine
+// bindMinGWMainThunk is cmd/llvmc/main.go's own helper of the same name,
+// mirrored here exactly (see its doc comment for the full "why": a real
+// MinGW/GCC ABI compatibility quirk LLVM's backend applies to any function
+// literally named `main`, found empirically while switching this project's
+// JIT engine to LLJIT - see DECISIONS.md's dated "JIT execution: LLJIT"
+// entry). Every JIT-executing helper in this file (and imports_test.go's/
+// multifile_test.go's own compileProgramAndJIT/compilePackageAndJIT) needs
+// this exactly once per LLJIT instance, since every test source compiled
+// through this package's own test helpers always declares a `func main()`
+// of its own, per the language's top-level rules.
+func bindMinGWMainThunk(jit llvm.LLJIT) error {
+	dg, err := llvm.NewDynamicLibrarySearchGeneratorForProcess(jit.GlobalPrefix())
+	if err != nil {
+		return err
+	}
+	jit.MainJITDylib().AddGenerator(dg)
+
+	randAddr, err := jit.Lookup("rand")
+	if err != nil {
+		return err
+	}
+
+	name := jit.ExecutionSession().Intern("__main")
+	defer name.Release()
+	mu := llvm.AbsoluteSymbols([]llvm.AbsoluteSymbol{
+		{
+			Name: name,
+			Value: llvm.EvaluatedSymbol{
+				Address: randAddr,
+				Flags:   llvm.SymbolFlags{Generic: llvm.SymbolFlagExported | llvm.SymbolFlagCallable},
+			},
+		},
+	})
+	return jit.MainJITDylib().Define(mu)
 }
 
-// compileAndJIT compiles src (see compileSrc) and hands the resulting module
-// to a single ExecutionEngine shared for the whole test, so a test can call
+// jitModule is a compiled Module already added to a live LLJIT instance -
+// see compileAndJIT.
+type jitModule struct {
+	mod *Module
+	jit llvm.LLJIT
+	// ir is mod.LLVM.String(), captured before mod was ever handed to jit -
+	// see compileAndJIT's own doc comment for why a test wanting to inspect
+	// the generated IR text must use this instead of calling
+	// jm.mod.LLVM.String() itself.
+	ir string
+}
+
+// compileAndJIT compiles src (see compileSrc) and adds the resulting module
+// to a single LLJIT instance shared for the whole test, so a test can call
 // runInt32/runMainCapturingStdout as many times as it needs against the same
 // module.
 //
 // This can't just be "compileSrc, then defer mod.Dispose()" the way a
-// non-JIT test does: LLVMCreateExecutionEngineForModule takes ownership of
-// the module, so disposing the *engine* already frees it - a later
-// mod.Dispose() (or a second engine created for the same module) would
-// double-free it, which is exactly what an earlier version of these tests
-// did before this helper existed (a real crash, not a hypothetical one).
-// t.Cleanup here disposes the engine (freeing the module with it) and only
-// then the owning Context, in that order, exactly once.
+// non-JIT test does: wrapping mod.Ctx/mod.LLVM into a ThreadSafeContext/
+// ThreadSafeModule and adding that to jit transfers ownership of both to the
+// LLJIT instance - a later mod.Dispose() would double-free them, the same
+// hazard an earlier, MCJIT-based version of this helper already hit for
+// real (see DECISIONS.md's dated "JIT execution: LLJIT" entry). t.Cleanup
+// here disposes only the LLJIT instance, which tears down the module and
+// context together, in the correct order, in one call.
+//
+// The module's IR text is captured up front, before it's ever added to jit,
+// for a test that wants to assert on the generated IR (e.g. that a specific
+// printf call shape shows up) rather than (or in addition to) actually
+// running it: unlike the legacy MCJIT ExecutionEngine (which kept the
+// source Module intact for its whole lifetime), LLJIT's compile layer
+// empties the original IR module out once it's been compiled to machine
+// code - calling mod.LLVM.String() again *after* a Lookup/run through this
+// jitModule returns an emptied-out module (just the header, verified
+// directly: real content before, nothing but `; ModuleID = ...` and the
+// datalayout line after) rather than the real generated IR, and one
+// specific case of this was observed to crash outright, not just return the
+// wrong thing. The IR text itself never changes after codegen - JIT
+// compilation reads it to produce machine code, it doesn't rewrite the
+// source module - so capturing it this early loses nothing.
 func compileAndJIT(t *testing.T, src string) *jitModule {
 	t.Helper()
 	mod := compileSrc(t, src)
+	ir := mod.LLVM.String()
 	initJIT()
 
-	engine, err := llvm.NewExecutionEngine(mod.LLVM)
+	jit, err := llvm.NewLLJIT(llvm.NewLLJITBuilder())
 	if err != nil {
-		t.Fatalf("NewExecutionEngine: %v", err)
+		t.Fatalf("NewLLJIT: %v", err)
 	}
+
+	if err := bindMinGWMainThunk(jit); err != nil {
+		// mod isn't wrapped/handed to jit yet at this point (that happens
+		// below, via AddLLVMIRModule) - still fully owned here.
+		mod.Dispose()
+		jit.Dispose()
+		t.Fatalf("bindMinGWMainThunk: %v", err)
+	}
+
+	tsctx := llvm.NewThreadSafeContextFromContext(mod.Ctx)
+	tsm := llvm.NewThreadSafeModule(mod.LLVM, tsctx)
+	if err := jit.AddLLVMIRModule(jit.MainJITDylib(), tsm); err != nil {
+		jit.Dispose()
+		t.Fatalf("AddLLVMIRModule: %v", err)
+	}
+
 	// Mirrors cmd/llvmc's own jitRunMain: a normal linked/loaded program's C
 	// runtime would run @llvm.global_ctors (see CODEGEN.md's "Global var
 	// initializers" section) before this test ever calls any function of its
-	// own - MCJIT needs this triggered explicitly. Always safe to call: a
-	// module with no non-constant globals has no such array to run at all.
-	engine.RunStaticConstructors()
+	// own - LLJIT has no RunStaticConstructors-style call to trigger that
+	// automatically, so this looks up llvm_lang.global_init directly by name
+	// and calls it instead. Always safe: a module with no non-constant
+	// globals has no such function to find at all (see genGlobalCtors), so a
+	// failed Lookup here just means there was nothing to run.
+	if initAddr, err := jit.Lookup("llvm_lang.global_init"); err == nil {
+		syscall.SyscallN(uintptr(initAddr))
+	}
+
 	t.Cleanup(func() {
-		engine.Dispose()
-		mod.Ctx.Dispose()
+		if err := jit.Dispose(); err != nil {
+			t.Errorf("LLJIT.Dispose: %v", err)
+		}
 	})
 	return &jitModule{
-		mod:    mod,
-		engine: engine,
+		mod: mod,
+		jit: jit,
+		ir:  ir,
 	}
 }
 
@@ -138,9 +217,9 @@ func compileAndJIT(t *testing.T, src string) *jitModule {
 // isn't in the module.
 func (jm *jitModule) address(t *testing.T, name string) uintptr {
 	t.Helper()
-	addr := jm.engine.GetFunctionAddress(name)
-	if addr == 0 {
-		t.Fatalf("function %q not found in module", name)
+	addr, err := jm.jit.Lookup(name)
+	if err != nil {
+		t.Fatalf("function %q not found in module: %v", name, err)
 	}
 	return uintptr(addr)
 }
@@ -151,17 +230,19 @@ func (jm *jitModule) address(t *testing.T, name string) uintptr {
 // result as 0 (unused by the caller).
 //
 // This calls through the function's raw address via syscall.SyscallN,
-// rather than ExecutionEngine.RunFunction/GenericValue (the approach
-// go-llvm's own executionengine_test.go uses): MCJIT's RunFunction only
-// supports a very small set of call shapes and aborts the whole process
-// with "Full-featured argument passing not supported yet" for anything past
-// that (a real fatal error hit while building this test suite against a
-// 4-parameter function, not a hypothetical one - see BLOCKERS.md).
-// syscall.SyscallN drives the exact same Windows x64 calling convention
-// LLVM's own C calling convention lowers to on this target, so it's not a
-// workaround so much as the more direct of the two ways to call a JIT'd
-// function - it's also what GetFunctionAddress's own doc comment
-// recommends.
+// rather than the legacy MCJIT ExecutionEngine's RunFunction/GenericValue
+// (the approach go-llvm's own executionengine_test.go uses): MCJIT's
+// RunFunction only supports a very small set of call shapes and aborts the
+// whole process with "Full-featured argument passing not supported yet" for
+// anything past that (a real fatal error hit while building this test suite
+// against a 4-parameter function, not a hypothetical one - see BLOCKERS.md).
+// LLJIT (the engine this package actually uses now - see DECISIONS.md's
+// dated "JIT execution: LLJIT" entry) doesn't even have an equivalent of
+// RunFunction/GenericValue to begin with: syscall.SyscallN driving the exact
+// same Windows x64 calling convention LLVM's own C calling convention lowers
+// to on this target isn't a workaround at all here, it's the only way to
+// actually invoke a resolved address - see orcjit.go's own doc comment on
+// LLJIT.Lookup.
 func (jm *jitModule) runInt32(t *testing.T, name string, args ...int32) int32 {
 	t.Helper()
 	addr := jm.address(t, name)

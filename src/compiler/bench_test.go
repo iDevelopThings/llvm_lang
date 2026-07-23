@@ -10,9 +10,9 @@ import (
 // benchmarkCompilePackage runs the full lex-parse-resolve-check-codegen-
 // verify pipeline (CompilePackage) end to end, once per iteration - a
 // realistic "how long does compiling this whole program actually take"
-// number. Deliberately does NOT JIT-execute the result (no
-// ExecutionEngine, no RunStaticConstructors, no calling main) - that's a
-// separate concern (see AGENTS.md's benchmarking task) already covered by
+// number. Deliberately does NOT JIT-execute the result (no LLJIT instance,
+// no running llvm_lang.global_init, no calling main) - that's a separate
+// concern (see AGENTS.md's benchmarking task) already covered by
 // src/codegen's own JIT-execution tests, not this compile-speed benchmark.
 //
 // Every real per-call cost CompilePackage itself incurs - including its own

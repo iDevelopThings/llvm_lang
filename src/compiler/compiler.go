@@ -56,7 +56,7 @@ type Result struct {
 	Diags map[*ast.Tree]*diag.Bag
 	// Module is the generated, verified LLVM module - nil on any failure.
 	// The caller owns disposal (Module.Dispose(), or handing it to
-	// llvm.NewExecutionEngine, whichever it needs).
+	// llvm.NewLLJIT, whichever it needs).
 	Module *codegen.Module
 	// VerifyErr is set only when codegen itself reported no diagnostics but
 	// the generated module still failed LLVM's own verifier - a real bug in

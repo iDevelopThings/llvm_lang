@@ -410,22 +410,26 @@ lower a *global's* initializer to.
   either).
 
 **The synthesized init function, and `@llvm.global_ctors`:** `genGlobalCtors`
-builds one internal-linkage, parameterless function
-(`llvm_lang.global_init`) - the exact same per-function generation state
-(entry block, fresh locals map, no enclosing loop/receiver/lambda-capture
-context) `genFuncBody`/`genConstructorBody`/`genLambdaFunc` each set up for a
-body of their own - and lowers every queued initializer inside it via
-`storeValueInto` (`src/codegen/stmt.go`, the same helper a local
-`var`/short-var-decl already uses to store its own initializer), one plain
-`evaluate, then store into the global` per entry. This function is then
-registered into LLVM's own `@llvm.global_ctors` mechanism - a standard,
-well-documented array of `{ i32, ptr, ptr }` entries (`{ priority, ctor
-function pointer, associated data }`, appending linkage) any real linked/
-loaded program's C runtime startup sequence scans and calls, in priority
-order, before ever reaching `main`. A program whose every global happens to
-be compile-time-constant gets no `llvm_lang.global_init` function and no
-`@llvm.global_ctors` array at all - this mechanism leaves no trace in the IR
-unless it's actually needed.
+builds one parameterless function (`llvm_lang.global_init`) - the exact same
+per-function generation state (entry block, fresh locals map, no enclosing
+loop/receiver/lambda-capture context) `genFuncBody`/`genConstructorBody`/
+`genLambdaFunc` each set up for a body of their own - and lowers every queued
+initializer inside it via `storeValueInto` (`src/codegen/stmt.go`, the same
+helper a local `var`/short-var-decl already uses to store its own
+initializer), one plain `evaluate, then store into the global` per entry.
+Unlike every other synthesized helper function this package builds for
+itself (the arena allocator, lambda thunks - see `runtime.go`/`expr.go`),
+this one keeps `AddFunction`'s own default linkage (external) rather than
+private: `cmd/llvmc`'s JIT driver looks it up directly by this exact name
+(see "JIT execution" below), which a private symbol has no name for at all.
+This function is then registered into LLVM's own `@llvm.global_ctors`
+mechanism - a standard, well-documented array of `{ i32, ptr, ptr }` entries
+(`{ priority, ctor function pointer, associated data }`, appending linkage)
+any real linked/loaded program's C runtime startup sequence scans and calls,
+in priority order, before ever reaching `main`. A program whose every global
+happens to be compile-time-constant gets no `llvm_lang.global_init` function
+and no `@llvm.global_ctors` array at all - this mechanism leaves no trace in
+the IR unless it's actually needed.
 
 **Declaration order, not a full dependency graph:** every queued
 initializer runs in plain source declaration order across the whole package
@@ -442,17 +446,23 @@ just that it type-checks/compiles.
 **JIT execution needs this triggered manually:** unlike a normal linked/
 loaded program, `cmd/llvmc`'s JIT path (`jitRunMain`) never goes through a
 real C runtime startup sequence that would scan `@llvm.global_ctors` on its
-own - MCJIT's `ExecutionEngine` has no such thing. `jitRunMain` (and this
-package's own test helper, `compileAndJIT`) calls
-`engine.RunStaticConstructors()` explicitly, right after creating the engine
-and before ever looking up/calling `main` - go-llvm's exact binding for this
-purpose. Always safe to call even when no `@llvm.global_ctors` array exists
-at all (a program with only compile-time-constant globals). `-emit-llvm`
-needs no such change: it never reaches `llvm.NewExecutionEngine` in the
-first place (see its own section below), so the synthesized init function
-and `@llvm.global_ctors` array simply show up in the printed IR text like
-any other generated code, unexecuted - consistent with `-emit-llvm` never
-executing anything, before or after this feature.
+own. LLJIT (see "JIT execution: LLJIT" below) has no equivalent of the
+legacy MCJIT `ExecutionEngine`'s `RunStaticConstructors()`, which this
+project used for this before - instead, `jitRunMain` (and this package's own
+test helpers, `compileAndJIT`/`compilePackageAndJIT`/`compileProgramAndJIT`)
+looks up `llvm_lang.global_init` by name and calls it directly, exactly like
+`main` itself, right after adding the module and before ever calling `main`.
+The `@llvm.global_ctors` array itself is still built regardless - a real
+linked/loaded program's C runtime would still need it - but the JIT path
+never actually walks it; it goes straight to the one function it points at.
+A module with no non-constant globals has no `llvm_lang.global_init`
+function to find at all (see above), so a failed lookup here just means
+there was nothing to run, not a real error. `-emit-llvm` needs no such
+change: it never reaches `llvm.NewLLJIT` in the first place (see its own
+section below), so the synthesized init function and `@llvm.global_ctors`
+array simply show up in the printed IR text like any other generated code,
+unexecuted - consistent with `-emit-llvm` never executing anything, before
+or after this feature.
 
 ## The `print` builtin, concretely
 
@@ -1334,9 +1344,10 @@ a global regardless of whether `main` is ever actually called (see the
 so `printf` never actually fires and nothing is written to the real stdout
 beyond the IR text itself.
 
-Since this path never reaches `llvm.NewExecutionEngine`, disposal is a plain
+Since this path never reaches `llvm.NewLLJIT`, disposal is a plain
 `Module.Dispose()` - same as the diagnostic/verification-failure paths below,
-not the JIT path's more careful engine/context teardown.
+not the JIT path's own ownership-transfer teardown (see "A non-obvious
+disposal detail" below).
 
 ## Source file extension: `.llx`
 
@@ -1396,20 +1407,78 @@ directory's own doc comments).
 
 ## A non-obvious disposal detail
 
-Once a `codegen.Module`'s `LLVM` field is handed to
-`llvm.NewExecutionEngine`, the engine takes ownership of it - calling
-`Module.Dispose()` afterward would double-free it (this exact pitfall is
-already documented on `src/codegen/codegen_test.go`'s `compileAndJIT`
-helper). So the two paths that never reach a live execution engine - a
-codegen diagnostic, or a failed `llvm.VerifyModule` - already call
-`Module.Dispose()` themselves, inside `src/compiler`'s `finishPipeline`,
-before ever handing a `Result` back (a `Result.Module` is always nil on
-either path - see `src/compiler`'s own doc comment - so `cmd/llvmc` never
-gets a live `*codegen.Module` for either of these two cases at all, let
-alone a chance to double-dispose one). Once JIT execution is about to
-happen (a `Result.Module` came back non-nil), disposal goes through the
-engine (`engine.Dispose()`) and then the module's owning `Context`
-(`mod.Ctx.Dispose()`), in that order, instead - `cmd/llvmc`'s `jitRunMain`,
-unchanged. The one remaining case `cmd/llvmc` itself still calls
+Once a `codegen.Module`'s `Ctx` and `LLVM` fields are wrapped into a
+`ThreadSafeContext`/`ThreadSafeModule` and added to an LLJIT instance (see
+`llvm.NewThreadSafeContextFromContext`/`NewThreadSafeModule`/
+`LLJIT.AddLLVMIRModule`, `third_party/go-llvm/orcjit.go`), the LLJIT
+instance takes ownership of both - calling `Module.Dispose()` afterward
+would double-free them (this exact pitfall is already documented on
+`src/codegen/codegen_test.go`'s `compileAndJIT` helper). So the two paths
+that never reach a live LLJIT instance - a codegen diagnostic, or a failed
+`llvm.VerifyModule` - already call `Module.Dispose()` themselves, inside
+`src/compiler`'s `finishPipeline`, before ever handing a `Result` back (a
+`Result.Module` is always nil on either path - see `src/compiler`'s own doc
+comment - so `cmd/llvmc` never gets a live `*codegen.Module` for either of
+these two cases at all, let
+alone a chance to double-dispose one). Once JIT execution is about to happen
+(a `Result.Module` came back non-nil), disposal instead goes through the
+LLJIT instance alone (`jit.Dispose()`) - `cmd/llvmc`'s `jitRunMain` - which
+tears down the module and context together, in the correct order, in one
+call; unlike the legacy MCJIT `ExecutionEngine` (which only ever took
+ownership of the module, leaving the context for the caller to dispose
+separately as a second explicit step), LLJIT's ownership transfer already
+covers both. The one remaining case `cmd/llvmc` itself still calls
 `Module.Dispose()` directly is `-emit-llvm`'s own success path (`finish`) -
-a verified module that's never handed to `llvm.NewExecutionEngine` at all.
+a verified module that's never handed to `llvm.NewLLJIT` at all.
+
+## A MinGW/GCC ABI quirk: implicit `__main()` calls
+
+A real, empirically-discovered platform gotcha hit while switching this
+project's JIT engine from the legacy MCJIT `ExecutionEngine` to LLJIT (see
+DECISIONS.md's dated "JIT execution: LLJIT" entry) - in the same spirit as
+the `%lld` printf-specifier gotcha documented above, verified directly
+rather than assumed: LLVM's backend, when compiling a function literally
+named `main` for a `*-windows-gnu` target - this project's own mingw64 host,
+and the exact target `JITTargetMachineBuilder`'s host-detection picks -
+auto-inserts a call to `__main()` at that function's very start. This is the
+same thing GCC's own frontend does for a real MinGW-linked program, there to
+run static C++-style constructors via a much older, completely different
+convention than this project's own `@llvm.global_ctors` mechanism (see
+"Global `var` initializers" above). MCJIT never took this same code path -
+whatever internal target selection it used apparently didn't trigger it,
+only LLJIT's real host-detected `TargetMachine` does.
+
+This project has no use for whatever `__main` would normally do, and never
+defines it itself - without a real, resolvable `__main` symbol, materializing
+`main` at all fails outright ("JIT session error: Symbols not found:
+[ __main ]"), confirmed directly by capturing the compiled module's own IR
+text before and after a JIT run and finding `__main` genuinely referenced
+only in the *compiled* form, never the textual IR (see below). `cmd/llvmc`'s
+`bindMinGWMainThunk` (mirrored exactly in `src/codegen`'s own test helpers)
+works around this by binding `__main` directly to libc's own `rand` via
+`AbsoluteSymbols`/`JITDylib.Define` (`third_party/go-llvm/orcjit.go`) -
+`rand` is real, already resolvable via a process-symbol generator attached
+to the main JITDylib, and safe to call with zero arguments and an ignored
+result, exactly matching the shape of the auto-inserted call site. This is
+unrelated to actually running `llvm_lang.global_init`: binding `__main` to
+`global_init` directly wouldn't help any JIT'd function *other* than `main`
+itself, and this package's own tests routinely call some other, arbitrarily
+named function directly without ever going through `main` at all - so
+`global_init` still runs through its own separate, explicit Lookup-and-call
+(see "Global `var` initializers" above), unaffected by this.
+
+**A second, related discovery made while diagnosing this:** LLJIT's compile
+layer empties the original IR module out once it's been compiled to machine
+code, unlike the legacy MCJIT `ExecutionEngine` (which kept the source
+`Module` intact for its whole lifetime). Calling `Module.String()` again
+*after* a JIT-executed call through that module returns just the bare
+`; ModuleID = ...`/datalayout header - verified directly by capturing and
+comparing the same module's IR text before and after a `runInt32` call, not
+assumed - rather than the real generated IR, and this was observed to crash
+outright in at least one case, not just return the wrong thing. Since the
+IR text itself never changes after codegen (JIT compilation reads it to
+produce machine code, it doesn't rewrite the source module), `src/codegen`'s
+own `jitModule` test helper now captures a module's IR text once, immediately
+after codegen and before it's ever handed to an LLJIT instance
+(`jitModule.ir`), and every test wanting to assert on generated IR text uses
+that instead of calling `jm.mod.LLVM.String()` itself.

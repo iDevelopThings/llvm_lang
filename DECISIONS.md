@@ -648,3 +648,74 @@ restore, the one genuinely subtle part: caught directly by
 `if`/`else` are alternate, mutually-exclusive codegen-time continuations
 from the same starting point, not a sequential continuation of each other
 the way two statements in one `Block` are.
+
+---
+
+## 2026-07-23 - JIT execution: LLJIT (ORCv2) instead of the legacy MCJIT `ExecutionEngine`
+
+**Decision:** `cmd/llvmc`'s `jitRunMain`, and every JIT-executing test helper
+in `src/codegen` (`compileAndJIT`, `compilePackageAndJIT`,
+`compileProgramAndJIT`), now JIT-execute through `go-llvm`'s LLJIT bindings
+(`third_party/go-llvm/orcjit.go` - ORCv2, LLVM's current JIT infrastructure)
+instead of the legacy MCJIT-based `ExecutionEngine`
+(`third_party/go-llvm/executionengine.go`) this project used until now.
+
+**Why:** MCJIT is unmaintained upstream - LLVM itself documents ORCv2/LLJIT
+as its replacement (see https://llvm.org/docs/ORCv2.html). The switch
+surfaced one real, non-drop-in gap: LLJIT has no equivalent of
+`ExecutionEngine.RunStaticConstructors()`, which this project relied on to
+run `@llvm.global_ctors` (see `CODEGEN.md`'s "Global var initializers"
+section) before `main`. This is solved by looking up and calling
+`llvm_lang.global_init` directly by name instead - the exact same
+synthesized function `@llvm.global_ctors`'s own single entry already points
+at - rather than relying on the generic ctors-array-walking convenience
+MCJIT provided. That needed one small companion change: `genGlobalCtors`
+(`src/codegen/globalinit.go`) no longer gives that function private linkage,
+since a private symbol has no name a JIT's `Lookup` can resolve at all - it
+now keeps `AddFunction`'s own default (external), the same as every other
+language-level function. The `@llvm.global_ctors` array itself is left in
+place, unused by the JIT path now, since it's still the correct mechanism
+for a real linked/loaded program's C runtime startup sequence - a future
+AOT/native-executable output path would still need it.
+
+The disposal/ownership model also changed shape: MCJIT's
+`NewExecutionEngine` only ever took ownership of the `Module`, leaving the
+owning `Context` for the caller to dispose separately (`engine.Dispose()` +
+`mod.Ctx.Dispose()`, two calls, two failure modes). LLJIT's
+`ThreadSafeContext`/`ThreadSafeModule` wrapping instead folds both into the
+LLJIT instance's own ownership, so disposing it (`jit.Dispose()`) alone
+tears down the module and context together, in the correct order - one call
+where MCJIT needed two.
+
+Two further real, empirically-verified (not assumed) gotchas surfaced while
+making the switch - see `CODEGEN.md`'s "A MinGW/GCC ABI quirk: implicit
+`__main()` calls" section for the full write-up of both:
+
+- LLVM's backend auto-inserts a call to `__main()` at the very start of any
+  function literally named `main`, when compiling for this project's own
+  `*-windows-gnu` (mingw64) host - a real MinGW/GCC ABI compatibility
+  convention, unrelated to this project's own `@llvm.global_ctors`
+  mechanism, that MCJIT's own target selection apparently never triggered.
+  Worked around by binding `__main` to libc's own `rand` via
+  `AbsoluteSymbols`/`JITDylib.Define` (`cmd/llvmc`'s `bindMinGWMainThunk`,
+  mirrored in `src/codegen`'s test helpers) - this is exactly the kind of
+  thing the "practical LLJIT surface" scoping decision on the `go-llvm`
+  bindings side turned out to need almost immediately.
+- LLJIT's compile layer empties the source IR module out once compiled to
+  machine code, unlike MCJIT (which kept it intact for its whole lifetime) -
+  calling `Module.String()` again after a JIT-executed call returns just the
+  bare module header, and this was observed to crash outright in at least
+  one case. `src/codegen`'s `jitModule` test helper now captures a module's
+  IR text once, up front, before it's ever handed to an LLJIT instance.
+
+The actual "call a JIT'd function" mechanism didn't change at all:
+`LLJIT.Lookup` hands back a raw address exactly like
+`ExecutionEngine.GetFunctionAddress` did, so the existing
+`syscall.SyscallN`-based call-through-raw-address approach (see
+`src/codegen/codegen_test.go`'s `runInt32` doc comment) carries over
+unchanged - actually invoking a resolved address is deliberately out of
+scope for both JIT engines' own C APIs alike, so this project was always
+bringing its own call mechanism regardless of which one it used.
+
+**Status:** shipped. See `CODEGEN.md`'s "Global `var` initializers" and "A
+non-obvious disposal detail" sections for the mechanics.

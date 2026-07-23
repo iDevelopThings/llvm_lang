@@ -429,7 +429,7 @@ func f(x int) int {
 	return int(x)
 }
 `)
-	ir := jm.mod.LLVM.String()
+	ir := jm.ir
 	for _, unwanted := range []string{"sext", "trunc", "sitofp", "fptosi", "fpext", "fptrunc"} {
 		if strings.Contains(ir, unwanted) {
 			t.Errorf("same-type conversion int(x) emitted a %q instruction, want a bare passthrough\n%s", unwanted, ir)

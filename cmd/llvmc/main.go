@@ -205,10 +205,10 @@ func finish(res *compiler.Result, stderr io.Writer, emitLLVM bool) int {
 	}
 
 	// -emit-llvm: dump the verified module's IR text and stop here - this
-	// path never reaches llvm.NewExecutionEngine, so a plain
-	// res.Module.Dispose() (rather than the engine/context dance jitRunMain
-	// does below) is correct, same as the diagnostic/verification-failure
-	// paths above.
+	// path never reaches llvm.NewLLJIT, so a plain res.Module.Dispose()
+	// (rather than the ThreadSafeContext/ThreadSafeModule/LLJIT ownership
+	// transfer jitRunMain does below) is correct, same as the diagnostic/
+	// verification-failure paths above.
 	if emitLLVM {
 		fmt.Print(res.Module.LLVM.String())
 		res.Module.Dispose()
@@ -241,7 +241,6 @@ var jitInit sync.Once
 
 func initJIT() {
 	jitInit.Do(func() {
-		llvm.LinkInMCJIT()
 		if err := llvm.InitializeNativeTarget(); err != nil {
 			panic(err)
 		}
@@ -251,57 +250,140 @@ func initJIT() {
 	})
 }
 
+// bindMinGWMainThunk works around a real MinGW/GCC ABI compatibility quirk,
+// found empirically while switching this project's JIT engine from MCJIT to
+// LLJIT (see DECISIONS.md's dated "JIT execution: LLJIT" entry): LLVM's
+// backend, when compiling a function literally named `main` for a
+// `*-windows-gnu` target - this project's own host, and the exact target
+// JITTargetMachineBuilder's host-detection picks - auto-inserts a call to
+// `__main()` at that function's very start, the same thing GCC's own
+// frontend does for real MinGW-linked programs, there to run static
+// C++-style constructors via a much older, completely different convention
+// than this project's own `@llvm.global_ctors` (see CODEGEN.md's "Global
+// var initializers" section). MCJIT apparently never took this same code
+// path. This project has no use for whatever `__main` would normally do and
+// never defines it itself, so without this, materializing `main` at all
+// fails outright: "JIT session error: Symbols not found: [ __main ]".
+//
+// `__main` just needs to resolve to *something* harmless - bound here to
+// libc's own `rand` (real, already resolvable via the process-symbol
+// generator attached below, and safe to call with zero arguments and an
+// ignored result, exactly matching the shape of the auto-inserted call
+// site). This is unrelated to actually running llvm_lang.global_init: that
+// still happens through its own explicit Lookup-and-call in jitRunMain,
+// since binding __main to global_init directly wouldn't help any JIT'd
+// function *other* than main itself (this driver only ever calls main, but
+// this package's own test helpers - src/codegen/codegen_test.go's
+// compileAndJIT and friends - routinely call some other, arbitrarily named
+// function directly, which never goes through this __main mechanism at
+// all).
+func bindMinGWMainThunk(jit llvm.LLJIT) error {
+	dg, err := llvm.NewDynamicLibrarySearchGeneratorForProcess(jit.GlobalPrefix())
+	if err != nil {
+		return err
+	}
+	jit.MainJITDylib().AddGenerator(dg)
+
+	randAddr, err := jit.Lookup("rand")
+	if err != nil {
+		return err
+	}
+
+	name := jit.ExecutionSession().Intern("__main")
+	defer name.Release()
+	mu := llvm.AbsoluteSymbols([]llvm.AbsoluteSymbol{
+		{
+			Name: name,
+			Value: llvm.EvaluatedSymbol{
+				Address: randAddr,
+				Flags:   llvm.SymbolFlags{Generic: llvm.SymbolFlagExported | llvm.SymbolFlagCallable},
+			},
+		},
+	})
+	if err := jit.MainJITDylib().Define(mu); err != nil {
+		mu.Dispose()
+		return err
+	}
+	return nil
+}
+
 // jitRunMain JIT-executes mod's `main` (the language's `func main()`, always
 // lowered to a real, parameterless `i32 @main()` - see declareFuncSignature,
 // src/codegen/func.go) and returns its i32 result as a plain int, ready to
 // hand straight to os.Exit.
 //
-// engine.RunStaticConstructors() runs first, unconditionally - a normal
-// linked/loaded program's own C runtime startup sequence would scan and call
-// every entry in `@llvm.global_ctors` (see CODEGEN.md's "Global var
-// initializers" section) before ever reaching main on its own, but MCJIT's
-// execution engine has no such startup sequence at all, so this driver has
-// to trigger it explicitly - the exact call go-llvm's own ExecutionEngine
-// exposes for this. A module with no non-constant globals has no
-// `@llvm.global_ctors` array in the first place (see
-// src/codegen/globalinit.go's genGlobalCtors), so this is always safe to
-// call, not just whenever one happens to exist.
+// This uses go-llvm's LLJIT bindings (third_party/go-llvm/orcjit.go) -
+// ORCv2, LLVM's current JIT infrastructure - rather than the legacy
+// MCJIT-based ExecutionEngine this driver used before (see DECISIONS.md's
+// dated "JIT execution: LLJIT" entry for the full why).
 //
-// This calls through the function's raw address via syscall.SyscallN rather
-// than ExecutionEngine.RunFunction/GenericValue, mirroring
-// src/codegen/codegen_test.go's runInt32 helper exactly (see its doc comment
-// for why: RunFunction hits a real, fatal "Full-featured argument passing
-// not supported yet!" for call shapes past a couple of scalar parameters).
-// `main` always takes zero arguments, so there's no argument-marshaling
-// concern here at all - just the zero-argument call and its i32 result.
+// llvm_lang.global_init (see src/codegen/globalinit.go's genGlobalCtors) is
+// looked up and called directly, exactly like main itself, before main runs.
+// A normal linked/loaded program's own C runtime startup sequence would scan
+// and call every entry in `@llvm.global_ctors` (see CODEGEN.md's "Global var
+// initializers" section) before ever reaching main on its own - unlike
+// MCJIT's ExecutionEngine, LLJIT has no RunStaticConstructors-style call to
+// trigger that automatically, so this looks up the well-known synthesized
+// function by name instead of walking the ctors array at all (the array
+// itself is still emitted, for a real linked/loaded program's benefit - see
+// genGlobalCtors). A module with no non-constant globals has no such
+// function to find in the first place, so a failed Lookup here just means
+// there was nothing to run, not a real error.
 //
-// Module disposal: NewExecutionEngine takes ownership of mod.LLVM the moment
-// it succeeds, so mod.Dispose() (which would call mod.LLVM.Dispose() itself)
-// must never run afterward - that's a double free (see
-// src/codegen/codegen_test.go's compileAndJIT doc comment, which hit exactly
-// this). Once the engine exists, only the engine and then the owning
-// Context get disposed, in that order, and never mod.Dispose() itself.
+// This calls through the resolved address via syscall.SyscallN, same as
+// before LLJIT.Lookup hands back a raw address exactly like
+// ExecutionEngine.GetFunctionAddress did, and actually invoking it is
+// deliberately out of scope for either JIT engine's own API (see orcjit.go's
+// own doc comment on Lookup) - so this driver still brings its own call
+// mechanism, unchanged. `main` always takes zero arguments, so there's no
+// argument-marshaling concern here at all.
+//
+// Module/context disposal: wrapping mod.Ctx in a ThreadSafeContext and
+// mod.LLVM in a ThreadSafeModule (see orcjit.go) transfers ownership of both
+// to jit the moment AddLLVMIRModule succeeds - mod.Dispose() must never run
+// afterward, that's a double free. Unlike MCJIT (which only ever took
+// ownership of the Module, leaving the Context for the caller to dispose
+// separately), a single jit.Dispose() tears down the module and context
+// together, in the correct order - no separate mod.Ctx.Dispose() call needed
+// at all once jit exists.
 func jitRunMain(mod *codegen.Module) (int, error) {
 	initJIT()
 
-	engine, err := llvm.NewExecutionEngine(mod.LLVM)
+	jit, err := llvm.NewLLJIT(llvm.NewLLJITBuilder())
 	if err != nil {
 		mod.Dispose()
-		return 0, fmt.Errorf("failed to create execution engine: %w", err)
+		return 0, fmt.Errorf("failed to create LLJIT instance: %w", err)
 	}
-	engine.RunStaticConstructors()
 
-	addr := engine.GetFunctionAddress("main")
-	if addr == 0 {
-		engine.Dispose()
-		mod.Ctx.Dispose()
+	if err := bindMinGWMainThunk(jit); err != nil {
+		// mod.Ctx/mod.LLVM haven't been wrapped/handed to jit yet at this
+		// point (that only happens below, via AddLLVMIRModule) - mod is
+		// still fully owned here, so it needs its own Dispose alongside
+		// jit's, unlike the AddLLVMIRModule failure branch further down.
+		mod.Dispose()
+		jit.Dispose()
+		return 0, fmt.Errorf("failed to bind __main thunk: %w", err)
+	}
+
+	tsctx := llvm.NewThreadSafeContextFromContext(mod.Ctx)
+	tsm := llvm.NewThreadSafeModule(mod.LLVM, tsctx)
+	if err := jit.AddLLVMIRModule(jit.MainJITDylib(), tsm); err != nil {
+		jit.Dispose()
+		return 0, fmt.Errorf("failed to add module to LLJIT: %w", err)
+	}
+
+	if initAddr, err := jit.Lookup("llvm_lang.global_init"); err == nil {
+		syscall.SyscallN(uintptr(initAddr))
+	}
+
+	addr, err := jit.Lookup("main")
+	if err != nil {
+		jit.Dispose()
 		return 0, fmt.Errorf("no main function found in module")
 	}
 
 	r1, _, _ := syscall.SyscallN(uintptr(addr))
-
-	engine.Dispose()
-	mod.Ctx.Dispose()
+	jit.Dispose()
 
 	return int(int32(uint32(r1))), nil
 }

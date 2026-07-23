@@ -209,7 +209,7 @@ func main() {
 `)
 	jm.runInt32(t, "main")
 
-	ir := jm.mod.LLVM.String()
+	ir := jm.ir
 	for _, want := range []string{
 		`call i32 (ptr, ...) @printf(ptr @.fmt.int`,
 		`call i32 (ptr, ...) @printf(ptr @.fmt.str`,
@@ -259,7 +259,7 @@ func main() {
 `)
 	jm.runInt32(t, "main")
 
-	ir := jm.mod.LLVM.String()
+	ir := jm.ir
 	for _, want := range []string{
 		`call i32 (ptr, ...) @printf(ptr @.fmt.lbrace)`,
 		`call i32 (ptr, ...) @printf(ptr @.fmt.int.bare`,

@@ -25,16 +25,23 @@ import (
 // against anything else - it's simply the least surprising value to pick.
 const globalCtorPriority = 65535
 
-// genGlobalCtors builds one synthesized, parameterless, internal-linkage
-// function - every non-constant global's real initializer expression
-// evaluated and stored, in g.globalInits' own order (source declaration
-// order across the whole package - see CODEGEN.md's "Global var
+// genGlobalCtors builds one synthesized, parameterless function
+// (`llvm_lang.global_init`) - every non-constant global's real initializer
+// expression evaluated and stored, in g.globalInits' own order (source
+// declaration order across the whole package - see CODEGEN.md's "Global var
 // initializers" section for why this round deliberately scopes ordering this
 // way rather than a full dependency-graph topological sort) - and registers
 // it into `@llvm.global_ctors`. A no-op (no function built, no array
 // declared at all) whenever every global in the package turned out to be
 // compile-time constant, so an ordinary program with no non-constant globals
 // gets no trace of this mechanism in its IR.
+//
+// This function keeps AddFunction's own default linkage (external), rather
+// than the private linkage every other synthesized helper in this package
+// uses (see expr.go/runtime.go) - deliberately: `cmd/llvmc`'s JIT driver
+// looks it up by this exact name and calls it directly (see CODEGEN.md's
+// "Global var initializers" section), which a private symbol has no name
+// for at all.
 //
 // Must run after every global's own LLVM value (genGlobalVarDecl) and every
 // function/constructor signature (declareFuncSignature/
@@ -48,7 +55,6 @@ func (g *Generator) genGlobalCtors() {
 
 	fnType := llvm.FunctionType(g.voidTy, nil, false)
 	fn := llvm.AddFunction(g.mod, "llvm_lang.global_init", fnType)
-	fn.SetLinkage(llvm.PrivateLinkage)
 
 	// This is the exact same per-function generation state genFuncBody/
 	// genConstructorBody/genLambdaFunc each set up before lowering a body of

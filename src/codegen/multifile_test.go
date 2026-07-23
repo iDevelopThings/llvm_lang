@@ -1,6 +1,7 @@
 package codegen
 
 import (
+	"syscall"
 	"testing"
 
 	"llvm_lang/src/ast"
@@ -52,26 +53,50 @@ func compilePackageSrc(t *testing.T, files [][2]string) *Module {
 	return mod
 }
 
-// compilePackageAndJIT is compilePackageSrc handed to a live ExecutionEngine
-// - see compileAndJIT's own doc comment for the disposal ordering this
-// mirrors exactly (an engine takes ownership of its module; a later
-// mod.Dispose() would double-free it).
+// compilePackageAndJIT is compilePackageSrc handed to a live LLJIT instance -
+// see compileAndJIT's own doc comment for the ownership/disposal ordering
+// and global_init handling this mirrors exactly (an LLJIT instance takes
+// ownership of its module/context; a later mod.Dispose() would double-free
+// them).
 func compilePackageAndJIT(t *testing.T, files [][2]string) *jitModule {
 	t.Helper()
 	mod := compilePackageSrc(t, files)
+	ir := mod.LLVM.String()
 	initJIT()
 
-	engine, err := llvm.NewExecutionEngine(mod.LLVM)
+	jit, err := llvm.NewLLJIT(llvm.NewLLJITBuilder())
 	if err != nil {
-		t.Fatalf("NewExecutionEngine: %v", err)
+		t.Fatalf("NewLLJIT: %v", err)
 	}
+
+	if err := bindMinGWMainThunk(jit); err != nil {
+		// mod isn't wrapped/handed to jit yet at this point (that happens
+		// below, via AddLLVMIRModule) - still fully owned here.
+		mod.Dispose()
+		jit.Dispose()
+		t.Fatalf("bindMinGWMainThunk: %v", err)
+	}
+
+	tsctx := llvm.NewThreadSafeContextFromContext(mod.Ctx)
+	tsm := llvm.NewThreadSafeModule(mod.LLVM, tsctx)
+	if err := jit.AddLLVMIRModule(jit.MainJITDylib(), tsm); err != nil {
+		jit.Dispose()
+		t.Fatalf("AddLLVMIRModule: %v", err)
+	}
+
+	if initAddr, err := jit.Lookup("llvm_lang.global_init"); err == nil {
+		syscall.SyscallN(uintptr(initAddr))
+	}
+
 	t.Cleanup(func() {
-		engine.Dispose()
-		mod.Ctx.Dispose()
+		if err := jit.Dispose(); err != nil {
+			t.Errorf("LLJIT.Dispose: %v", err)
+		}
 	})
 	return &jitModule{
-		mod:    mod,
-		engine: engine,
+		mod: mod,
+		jit: jit,
+		ir:  ir,
 	}
 }
 
