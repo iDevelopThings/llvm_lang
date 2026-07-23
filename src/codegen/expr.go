@@ -333,11 +333,16 @@ func (g *Generator) genFuncLit(n ast.NodeIndex) llvm.Value {
 //
 // Generating this literal's own body means temporarily replacing every one
 // of Generator's per-function-frame fields (curFn/entryBlock/locals/
-// loopStack/curFunc/curReceiver/curCtxPtr/curCaptureIndex/curCaptureTy) with
-// this literal's own fresh state, and the builder's own current insert
-// block with this literal's own entry block - saved in plain local
-// variables and restored once this literal's body is fully generated, the
-// same save-in-a-local/restore-after-recursing shape sema/typecheck.go's
+// loopStack/destructors/curReceiver/curCtxPtr/curCaptureIndex/curCaptureTy)
+// with this literal's own fresh state - beginSyntheticFunc (func.go) does
+// that reset and hands back a restore func for exactly this call site's own
+// need, since it's the one place this reset genuinely nests *inside*
+// another function's still-in-progress generation rather than starting a
+// brand new one from nothing. curFunc and the builder's own current insert
+// block aren't part of that shared reset (each is this call site's own
+// business logic/bookkeeping, not shared "reset to blank" state) so they're
+// still saved in plain locals and restored here directly, the same
+// save-in-a-local/restore-after-recursing shape sema/typecheck.go's
 // checkFuncLit already uses for curFunc, one layer up. Since this is an
 // ordinary (non-reentrant-within-itself) function call, Go's own call stack
 // already handles arbitrary nesting depth for free - a FuncLit nested inside
@@ -366,19 +371,9 @@ func (g *Generator) genLambdaFunc(n ast.NodeIndex, captures []*sema.Symbol, ctxT
 	fn := llvm.AddFunction(g.mod, name, fnType)
 	fn.SetLinkage(llvm.PrivateLinkage)
 
-	savedFn, savedEntry, savedLocals := g.curFn, g.entryBlock, g.locals
-	savedLoopStack, savedFunc, savedReceiver := g.loopStack, g.curFunc, g.curReceiver
-	savedCtxPtr, savedCaptureIndex, savedCaptureTy := g.curCtxPtr, g.curCaptureIndex, g.curCaptureTy
-	savedDestructors := g.destructors
+	savedFunc := g.curFunc
 	savedBB := g.builder.GetInsertBlock()
-
-	g.curFn = fn
-	g.entryBlock = g.ctx.AddBasicBlock(fn, "entry")
-	g.builder.SetInsertPointAtEnd(g.entryBlock)
-	g.locals = make(map[*sema.Symbol]llvm.Value)
-	g.loopStack = nil
-	g.destructors = nil
-	g.curReceiver = llvm.Value{}
+	restore := g.beginSyntheticFunc(fn)
 
 	g.curCtxPtr = fn.Param(0)
 	g.curCaptureTy = ctxTy
@@ -405,10 +400,8 @@ func (g *Generator) genLambdaFunc(n ast.NodeIndex, captures []*sema.Symbol, ctxT
 
 	g.finishBody(body)
 
-	g.curFn, g.entryBlock, g.locals = savedFn, savedEntry, savedLocals
-	g.loopStack, g.curFunc, g.curReceiver = savedLoopStack, savedFunc, savedReceiver
-	g.curCtxPtr, g.curCaptureIndex, g.curCaptureTy = savedCtxPtr, savedCaptureIndex, savedCaptureTy
-	g.destructors = savedDestructors
+	g.curFunc = savedFunc
+	restore()
 	g.builder.SetInsertPointAtEnd(savedBB)
 
 	return fn

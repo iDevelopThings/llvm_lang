@@ -183,12 +183,14 @@ type Generator struct {
 	dynArrTy llvm.Type
 
 	// mapCtrlTy is a map's (`map[K]V`) control-block LLVM representation:
-	// the literal struct {ptr, i32, i32} = {bucketsPtr, count, bucketCount} -
-	// see maps.go's own top-of-file doc comment and CODEGEN.md's "Maps"
-	// section. A map's own runtime value is a single `ptr` (like TypePointer
-	// - see llvmType) pointing at one of these, arena-allocated once by
-	// genMapMake and never moved thereafter - only its buckets/bucketCount
-	// fields change in place as the table grows (genMapGrowIfNeeded).
+	// the literal struct {ptr, i32, i32, i32} = {bucketsPtr, count,
+	// bucketCount, tombstoneCount} - see maps.go's own top-of-file doc
+	// comment and CODEGEN.md's "Maps" section. A map's own runtime value is
+	// a single `ptr` (like TypePointer - see llvmType) pointing at one of
+	// these, arena-allocated once by genMapMake and never moved thereafter -
+	// only its buckets/count/bucketCount/tombstoneCount fields change in
+	// place as the table grows or entries are removed (genMapGrowIfNeeded,
+	// genMapRemoveCall).
 	mapCtrlTy llvm.Type
 
 	// fmtMapNilTrap is the cached format-string global for the "assignment
@@ -248,8 +250,9 @@ type Generator struct {
 
 	// destructors is the current function's flat, function-scoped stack of
 	// still-in-scope locals/parameters whose own declared type has its own
-	// destructor - reset at the start of every function/constructor/lambda
-	// body (see genFuncBody/genConstructorBody/genLambdaFunc), pushed onto by
+	// destructor - reset at the start of every function/constructor/
+	// destructor/synthesized-init/lambda body (see beginSyntheticFunc,
+	// func.go), pushed onto by
 	// pushDestructorEntry (func.go) the moment such a local/parameter's
 	// storage is initialized, and unwound (see unwindDestructorsTo, stmt.go)
 	// at every real scope exit this feature fires at. A flat slice rather
@@ -261,7 +264,8 @@ type Generator struct {
 	// top of the flat slice itself.
 	destructors []destructorEntry
 
-	// locals is reset at the start of every function (see genFuncBody) -
+	// locals is reset at the start of every function (see beginSyntheticFunc,
+	// func.go) -
 	// every VarDecl/ShortVarDecl/Param declaration node produces its own
 	// distinct *sema.Symbol (see sema/resolve.go's declareLocal), so a flat
 	// map needs no explicit scope-stack to avoid collisions between two
@@ -273,13 +277,14 @@ type Generator struct {
 	strLiterals map[string]llvm.Value
 
 	// curFn/entryBlock/curFunc/loopStack/curReceiver are all per-function
-	// generation state, set at the start of genFuncBody (and, for
-	// curReceiver, cleared for a non-method) and read by whatever's being
-	// generated inside that function's body. genLambdaFunc saves and
-	// restores every one of these (plus curCtxPtr/curCaptureIndex/
-	// curCaptureTy just below) around generating a nested FuncLit's own
-	// body, so a lambda's own frame never bleeds into its enclosing
-	// function's once control returns to it - see its own doc comment.
+	// generation state, reset via beginSyntheticFunc (func.go) at the start
+	// of every function/constructor/destructor/synthesized-init body -
+	// curFunc (untouched there) and curReceiver (reset only to "no
+	// receiver") are each then set by the call site itself, being
+	// call-site-specific business logic rather than shared reset state.
+	// genLambdaFunc calls beginSyntheticFunc's own returned restore func
+	// (plus separately saving/restoring curFunc and the builder's insert
+	// block) around a nested FuncLit's own body - see its own doc comment.
 	curFn       llvm.Value
 	entryBlock  llvm.BasicBlock
 	curFunc     *funcCtx

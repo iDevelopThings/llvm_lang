@@ -11,8 +11,6 @@
 package codegen
 
 import (
-	"llvm_lang/src/sema"
-
 	"tinygo.org/x/go-llvm"
 )
 
@@ -89,28 +87,21 @@ func (g *Generator) buildGlobalInitFn() (llvm.Value, bool) {
 	fnType := llvm.FunctionType(g.voidTy, nil, false)
 	fn := llvm.AddFunction(g.mod, "llvm_lang.global_init", fnType)
 
-	// This is the exact same per-function generation state genFuncBody/
-	// genConstructorBody/genLambdaFunc each set up before lowering a body of
-	// their own (see codegen.go's Generator doc comment) - a synthesized init
-	// function is, as far as genExpr/genStmt/storeValueInto are concerned,
-	// just one more ordinary function body to generate: an entry block, a
-	// fresh (empty) locals map, no enclosing loop/receiver/lambda-capture
-	// context, and a funcCtx that's neither main nor declares a return type
-	// (matching a constructor's own "always void, never main" shape).
-	g.curFn = fn
-	g.entryBlock = g.ctx.AddBasicBlock(fn, "entry")
-	g.builder.SetInsertPointAtEnd(g.entryBlock)
-	g.locals = make(map[*sema.Symbol]llvm.Value)
-	g.loopStack = nil
-	g.destructors = nil
-	g.curReceiver = llvm.Value{}
+	// beginSyntheticFunc (func.go) sets up the exact same per-function
+	// generation state genFuncBody/genConstructorBody/genLambdaFunc each need
+	// before lowering a body of their own (see codegen.go's Generator doc
+	// comment) - a synthesized init function is, as far as genExpr/genStmt/
+	// storeValueInto are concerned, just one more ordinary function body to
+	// generate: an entry block, a fresh (empty) locals map, no enclosing
+	// loop/receiver/lambda-capture context. Only curFunc (neither main nor
+	// declaring a return type, matching a constructor's own "always void,
+	// never main" shape) is this call site's own business logic, set right
+	// after.
+	g.beginSyntheticFunc(fn)
 	g.curFunc = &funcCtx{
 		isMain:    false,
 		hasReturn: false,
 	}
-	g.curCtxPtr = llvm.Value{}
-	g.curCaptureIndex = nil
-	g.curCaptureTy = llvm.Type{}
 
 	for _, entry := range g.globalInits {
 		g.enter(entry.tree)

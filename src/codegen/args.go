@@ -19,8 +19,6 @@
 package codegen
 
 import (
-	"llvm_lang/src/sema"
-
 	"tinygo.org/x/go-llvm"
 )
 
@@ -99,23 +97,15 @@ func (g *Generator) buildArgsInitFn() llvm.Value {
 	fn := llvm.AddFunction(g.mod, "llvm_lang.args_init", fnType)
 	fn.SetLinkage(llvm.PrivateLinkage)
 
-	// The exact same per-function generation state genFuncBody/
-	// buildGlobalInitFn already set up for a synthesized/ordinary function
-	// body of their own - see codegen.go's Generator doc comment.
-	g.curFn = fn
-	g.entryBlock = g.ctx.AddBasicBlock(fn, "entry")
-	g.builder.SetInsertPointAtEnd(g.entryBlock)
-	g.locals = make(map[*sema.Symbol]llvm.Value)
-	g.loopStack = nil
-	g.destructors = nil
-	g.curReceiver = llvm.Value{}
+	// beginSyntheticFunc (func.go) sets up the exact same per-function
+	// generation state genFuncBody/buildGlobalInitFn already need for a
+	// synthesized/ordinary function body of their own - see codegen.go's
+	// Generator doc comment.
+	g.beginSyntheticFunc(fn)
 	g.curFunc = &funcCtx{
 		isMain:    false,
 		hasReturn: false,
 	}
-	g.curCtxPtr = llvm.Value{}
-	g.curCaptureIndex = nil
-	g.curCaptureTy = llvm.Type{}
 
 	argc := g.builder.CreateLoad(g.i32Ty, argcGlobal, "")
 	argv := g.builder.CreateLoad(g.ptrTy, argvGlobal, "")

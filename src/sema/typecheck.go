@@ -475,23 +475,7 @@ func (c *checker) funcSigForDecl(decl ast.NodeIndex) funcSignature {
 }
 
 func (c *checker) computeFuncSig(decl ast.NodeIndex) funcSignature {
-	paramList := c.tree.FuncParamList(decl)
-	returnTypeNode := c.tree.FuncReturnType(decl)
-
-	paramNodes := c.tree.Children(paramList)
-	params := make([]Type, len(paramNodes))
-	for i, param := range paramNodes {
-		params[i] = c.declType(param)
-	}
-
-	ret := voidType
-	if returnTypeNode != ast.InvalidNode {
-		ret = c.typeFromNode(returnTypeNode)
-	}
-	return funcSignature{
-		Params: params,
-		Return: ret,
-	}
+	return c.buildSigFromParamListAndReturnType(c.tree.FuncParamList(decl), c.tree.FuncReturnType(decl), nil)
 }
 
 // checkExternFuncDecl type-checks decl's (an ExternFuncDecl's) own signature
@@ -512,32 +496,48 @@ func (c *checker) checkExternFuncDecl(decl ast.NodeIndex) {
 }
 
 // computeExternFuncSig builds decl's (an ExternFuncDecl's) signature from its
-// own [name, paramList, returnType] shape (see ast.Node's doc comment) - the
-// ExternFuncDecl counterpart to computeFuncSig, reusing the same declType/
-// typeFromNode helpers (a Param node's shape is identical regardless of
-// whether its parent is a FuncDecl or an ExternFuncDecl, so declType(param)
-// needs no changes of its own to serve both). The one thing genuinely new
-// here: every parameter type and the return type must be a type this round's
-// FFI mechanism can actually pass across a real C ABI boundary (see
-// checkExternType) - a restriction an ordinary FuncDecl's own signature never
-// needed, since an ordinary call/return never has to cross out of this
-// compiler's own representation into a foreign calling convention.
+// own [name, paramList, returnType] shape (see ast.Node's doc comment) -
+// shares computeFuncSig's own buildSigFromParamListAndReturnType logic, with
+// one thing layered on top: every parameter type and the return type must
+// also be a type this round's FFI mechanism can pass across a real C ABI
+// boundary (checkExternType), passed through as the validate hook below - an
+// ordinary FuncDecl's own signature never needed that.
 func (c *checker) computeExternFuncSig(decl ast.NodeIndex) funcSignature {
-	paramList := c.tree.ExternFuncParamList(decl)
-	returnTypeNode := c.tree.ExternFuncReturnType(decl)
+	return c.buildSigFromParamListAndReturnType(
+		c.tree.ExternFuncParamList(decl),
+		c.tree.ExternFuncReturnType(decl),
+		c.checkExternType,
+	)
+}
 
+// buildSigFromParamListAndReturnType builds a funcSignature from paramList's
+// own Param children (via declType) and returnTypeNode (via typeFromNode,
+// defaulting to voidType when absent) - the shape computeFuncSig and
+// computeExternFuncSig both need, since a FuncDecl's and an ExternFuncDecl's
+// own [paramList, returnType] children are structurally identical even
+// though their surrounding node shapes differ.
+//
+// validate, when non-nil, is called once per parameter and once for the
+// return type (skipped when there's no declared return type) with that
+// position's Type and a "parameter"/"return" label - computeExternFuncSig's
+// own extra checkExternType restriction; computeFuncSig passes nil.
+func (c *checker) buildSigFromParamListAndReturnType(paramList, returnTypeNode ast.NodeIndex, validate func(n ast.NodeIndex, t Type, what string)) funcSignature {
 	paramNodes := c.tree.Children(paramList)
 	params := make([]Type, len(paramNodes))
 	for i, param := range paramNodes {
 		t := c.declType(param)
 		params[i] = t
-		c.checkExternType(param, t, "parameter")
+		if validate != nil {
+			validate(param, t, "parameter")
+		}
 	}
 
 	ret := voidType
 	if returnTypeNode != ast.InvalidNode {
 		ret = c.typeFromNode(returnTypeNode)
-		c.checkExternType(returnTypeNode, ret, "return")
+		if validate != nil {
+			validate(returnTypeNode, ret, "return")
+		}
 	}
 	return funcSignature{
 		Params: params,
@@ -570,10 +570,15 @@ func (c *checker) checkExternType(n ast.NodeIndex, t Type, what string) {
 // into; TypePointer alone already covers `**T` and deeper exactly the same
 // way, since each nesting level is still just TypePointer at its own Kind.
 // Explicitly excluded: string (a {ptr,i32} fat struct, not a real C ABI
-// shape), a struct type by value, a dynamic array (`[]T`, also a fat
-// struct), and a function type (a fat closure pointer) - none of these have
-// a well-defined "just pass this to a real C function" representation in
-// this compiler yet, and solving that is explicitly out of scope this round.
+// shape), a struct type by value, a function type (a fat closure pointer),
+// and any array type - both a dynamic array (`[]T`, itself a fat struct) and
+// a fixed-size array (`[N]T`, which has no well-defined by-value C ABI shape
+// in this compiler either: unlike a scalar, passing one by value would need
+// this round to pick an actual aggregate-by-value lowering, which it simply
+// doesn't implement yet) fall through the same `default: false` case below,
+// with no dedicated case of their own. None of these have a well-defined
+// "just pass this to a real C function" representation in this compiler
+// yet, and solving that is explicitly out of scope this round.
 func isValidExternType(t Type) bool {
 	switch t.Kind {
 	case TypeI8, TypeI16, TypeI32, TypeI64, TypeF32, TypeF64, TypeBool, TypePointer:
@@ -1011,25 +1016,48 @@ func (c *checker) structCopyable(info *StructInfo) bool {
 
 // typeIsNonCopyable reports whether a value of type t can never be freely
 // duplicated (see LANGUAGE.md's "Destructors" section) - a struct that isn't
-// StructInfo.Copyable, or a fixed-size array of a non-copyable element type
-// (propagating the exact same "one field is enough to taint the whole
-// aggregate" rule StructInfo.Copyable itself already applies one level up).
+// StructInfo.Copyable, or a fixed-size array of a non-copyable element type.
 // A dynamic array element's own copyability is deliberately not consulted
-// here at all - see arrayTypeFromNode's own dedicated diagnostic instead,
-// which rejects a non-copyable dynamic-array element type outright rather
-// than needing this helper to reason about slice growth/aliasing.
+// here - see arrayTypeFromNode's own dedicated diagnostic instead.
+//
+// Forces every struct type this walk reaches through c.structCopyable first
+// (memoizing Copyable, respecting its cycle guard) before delegating the
+// actual answer to the package-level IsNonCopyable below - mid-checking, a
+// struct's Copyable may not be memoized yet, unlike once codegen runs (see
+// IsNonCopyable's own doc comment).
 func (c *checker) typeIsNonCopyable(t Type) bool {
+	switch t.Kind {
+	case TypeStruct:
+		if t.Struct != nil {
+			c.structCopyable(t.Struct) // force Copyable to be memoized
+		}
+	case TypeArray:
+		if !t.Dynamic && t.Elem != nil {
+			c.typeIsNonCopyable(*t.Elem) // force any nested struct's Copyable too
+		}
+	}
+	return IsNonCopyable(t)
+}
+
+// IsNonCopyable is typeIsNonCopyable's package-level counterpart, for a
+// caller with no *checker to force a not-yet-memoized Copyable through (see
+// codegen/stmt.go's genForStmt) - safe once every struct it's asked about
+// already has Copyable computed by a prior, complete Check/CheckPackage
+// pass, the same assumption every other codegen lookup into sema's output
+// already makes. An unmemoized Copyable reads back false here, folding into
+// "non-copyable" - the same conservative direction as above.
+func IsNonCopyable(t Type) bool {
 	switch t.Kind {
 	case TypeStruct:
 		if t.Struct == nil {
 			return false
 		}
-		return !c.structCopyable(t.Struct)
+		return !t.Struct.Copyable
 	case TypeArray:
 		if t.Dynamic || t.Elem == nil {
 			return false
 		}
-		return c.typeIsNonCopyable(*t.Elem)
+		return IsNonCopyable(*t.Elem)
 	default:
 		return false
 	}

@@ -750,9 +750,9 @@ p.field, arr[0] = divide(20, 4)   // targets don't have to be plain idents
 ```
 
 In both forms, **the right-hand side must be exactly one call expression**
-whose callee's own signature returns exactly as many values as there are
-targets on the left - no mixing with other expressions, no partial
-application:
+(or, for a 2-target destructuring, a map index - see "Maps" above) whose
+callee's own signature returns exactly as many values as there are targets
+on the left - no mixing with other expressions, no partial application:
 
 ```go
 a, b := f(), g()      // error: right-hand side of a short variable
@@ -1613,6 +1613,25 @@ functions, struct-by-value ABI marshaling/rename syntax for the linked symbol
 name, and any platform other than Windows. See `DECISIONS.md` for why this
 round is scoped this narrowly, and `CODEGEN.md` for how an extern func
 declaration actually lowers.
+
+**A caller obligation this restriction doesn't cover: binding a real Win32
+`BOOL`-returning API as this language's `bool`.** This language's own `bool`
+lowers to a single LLVM `i1` (see `CODEGEN.md`) - exactly one bit. A real
+Win32 `BOOL` (as `QueryPerformanceCounter`/`QueryPerformanceFrequency` above
+both are, and as `std/time` binds them) is actually a 32-bit `int` whose own
+ABI-documented contract is only "nonzero means TRUE", never "exactly bit 0
+is set" - a genuine, if rare in practice, real-world `BOOL` implementation
+is free to return any nonzero value at all. Declaring such a function's
+return type as this language's `bool` truncates that real 32-bit value down
+to its own single low bit, so a real result like `2` or `256` would silently
+read back as `false` here. This isn't a bug in this compiler today - every
+actual Win32 API this project currently binds this way happens to only ever
+return exactly `0` or `1` - but it's a real caller obligation, not something
+`extern func`'s own type-checking catches: before binding an external
+function whose true return convention is "any nonzero value means true"
+rather than "exactly 0 or 1" as this language's `bool`, verify the real
+implementation's actual observed return values first, or bind its return
+type as `i32` instead and compare against zero explicitly at the call site.
 
 ## Standard library
 

@@ -120,6 +120,47 @@ func (g *Generator) declareExternFuncSignature(decl ast.NodeIndex) {
 	}
 }
 
+// beginSyntheticFunc resets Generator's per-function generation fields
+// (curFn/entryBlock/locals/loopStack/destructors, plus curReceiver/curCtxPtr/
+// curCaptureIndex/curCaptureTy back to "no receiver, no lambda capture
+// context") to lower fn's own body from scratch, leaving fn's own fresh
+// entry block as the builder's current insert point - the reset shape
+// genFuncBody/genConstructorBody/genDestructorBody/buildGlobalInitFn
+// (globalinit.go)/buildArgsInitFn (args.go)/genLambdaFunc (expr.go) all need,
+// deduplicated here rather than six hand-copies that could drift.
+//
+// Returns a restore func undoing this. Every call site but genLambdaFunc can
+// ignore it - an ordinary top-level body never depends on what the previous
+// one left behind. Only genLambdaFunc's own body generation nests *inside*
+// another function's still-in-progress generation, so it alone calls
+// restore once its literal's body is done (curFunc and the builder's saved
+// insert block are genLambdaFunc's own to save/restore alongside this, since
+// each is set to a real, call-site-specific value right after this returns).
+func (g *Generator) beginSyntheticFunc(fn llvm.Value) (restore func()) {
+	savedFn, savedEntry, savedLocals := g.curFn, g.entryBlock, g.locals
+	savedLoopStack, savedDestructors := g.loopStack, g.destructors
+	savedReceiver := g.curReceiver
+	savedCtxPtr, savedCaptureIndex, savedCaptureTy := g.curCtxPtr, g.curCaptureIndex, g.curCaptureTy
+
+	g.curFn = fn
+	g.entryBlock = g.ctx.AddBasicBlock(fn, "entry")
+	g.builder.SetInsertPointAtEnd(g.entryBlock)
+	g.locals = make(map[*sema.Symbol]llvm.Value)
+	g.loopStack = nil
+	g.destructors = nil
+	g.curReceiver = llvm.Value{}
+	g.curCtxPtr = llvm.Value{}
+	g.curCaptureIndex = nil
+	g.curCaptureTy = llvm.Type{}
+
+	return func() {
+		g.curFn, g.entryBlock, g.locals = savedFn, savedEntry, savedLocals
+		g.loopStack, g.destructors = savedLoopStack, savedDestructors
+		g.curReceiver = savedReceiver
+		g.curCtxPtr, g.curCaptureIndex, g.curCaptureTy = savedCtxPtr, savedCaptureIndex, savedCaptureTy
+	}
+}
+
 // genFuncBody lowers decl's body, given its signature already declared (see
 // declareFuncSignature). Every VarDecl/ShortVarDecl/Param in the body gets a
 // stack slot via createEntryAlloca; a method's receiver needs none of its
@@ -138,15 +179,9 @@ func (g *Generator) genFuncBody(decl ast.NodeIndex) {
 	}
 
 	entry := g.funcs[g.info.Refs[nameNode]]
-	g.curFn = entry.fn
-	g.entryBlock = g.ctx.AddBasicBlock(g.curFn, "entry")
-	g.builder.SetInsertPointAtEnd(g.entryBlock)
-	g.locals = make(map[*sema.Symbol]llvm.Value)
-	g.loopStack = nil
-	g.destructors = nil
+	g.beginSyntheticFunc(entry.fn)
 
 	offset := 0
-	g.curReceiver = llvm.Value{}
 	if receiver != ast.InvalidNode {
 		g.curReceiver = g.curFn.Param(0)
 		offset = 1
@@ -305,12 +340,7 @@ func (g *Generator) genConstructorBody(ctor ast.NodeIndex) {
 	paramListNode := g.tree.ConstructorParamList(ctor)
 	body := g.tree.ConstructorBody(ctor)
 
-	g.curFn = entry.fn
-	g.entryBlock = g.ctx.AddBasicBlock(g.curFn, "entry")
-	g.builder.SetInsertPointAtEnd(g.entryBlock)
-	g.locals = make(map[*sema.Symbol]llvm.Value)
-	g.loopStack = nil
-	g.destructors = nil
+	g.beginSyntheticFunc(entry.fn)
 	g.curReceiver = g.curFn.Param(0)
 
 	for i, paramNode := range g.tree.Children(paramListNode) {
@@ -369,12 +399,7 @@ func (g *Generator) genDestructorBody(dtor ast.NodeIndex) {
 	entry := g.dtors[sym.StructInfo]
 	body := g.tree.DestructorBody(dtor)
 
-	g.curFn = entry.fn
-	g.entryBlock = g.ctx.AddBasicBlock(g.curFn, "entry")
-	g.builder.SetInsertPointAtEnd(g.entryBlock)
-	g.locals = make(map[*sema.Symbol]llvm.Value)
-	g.loopStack = nil
-	g.destructors = nil
+	g.beginSyntheticFunc(entry.fn)
 	g.curReceiver = g.curFn.Param(0)
 
 	g.curFunc = &funcCtx{

@@ -577,36 +577,6 @@ func (g *Generator) genIfStmt(n ast.NodeIndex) bool {
 	return terminates
 }
 
-// typeIsNonCopyable is codegen's own narrow copy of sema/typecheck.go's
-// (*checker).typeIsNonCopyable (~line 781) - that method is unexported on
-// *checker and unreachable from this package, so genForStmt's per-iteration
-// loop-variable fix (below) needs its own equivalent to decide whether
-// introducing an implicit load+store "copy" of a value would silently
-// violate this language's "non-copyable, zero exceptions" rule (see
-// LANGUAGE.md's "Destructors" section). Deliberately only covers the two
-// cases that fix needs to guard against - a struct that isn't
-// StructInfo.Copyable, or a fixed-size array of a (recursively) non-copyable
-// element type - not a general restatement of sema's own copyability rules.
-//
-// A struct whose StructInfo.Copyable was never actually memoized (see
-// (*checker).structCopyable) reads back as its zero value, false, here -
-// which folds into "non-copyable" (the conservative, safe direction: this
-// only ever suppresses the optimization below, never wrongly enables an
-// implicit copy of something this language forbids copying).
-func (g *Generator) typeIsNonCopyable(t sema.Type) bool {
-	switch t.Kind {
-	case sema.TypeStruct:
-		return t.Struct != nil && !t.Struct.Copyable
-	case sema.TypeArray:
-		if t.Dynamic || t.Elem == nil {
-			return false
-		}
-		return g.typeIsNonCopyable(*t.Elem)
-	default:
-		return false
-	}
-}
-
 // genForStmt lowers all three Go-style for-loop forms uniformly - bare
 // `for {}`, cond-only `for cond {}`, and the full `for init; cond; post {}` -
 // since ForStmt's [init, cond, post, body] shape already represents every
@@ -670,11 +640,17 @@ func (g *Generator) typeIsNonCopyable(t sema.Type) bool {
 //     abandoned fresh slot is simply unreferenced arena garbage, consistent
 //     with this project's already-documented arena philosophy).
 //
-// Guarded by typeIsNonCopyable above: a non-copyable loop variable (a
+// Guarded by sema.IsNonCopyable below: a non-copyable loop variable (a
 // disallowed shape today - AGENTS.md's Types section - but guarded
 // defensively regardless) keeps today's exact shared-slot behavior, since an
 // implicit copy here would silently violate this language's "non-copyable,
-// zero exceptions" rule.
+// zero exceptions" rule. Reuses sema's own package-level IsNonCopyable
+// (src/sema/typecheck.go) rather than a hand-maintained codegen-local copy -
+// safe to call unconditionally here since codegen only ever runs on a tree
+// that already passed a complete sema.Check/sema.CheckPackage pass, which
+// has already memoized every struct type's own Copyable field (see
+// IsNonCopyable's own doc comment for exactly why that assumption is what
+// makes it safe here but not mid-checking).
 //
 // This eligibility switch also only ever matches a single-name ShortVarDecl/
 // VarDecl init clause - a multi-return destructuring init
@@ -711,7 +687,7 @@ func (g *Generator) genForStmt(n ast.NodeIndex) bool {
 			sym := g.info.Refs[nameNode]
 			if sym.Captured {
 				t := g.info.Types[initNode]
-				if !g.typeIsNonCopyable(t) {
+				if !sema.IsNonCopyable(t) {
 					loopVarSym = sym
 					loopVarOrigAddr = g.locals[sym]
 					loopVarType = g.llvmType(t)
