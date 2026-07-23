@@ -229,3 +229,66 @@ func TestMatchStmtSubjectCompositeLitAmbiguityGuard(t *testing.T) {
 		t.Errorf("subject kind = %s, want Ident (not a composite literal)", kind)
 	}
 }
+
+// TestMatchArmMultiPatternShape covers this round's generalization of
+// MatchArm from a fixed [pattern, body] shape to variable-arity
+// [pattern0, ..., patternN, body] (see ast.Node's own MatchArm doc comment
+// and LANGUAGE.md's "match" section's plain-value-pattern extension): a
+// comma-separated pattern list (Go's own `case a, b, c:` shape), a
+// single-pattern arm (still legal, still exactly one pattern), and the
+// wildcard - each arm's own MatchArmPatterns/MatchArmBody must slice the
+// children correctly regardless of how many leading patterns precede the
+// trailing body.
+func TestMatchArmMultiPatternShape(t *testing.T) {
+	src := `func f() {
+	match x {
+		1, 2, 3 => {
+		}
+		4 => {
+		}
+		_ => {
+		}
+	}
+}`
+	p := New(lexer.NewFile("t.ll", src))
+	n := p.parseTopLevelItem()
+	if p.diags.HasErrors() {
+		t.Fatalf("unexpected parse errors: %v", p.diags.All())
+	}
+	body := p.tree.FuncBody(n)
+	matchStmt := p.tree.Child(body, 0)
+	arms := p.tree.MatchArms(matchStmt)
+	if len(arms) != 3 {
+		t.Fatalf("len(arms) = %d, want 3", len(arms))
+	}
+
+	// Arm 0: 1, 2, 3 - three NumberLit patterns sharing one body.
+	pats0 := p.tree.MatchArmPatterns(arms[0])
+	if len(pats0) != 3 {
+		t.Fatalf("arm 0: len(MatchArmPatterns) = %d, want 3", len(pats0))
+	}
+	for i, want := range []string{"1", "2", "3"} {
+		if got := p.tree.Text(pats0[i]); got != want {
+			t.Errorf("arm 0 pattern %d = %q, want %q", i, got, want)
+		}
+	}
+	if kind := p.tree.Nodes[p.tree.MatchArmBody(arms[0])].Kind.String(); kind != "Block" {
+		t.Errorf("arm 0 body kind = %s, want Block", kind)
+	}
+
+	// Arm 1: 4 - a single pattern, MatchArmPattern (singular) still works.
+	if len(p.tree.MatchArmPatterns(arms[1])) != 1 {
+		t.Fatalf("arm 1: len(MatchArmPatterns) = %d, want 1", len(p.tree.MatchArmPatterns(arms[1])))
+	}
+	if got := p.tree.Text(p.tree.MatchArmPattern(arms[1])); got != "4" {
+		t.Errorf("arm 1 pattern = %q, want \"4\"", got)
+	}
+
+	// Arm 2: _ - the wildcard, a single Ident pattern.
+	if !p.tree.IsWildcardMatchArm(arms[2]) {
+		t.Errorf("arm 2: IsWildcardMatchArm = false, want true")
+	}
+	if p.tree.IsWildcardMatchArm(arms[0]) || p.tree.IsWildcardMatchArm(arms[1]) {
+		t.Errorf("arm 0/1: IsWildcardMatchArm = true, want false")
+	}
+}

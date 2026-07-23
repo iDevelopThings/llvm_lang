@@ -2023,16 +2023,16 @@ func (c *checker) checkCondition(n ast.NodeIndex) {
 }
 
 // checkMatchStmt type-checks a `match subject { pattern => body, ... }`
-// statement (see LANGUAGE.md's "match" section) - the real, hard
-// exhaustiveness check this feature exists to provide: every arm's pattern
-// must name one of the matched enum's own declared variants (a pattern
-// naming some other enum's variant, or a nonexistent one, is a clean
-// diagnostic, not a panic - see checkMatchArmPattern), no variant may be
-// matched by more than one arm, and either every variant is covered by some
-// arm or a wildcard `_` arm is present. The subject may be an enum value
-// directly, or a pointer to one (`this` inside a method - see
-// checkThisExpr) - auto-dereferenced here, the same auto-deref every other
-// struct/enum-receiver access in this language already gets.
+// statement (see LANGUAGE.md's "match" section), dispatching on the
+// subject's own resolved type to one of two genuinely different checked
+// shapes - an enum value (checkEnumMatchStmt, the original exhaustiveness-
+// checked feature) or a plain scalar value (checkValueMatchStmt, this
+// round's Go-`switch`-style generalization - see isValueMatchType). The
+// subject may be an enum value directly, or a pointer to one (`this` inside
+// a method - see checkThisExpr) - auto-dereferenced here, the same
+// auto-deref every other struct/enum-receiver access in this language
+// already gets; a value-match subject is never a pointer (isValueMatchType
+// only admits scalar leaf kinds, and a pointer is never one).
 func (c *checker) checkMatchStmt(n ast.NodeIndex) {
 	subjectNode := c.tree.MatchSubject(n)
 	subjType := c.checkValueExpr(subjectNode)
@@ -2048,37 +2048,98 @@ func (c *checker) checkMatchStmt(n ast.NodeIndex) {
 		}
 		return
 	}
-	if enumType.Kind != TypeEnum {
-		c.errorAt(subjectNode, "match requires an enum value (or a pointer to one), got %s", subjType)
+
+	if enumType.Kind == TypeEnum {
+		c.checkEnumMatchStmt(n, enumType)
+		return
+	}
+
+	// A bare untyped-constant subject (`match 5 { ... }`) defaults exactly
+	// like any other context that provides no further type information at
+	// all (see AGENTS.md's "Untyped numeric constants" section: no declared
+	// type context anywhere for it to adapt to) - the resulting concrete
+	// type then drives every arm's own pattern check uniformly, rather than
+	// leaving it to whichever pattern happens to be checked first via
+	// checkEqualityOperands' own equality-style resolution.
+	if subjType.IsUntyped() {
+		def := c.defaultUntyped(subjType)
+		c.retypeUntyped(subjectNode, def)
+		subjType = def
+	}
+
+	if !isValueMatchType(subjType) {
+		c.errorAt(subjectNode, "match requires an enum value, or an int/bool/string value to switch on, got %s", subjType)
 		for _, arm := range c.tree.MatchArms(n) {
 			c.checkMatchArmFallback(arm)
 		}
 		return
 	}
 
+	c.checkValueMatchStmt(n, subjectNode, subjType)
+}
+
+// isValueMatchType reports whether t is a legal value-match subject type
+// (see LANGUAGE.md's "match" section's plain-value-pattern extension): any
+// int width, or bool/string - deliberately excluding f32/f64 (float
+// equality is a footgun this language already avoids leaning into elsewhere
+// - see DECISIONS.md's dated entry for this round) and every aggregate/
+// reference type (struct, array, pointer, map, func - none of which have a
+// scalar "leaf" equality that makes sense to switch on here; an enum
+// subject never reaches this function at all, having already been routed to
+// checkEnumMatchStmt by checkMatchStmt).
+func isValueMatchType(t Type) bool {
+	switch t.Kind {
+	case TypeI8, TypeI16, TypeI32, TypeI64, TypeBool, TypeString:
+		return true
+	default:
+		return false
+	}
+}
+
+// checkEnumMatchStmt type-checks a match whose subject is an enum value (or
+// a pointer to one) - the real, hard exhaustiveness check this feature
+// exists to provide: every non-wildcard arm's pattern must name one of the
+// matched enum's own declared variants (a pattern naming some other enum's
+// variant, or a nonexistent one, is a clean diagnostic, not a panic - see
+// checkMatchArmPattern), no variant may be matched by more than one arm, and
+// either every variant is covered by some arm or a wildcard `_` arm is
+// present. New this round: an enum-match arm may bind only ONE variant
+// pattern - binding several differently-shaped variant patterns into one
+// shared arm body (unifying their bindings) is a real, separate feature,
+// deliberately deferred rather than silently only checking pattern 0 or
+// guessing which variant's own shape the body's bindings should follow (see
+// DECISIONS.md's dated entry for this round).
+func (c *checker) checkEnumMatchStmt(n ast.NodeIndex, enumType Type) {
 	info := enumType.Enum
 	covered := make(map[string]bool, len(info.Order))
 	hasWildcard := false
 
 	for _, arm := range c.tree.MatchArms(n) {
-		pattern := c.tree.MatchArmPattern(arm)
+		patterns := c.tree.MatchArmPatterns(arm)
 		body := c.tree.MatchArmBody(arm)
 
-		if c.tree.Nodes[pattern].Kind == enums.NodeKinds.Ident {
-			// Resolve already validated this is "_" (or already reported why
-			// it isn't - see resolve.go's resolvePattern).
+		if c.tree.IsWildcardMatchArm(arm) {
 			if hasWildcard {
-				c.errorAt(pattern, "match has more than one wildcard (_) arm")
+				c.errorAt(patterns[0], "match has more than one wildcard (_) arm")
 			}
 			hasWildcard = true
 			c.checkBlock(body)
 			continue
 		}
 
-		variant, ok := c.checkMatchArmPattern(pattern, info)
+		if len(patterns) > 1 {
+			c.errorAtNodes(patterns, arm, "an enum match arm may bind only one variant pattern, got %d", len(patterns))
+			for _, pattern := range patterns {
+				c.checkMatchArmPatternBindingsFallback(pattern)
+			}
+			c.checkBlock(body)
+			continue
+		}
+
+		variant, ok := c.checkMatchArmPattern(patterns[0], info)
 		if ok {
 			if covered[variant.Name] {
-				c.errorAt(pattern, "variant %s.%s already matched by an earlier arm", info.Symbol.Name, variant.Name)
+				c.errorAt(patterns[0], "variant %s.%s already matched by an earlier arm", info.Symbol.Name, variant.Name)
 			}
 			covered[variant.Name] = true
 		}
@@ -2099,13 +2160,109 @@ func (c *checker) checkMatchStmt(n ast.NodeIndex) {
 	}
 }
 
-// checkMatchArmFallback still type-checks one arm's own pattern bindings and
-// body when the match's own subject type couldn't be determined (or wasn't
-// an enum at all) - there's nothing to validate the pattern against, but its
-// fresh bindings and body are still real code worth checking (mirroring
+// checkValueMatchStmt type-checks a match whose subject is a plain scalar
+// value (int/bool/string - see isValueMatchType and LANGUAGE.md's "match"
+// section's plain-value-pattern extension), Go-`switch`-style: every arm's
+// every pattern is an ordinary value expression, checked for equality-
+// comparability against the subject exactly like an ordinary `==` operand
+// pair (checkEqualityOperands - untyped-literal defaulting against the
+// subject's own type, then requiring the same concrete type). Unlike an
+// enum match, there is no closed set of "variants" to exhaustively check an
+// unbounded domain like int/string has none (the identical reasoning
+// DECISIONS.md's own "why match is scoped to enum-variant patterns only"
+// entry already gives) - so a wildcard `_` arm is instead made MANDATORY
+// here, a deliberate stricter-than-Go choice: a value-match missing one is a
+// clean compile error, unlike Go's own switch, which happily allows no
+// `default` and no matching case to just silently fall through doing
+// nothing (see DECISIONS.md's dated entry for this round for why match
+// stays a real safety net instead of mirroring that particular Go
+// looseness).
+func (c *checker) checkValueMatchStmt(n, subjectNode ast.NodeIndex, subjType Type) {
+	hasWildcard := false
+	seenLiterals := make(map[literalPatternKey]ast.NodeIndex)
+
+	for _, arm := range c.tree.MatchArms(n) {
+		body := c.tree.MatchArmBody(arm)
+
+		if c.tree.IsWildcardMatchArm(arm) {
+			if hasWildcard {
+				c.errorAt(c.tree.MatchArmPatterns(arm)[0], "match has more than one wildcard (_) arm")
+			}
+			hasWildcard = true
+			c.checkBlock(body)
+			continue
+		}
+
+		for _, pattern := range c.tree.MatchArmPatterns(arm) {
+			patType := c.checkValueExpr(pattern)
+			if !patType.IsInvalid() {
+				c.checkEqualityOperands(pattern, subjectNode, pattern, subjType, patType, "==")
+				c.checkDuplicateValuePattern(pattern, seenLiterals)
+			}
+		}
+		c.checkBlock(body)
+	}
+
+	if !hasWildcard {
+		c.errorAt(n, "value match requires a wildcard _ arm (exhaustiveness cannot be checked for %s)", subjType)
+	}
+}
+
+// literalPatternKey is checkDuplicateValuePattern's own dedupe key - a
+// literal pattern's node kind (NumberLit/StringLit/BoolLit) paired with its
+// raw source text, distinguishing e.g. the int literal `1` from the string
+// literal `"1"` even though their Text() would otherwise collide.
+type literalPatternKey struct {
+	kind enums.NodeKind
+	text string
+}
+
+// checkDuplicateValuePattern flags pattern as a duplicate case value when
+// another pattern already seen this same match (tracked via seen) is the
+// exact same literal node kind with identical source text - a nice-to-have,
+// not a hard blocker (see checkValueMatchStmt's own doc comment): only a
+// bare literal (NumberLit/StringLit/BoolLit) can be compared this way at
+// compile time; anything computed (a variable reference, a binary
+// expression, ...) is silently skipped, the same limitation Go's own switch
+// has for the identical reason (can't be determined at compile time).
+func (c *checker) checkDuplicateValuePattern(pattern ast.NodeIndex, seen map[literalPatternKey]ast.NodeIndex) {
+	kind := c.tree.Nodes[pattern].Kind
+	switch kind {
+	case enums.NodeKinds.NumberLit, enums.NodeKinds.StringLit, enums.NodeKinds.BoolLit:
+	default:
+		return
+	}
+	key := literalPatternKey{kind: kind, text: c.tree.Text(pattern)}
+	if _, ok := seen[key]; ok {
+		c.errorAt(pattern, "duplicate match case %s (already matched by an earlier pattern)", c.tree.Text(pattern))
+		return
+	}
+	seen[key] = pattern
+}
+
+// checkMatchArmFallback still type-checks every one of an arm's own pattern
+// bindings and its body when the match's own subject type couldn't be
+// determined at all - there's nothing to validate any pattern against, but
+// its fresh bindings and body are still real code worth checking (mirroring
 // checkCompositeLitElemFallback's identical reasoning one construct over).
 func (c *checker) checkMatchArmFallback(arm ast.NodeIndex) {
-	pattern := c.tree.MatchArmPattern(arm)
+	for _, pattern := range c.tree.MatchArmPatterns(arm) {
+		c.checkMatchArmPatternBindingsFallback(pattern)
+	}
+	c.checkBlock(c.tree.MatchArmBody(arm))
+}
+
+// checkMatchArmPatternBindingsFallback seeds pattern's own fresh binding
+// names (if it's a tuple-/struct-variant-shaped pattern) with invalidType,
+// without validating pattern against any particular enum's own variant
+// catalog - shared by checkMatchArmFallback (the match's own subject type
+// couldn't be determined at all) and checkEnumMatchStmt's own >1-pattern
+// rejection (binding-unification across several variant patterns sharing
+// one arm is out of scope this round - see DECISIONS.md - so nothing here
+// attempts to give these bindings a real type either, just enough of a
+// fallback that a later reference inside the arm's own body doesn't cascade
+// into a second, unrelated "undefined" diagnostic).
+func (c *checker) checkMatchArmPatternBindingsFallback(pattern ast.NodeIndex) {
 	switch c.tree.Nodes[pattern].Kind {
 	case enums.NodeKinds.CallExpr:
 		for _, b := range c.tree.Children(pattern)[1:] {
@@ -2119,7 +2276,6 @@ func (c *checker) checkMatchArmFallback(arm ast.NodeIndex) {
 			}
 		}
 	}
-	c.checkBlock(c.tree.MatchArmBody(arm))
 }
 
 // checkMatchArmPattern type-checks one non-wildcard arm's own pattern
@@ -4292,10 +4448,22 @@ func isTerminatingStmt(tree *ast.Tree, info *Info, n ast.NodeIndex) bool {
 // matchStmtTerminates reports whether a MatchStmt is a terminating statement
 // in isTerminatingStmt's sense (see its own doc comment and LANGUAGE.md's
 // "Missing return" section): every arm's own body must itself terminate,
-// AND the match itself must be exhaustive (a wildcard `_` arm present, or
-// every one of the subject enum's own variants covered by some arm) - an
-// inexhaustive match always leaves a real fall-through path, exactly like an
-// `if` with no `else` never terminates. This recomputes the identical
+// AND the match itself must be exhaustive - what "exhaustive" means depends
+// on the subject's own type, generalized this round alongside
+// checkMatchStmt's identical enum-vs-value split:
+//   - an enum match: a wildcard `_` arm present, or every one of the
+//     subject enum's own variants covered by some arm.
+//   - a value match (int/bool/string - see isValueMatchType):
+//     checkValueMatchStmt already guarantees a wildcard `_` arm is present
+//     for one of these to have passed sema.Check at all - but this function
+//     is a pure, deliberately uncached recomputation of an already-checked
+//     tree (see this function's own doc comment one paragraph up), so it
+//     re-derives that fact directly here too, rather than blindly trusting
+//     the guarantee: termination reduces to "every arm terminates" (already
+//     confirmed by the loop below) AND a wildcard arm is genuinely present.
+//
+// An inexhaustive match always leaves a real fall-through path, exactly like
+// an `if` with no `else` never terminates. This recomputes the identical
 // exhaustiveness fact checkMatchStmt itself already validated (with real
 // diagnostics) - deliberately not cached anywhere: isTerminatingStmt is a
 // pure function of an already-checked tree, with no *checker receiver to
@@ -4316,16 +4484,22 @@ func matchStmtTerminates(tree *ast.Tree, info *Info, n ast.NodeIndex) bool {
 	if subjType.Kind == TypePointer && subjType.Elem != nil {
 		subjType = *subjType.Elem
 	}
+
 	if subjType.Kind != TypeEnum || subjType.Enum == nil {
+		for _, arm := range arms {
+			if tree.IsWildcardMatchArm(arm) {
+				return true
+			}
+		}
 		return false
 	}
 
 	covered := make(map[string]bool, len(subjType.Enum.Order))
 	for _, arm := range arms {
-		pattern := tree.MatchArmPattern(arm)
-		if tree.Nodes[pattern].Kind == enums.NodeKinds.Ident {
+		if tree.IsWildcardMatchArm(arm) {
 			return true // a wildcard arm alone makes it exhaustive
 		}
+		pattern := tree.MatchArmPattern(arm)
 		if sym, ok := patternVariantSym(tree, info, pattern); ok && sym.Variant != nil {
 			covered[sym.Variant.Name] = true
 		}

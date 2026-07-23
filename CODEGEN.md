@@ -1391,20 +1391,40 @@ and codegen's own dispatch (`isEnumVariantCall`, mirroring `isConstructorCall`
 exactly) all just read that already-resolved `Info.Refs` entry back, rather
 than re-deriving anything.
 
-### `match` patterns: fresh bindings, not references - a dedicated resolution/check path
+### `match` patterns: fresh bindings, references, or plain value expressions
 
 A match arm's own pattern reuses construction's exact AST shapes
 (`MemberExpr`/`CallExpr`/`CompositeLit`/a bare `Ident` for `_`) verbatim -
 see `LANGUAGE.md`'s own note on why this needed zero new expression-parsing
 grammar at all - but a pattern's own "arguments"/keyed-element values are
 **fresh binding names being declared**, the exact opposite of what
-`resolveExpr`'s ordinary `CallExpr`/`CompositeLit` cases assume. `Resolve`
+`resolveExpr`'s ordinary `CallExpr`/`CompositeLit` cases assume, whenever
+the pattern actually turns out to be an enum-variant one. `Resolve`
 therefore routes a match arm's pattern through its own dedicated
-`resolvePattern` (never through `resolveExpr` at all), declaring each fresh
-binding directly into that arm's own child scope (`declarePatternBinding`,
-the same `Scope.Define`-based mechanism an ordinary `ShortVarDecl`'s own name
-already goes through) - and `sema.Check`'s own `checkMatchArmPattern`
-mirrors this split: it resolves the pattern against the matched enum's own
+`resolvePattern` (an `ast.NodeIndex` per pattern - `MatchArm` is
+variable-arity this round, `[pattern0, ..., patternN, body]`, see
+`ast.Tree.MatchArmPatterns`/`MatchArmPattern`/`MatchArmBody` - see
+`LANGUAGE.md`'s own note on the value-match multi-pattern-per-arm grammar
+this enables), which decides *which* of two resolution paths applies purely
+via a lexical peek (`patternEnumVariantRef` - does the pattern's own
+leading `EnumName` reference actually resolve to a declared enum type,
+returning that `Symbol` directly so the real resolution that follows needs
+no second, redundant lookup - without recording anything or erring either
+way on its own):
+
+- **A real enum-variant pattern** - resolved exactly as before this round,
+  never through `resolveExpr` at all: each binding is declared directly
+  into that arm's own child scope (`declarePatternBinding`, the same
+  `Scope.Define`-based mechanism an ordinary `ShortVarDecl`'s own name
+  already goes through).
+- **Anything else** (new this round - see `LANGUAGE.md`'s "Value matching"
+  section) - a bare literal, a variable/constant reference, or any other
+  expression shape - is instead routed straight through the ordinary
+  `resolveExpr` reference-resolution path, introducing no fresh bindings at
+  all, exactly like a plain switch-case value in Go.
+
+`sema.Check`'s own `checkMatchArmPattern` mirrors the enum-pattern half of
+this split: it resolves the pattern against the matched enum's own
 `EnumInfo` (rejecting a nonexistent variant, a variant belonging to some
 *other* enum, or a pattern shape that doesn't match that variant's own
 declared kind), then seeds each binding's own `Type` **directly** into both
@@ -1412,20 +1432,44 @@ declared kind), then seeds each binding's own `Type` **directly** into both
 mirroring `checkMultiShortVarDeclNode`'s identical "no single declaring node
 of its own" seeding one construct over (a `:=`/`ShortVarDecl` node has an
 initializer child whose type flows naturally; a bare pattern-bound `Ident`
-has nothing else that would ever compute its `Type` lazily on its own).
+has nothing else that would ever compute its `Type` lazily on its own). The
+value-pattern half instead goes through the ordinary `checkValueExpr`, then
+`checkEqualityOperands` against the subject - see "Value-match type
+checking" below.
 
-### Exhaustiveness checking (`checkMatchStmt`, `sema/typecheck.go`)
+`ast.Tree.IsWildcardMatchArm` centralizes "is this arm the bare wildcard" -
+exactly one pattern, an `Ident` whose text is exactly `"_"` - shared by
+every pass that needs it (`sema.checkEnumMatchStmt`/`checkValueMatchStmt`/
+`matchStmtTerminates`, `codegen.genMatchStmt`/`genValueMatchStmt`), since a
+bare `Ident` pattern is no longer automatically the wildcard now that an
+ordinary identifier is also a legal value pattern (a variable/constant
+reference).
+
+### Enum-match exhaustiveness checking (`checkEnumMatchStmt`, `sema/typecheck.go`)
 
 The real, hard compile-time check this feature exists to provide - see
-`LANGUAGE.md`'s own "match" section for the exact three rules enforced
+`LANGUAGE.md`'s own "Enum matching" section for the exact rules enforced
 (every pattern names a real variant of the *matched* enum, no variant
-matched twice, every variant covered or a wildcard present). Implemented as
-a single pass over the match's own arms, building a `map[string]bool` of
-covered variant names against `EnumInfo.Order` - deliberately a plain map
-keyed by name, not a bitset or anything cleverer, since a real enum's own
-variant count is always small enough that this never remotely matters for
-performance, and clarity here is worth more than micro-optimizing a
-compile-time-only pass.
+matched twice, every variant covered or a wildcard present, and - new this
+round - exactly one pattern per arm). Implemented as a single pass over the
+match's own arms, building a `map[string]bool` of covered variant names
+against `EnumInfo.Order` - deliberately a plain map keyed by name, not a
+bitset or anything cleverer, since a real enum's own variant count is
+always small enough that this never remotely matters for performance, and
+clarity here is worth more than micro-optimizing a compile-time-only pass.
+An arm with more than one pattern is a clean diagnostic here rather than an
+attempt to unify several variants' differently-shaped bindings into one
+shared body - see `DECISIONS.md`'s dated entry for why that stays a
+deliberate scope limit.
+
+`checkMatchStmt` itself is now just the dispatcher: it type-checks the
+subject once, then routes to `checkEnumMatchStmt` (subject resolved to
+`TypeEnum`, auto-dereferencing a pointer subject first) or
+`checkValueMatchStmt` (subject one of `TypeI8`/`I16`/`I32`/`I64`/`Bool`/
+`String` - `isValueMatchType` - after defaulting a bare untyped-constant
+subject the same way any other no-declared-type-context expression already
+does), rejecting anything else (`f32`/`f64`, a struct/array/pointer/map/
+func) with a clean diagnostic.
 
 `isTerminatingStmt` (the same flow-analysis function backing "Missing
 return" - see that section above) gained its own `MatchStmt` case
@@ -1436,11 +1480,45 @@ identical two-branches-generalized-to-N rule. This deliberately
 validated (with real diagnostics) rather than caching it anywhere -
 `isTerminatingStmt` is a pure function of an already-checked tree, with no
 `*checker` receiver to memoize onto, the same no-caching precedent
-`forHasOwnBreak` already sets one construct over.
+`forHasOwnBreak` already sets one construct over. Generalized this round
+alongside the enum-vs-value split above: for a value-match subject,
+`checkValueMatchStmt` already guarantees a wildcard is present for the tree
+to have passed `sema.Check` at all, but `matchStmtTerminates` re-derives
+that fact directly rather than blindly trusting the guarantee (matching its
+own "pure recomputation, not a trusted cache" doc-commented convention) -
+termination there reduces to "every arm terminates" (already checked) AND a
+wildcard genuinely being present.
 
-### `match` codegen: a real LLVM `switch`, not a chain of `br`
+### Value-match type checking (`checkValueMatchStmt`, `sema/typecheck.go`)
 
-`genMatchStmt` (`enum.go`) loads the subject's own discriminant (auto-
+Every arm's every pattern is checked as an ordinary value expression
+(`checkValueExpr`), then run through `checkEqualityOperands` - the *exact*
+function an ordinary `==` operand pair already uses - against the subject:
+untyped-literal defaulting against the subject's own concrete type, then
+requiring the same type, with no new type-resolution logic invented for
+this feature at all. **A wildcard `_` arm is mandatory** - unlike the enum
+path, there is no closed variant set to exhaustively check an unbounded
+domain like `int`/`string` against, so its absence is a clean diagnostic,
+checked directly (not derived from anything else). Duplicate-arm detection
+is a best-effort nicety, not a blocking guarantee: `checkDuplicateValuePattern`
+tracks a `map[literalPatternKey]ast.NodeIndex` keyed by (node kind, raw
+source text) - only a bare `NumberLit`/`StringLit`/`BoolLit` pattern is ever
+compared this way; anything computed (a variable reference, an expression)
+is silently skipped, since its actual value isn't known until runtime.
+
+### `match` codegen: two lowering strategies, dispatched by subject type
+
+`genMatchStmt` (`enum.go`) type-checks the subject's own type first (mirroring
+`checkMatchStmt`'s identical dispatch one layer up) and routes to one of two
+genuinely different lowering functions, kept deliberately separate rather
+than tangled into one (see AGENTS.md's layering/no-mixing-concerns
+standard) - a value pattern's own runtime equality simply isn't a
+compile-time-constant discriminant the way an enum variant's is, so it
+needs a different lowering shape entirely, not just a variant of the same
+one:
+
+**Enum subject - a real LLVM `switch`, not a chain of `br` (unchanged from
+before this round).** Loads the subject's own discriminant (auto-
 dereferencing a pointer-typed subject first - `this` inside a method, most
 commonly - the same auto-deref every other struct/enum-receiver access in
 this language already gets) and lowers to a genuine LLVM `switch`
@@ -1459,7 +1537,7 @@ the arm's own body already terminated - `return`/`break`/`continue`/a
 nested exhaustive `match`, in which case nothing branches there at all).
 
 The wildcard arm (if present) becomes the `switch`'s own default
-destination. **If no wildcard exists** - `sema.checkMatchStmt` already
+destination. **If no wildcard exists** - `sema.checkEnumMatchStmt` already
 guarantees every variant is then explicitly covered by its own case - the
 default destination is a real `unreachable` block, matching this project's
 own established "genuinely impossible per sema's own guarantee, so
@@ -1471,6 +1549,27 @@ always terminates, nothing ever branches into it, but LLVM still requires
 every basic block that exists at all to end in a real terminator, so it
 gets its own `unreachable` there too - exactly mirroring `matchStmtTerminates`'s
 own sema-side verdict.
+
+**Value subject - a short-circuit runtime comparison chain
+(`genValueMatchStmt`, new this round).** The subject is evaluated once, then
+each arm (in source order, skipping the mandatory wildcard - tested last,
+regardless of where it's actually written among the source arms) becomes a
+chain of `CondBr`s: for each of that arm's own patterns, evaluate it and
+compare against the already-evaluated subject via `genValueEqual` - the
+*exact same* scalar-equality codegen (`i8`/`i16`/`i32`/`i64`/`Bool` `ICmp`,
+`genStringEqual` for `string`) an ordinary `==` operator already uses, not
+reinvented here - branching into that arm's own shared body block on the
+first match, or continuing to the next pattern (or the next arm) otherwise.
+The mandatory wildcard's own body becomes the unconditional final fallback
+once every non-wildcard arm's own chain has failed to match - always
+present (`sema.checkValueMatchStmt` already guarantees it), so there is no
+`unreachable`-default case to build here the way the enum path needs one.
+Applies the identical `snapshotDestructors`/`restoreDestructors` (`stmt.go`)
+discipline the enum path (and `genIfStmt`) already use, at every arm and
+once more after the whole statement - see those helpers' own doc comments
+for why (every arm here is an independent, mutually exclusive branch
+generated sequentially against the same shared `Generator.destructors`
+slice).
 
 ### `==`/`!=` and `print()`: a real runtime discriminant dispatch
 

@@ -445,21 +445,39 @@ func (g *Generator) genPrintEnumVariant(variant *sema.EnumVariant, payload llvm.
 }
 
 // genMatchStmt lowers a `match subject { pattern => body, ... }` statement
-// (see LANGUAGE.md's "match" section): load the discriminant, then a real
-// multi-way branch (LLVM's own `switch` instruction, matching against each
-// variant's own assigned discriminant index) - each arm's block
-// extracts/loads the payload into its bound local names (if any), runs the
-// arm's body, then branches to the match statement's own single merge/exit
-// block. The wildcard arm (if present) becomes the switch's default
-// destination; if no wildcard exists (a fully-exhaustive match - sema's own
-// checkMatchStmt already guarantees this on a tree that passed sema.Check),
-// the default destination is `unreachable`, matching this project's own
-// existing "genuinely impossible per sema's own guarantee" convention
-// already used elsewhere for defensive backstops (see emitFallbackTerminator,
-// func.go).
+// (see LANGUAGE.md's "match" section), dispatching on the subject's own
+// type to one of two genuinely different lowering strategies (see
+// CODEGEN.md's "match codegen" section): an enum subject gets a real LLVM
+// `switch` on its compile-time-constant discriminant (this function, below -
+// unchanged from before this round), while a plain scalar (int/bool/string)
+// subject is routed to genValueMatchStmt instead - a value pattern isn't a
+// compile-time-constant discriminant LLVM's `switch` instruction needs, so
+// it needs a genuinely different runtime-comparison-chain lowering, kept in
+// its own dedicated function rather than tangled into this one (see AGENTS.md's
+// layering/no-mixing-concerns standard).
+//
+// The enum path: load the discriminant, then a real multi-way branch
+// (LLVM's own `switch` instruction, matching against each variant's own
+// assigned discriminant index) - each arm's block extracts/loads the
+// payload into its bound local names (if any), runs the arm's body, then
+// branches to the match statement's own single merge/exit block. The
+// wildcard arm (if present) becomes the switch's default destination; if no
+// wildcard exists (a fully-exhaustive match - sema's own checkEnumMatchStmt
+// already guarantees this on a tree that passed sema.Check), the default
+// destination is `unreachable`, matching this project's own existing
+// "genuinely impossible per sema's own guarantee" convention already used
+// elsewhere for defensive backstops (see emitFallbackTerminator, func.go).
 func (g *Generator) genMatchStmt(n ast.NodeIndex) bool {
 	subjectNode := g.tree.MatchSubject(n)
 	subjType := g.info.Types[subjectNode]
+
+	enumType := subjType
+	if enumType.Kind == sema.TypePointer && enumType.Elem != nil {
+		enumType = *enumType.Elem
+	}
+	if enumType.Kind != sema.TypeEnum {
+		return g.genValueMatchStmt(n, subjType)
+	}
 
 	var enumVal llvm.Value
 	if subjType.Kind == sema.TypePointer {
@@ -478,14 +496,9 @@ func (g *Generator) genMatchStmt(n ast.NodeIndex) bool {
 	// branches to N: every arm here is an independent switch case, only one
 	// of which ever actually executes at runtime, but codegen still
 	// generates every one of them sequentially against the *same* shared
-	// Generator.destructors slice. Without restoring this real copy (not
-	// just its length - see genIfStmt's own doc comment for why) before each
-	// arm's own generation, an earlier arm's own return/break/continue
-	// mutating (truncating) the shared slice would leave a later arm's own
-	// fall-through unwind operating on the wrong, already-shrunk state -
-	// silently skipping a destructor call for an outer-scope local that
-	// arm's own runtime path never actually destructed.
-	preMatch := append([]destructorEntry(nil), g.destructors...)
+	// Generator.destructors slice. See snapshotDestructors/restoreDestructors
+	// (stmt.go) for the full reasoning this shares with genIfStmt.
+	preMatch := g.snapshotDestructors()
 
 	arms := g.tree.MatchArms(n)
 	mergeBB := g.ctx.AddBasicBlock(g.curFn, "match.merge")
@@ -493,8 +506,7 @@ func (g *Generator) genMatchStmt(n ast.NodeIndex) bool {
 	var wildcardArm ast.NodeIndex = ast.InvalidNode
 	variantArms := make([]ast.NodeIndex, 0, len(arms))
 	for _, arm := range arms {
-		pattern := g.tree.MatchArmPattern(arm)
-		if g.tree.Nodes[pattern].Kind == enums.NodeKinds.Ident {
+		if g.tree.IsWildcardMatchArm(arm) {
 			wildcardArm = arm
 			continue
 		}
@@ -520,7 +532,7 @@ func (g *Generator) genMatchStmt(n ast.NodeIndex) bool {
 		sw.AddCase(llvm.ConstInt(g.i32Ty, uint64(variant.Index), false), caseBB)
 
 		g.builder.SetInsertPointAtEnd(caseBB)
-		g.destructors = append([]destructorEntry(nil), preMatch...)
+		g.restoreDestructors(preMatch)
 		terminated := g.genMatchArm(arm, pattern, variant, payload)
 		if !terminated {
 			g.builder.CreateBr(mergeBB)
@@ -529,7 +541,7 @@ func (g *Generator) genMatchStmt(n ast.NodeIndex) bool {
 	}
 
 	g.builder.SetInsertPointAtEnd(defaultBB)
-	g.destructors = append([]destructorEntry(nil), preMatch...)
+	g.restoreDestructors(preMatch)
 	if wildcardArm != ast.InvalidNode {
 		wildcardTerminated = g.genBlock(g.tree.MatchArmBody(wildcardArm))
 		if !wildcardTerminated {
@@ -545,10 +557,10 @@ func (g *Generator) genMatchStmt(n ast.NodeIndex) bool {
 	// bookkeeping side effect the last-generated arm happened to leave
 	// behind - the same restore-once-more-afterward step genIfStmt's own
 	// save-restore takes after both branches.
-	g.destructors = append([]destructorEntry(nil), preMatch...)
+	g.restoreDestructors(preMatch)
 
 	// mergeBB is unreachable itself only when every arm (including the
-	// wildcard, if any) always terminates - sema's own checkMatchStmt
+	// wildcard, if any) always terminates - sema's own checkEnumMatchStmt
 	// already guarantees exhaustiveness, so the only remaining question
 	// codegen itself needs to answer is whether every reachable arm body
 	// actually terminates; if so, nothing ever branches into mergeBB, but
@@ -558,6 +570,116 @@ func (g *Generator) genMatchStmt(n ast.NodeIndex) bool {
 	// "genuinely impossible per sema's own guarantee, so unreachable
 	// documents it directly" convention) - matching isTerminatingStmt's own
 	// sema-side verdict (matchStmtTerminates) exactly.
+	g.builder.SetInsertPointAtEnd(mergeBB)
+	if allTerminated {
+		g.builder.CreateUnreachable()
+	}
+	return allTerminated
+}
+
+// genValueMatchStmt lowers a `match subject { pattern0, pattern1 => body,
+// ... }` statement whose subject is a plain scalar value (int/bool/string -
+// see LANGUAGE.md's "match" section's plain-value-pattern extension and
+// sema's isValueMatchType), genMatchStmt's own dispatch target whenever the
+// subject isn't an enum. A value pattern's own runtime equality isn't a
+// compile-time-constant discriminant LLVM's `switch` instruction needs the
+// way an enum variant's own discriminant is, so this lowers to something
+// genuinely different: the subject is evaluated once, then each arm (in
+// source order) becomes a short-circuit chain of runtime equality
+// comparisons (genValueEqual - the exact same scalar-equality codegen an
+// ordinary `==` operator already uses, reused verbatim rather than
+// reinvented) against every one of that arm's own patterns, branching into
+// that arm's shared body block on the first match. The mandatory wildcard
+// arm (sema's own checkValueMatchStmt already guarantees exactly one is
+// present) becomes the unconditional final fallback - tested last,
+// regardless of where it's actually written among the source arms, exactly
+// like Go's own `default` case needs no particular position either.
+//
+// Applies the identical preMatch destructor snapshot/restore discipline
+// genMatchStmt's own enum path already uses, at every arm and once more
+// after the whole statement - see that function's own doc comment for why:
+// every arm here is an independent, mutually exclusive branch generated
+// sequentially against the same shared Generator.destructors slice.
+func (g *Generator) genValueMatchStmt(n ast.NodeIndex, subjType sema.Type) bool {
+	subjectNode := g.tree.MatchSubject(n)
+	subjVal := g.genExpr(subjectNode)
+
+	arms := g.tree.MatchArms(n)
+	mergeBB := g.ctx.AddBasicBlock(g.curFn, "match.merge")
+
+	var wildcardArm ast.NodeIndex = ast.InvalidNode
+	valueArms := make([]ast.NodeIndex, 0, len(arms))
+	for _, arm := range arms {
+		if g.tree.IsWildcardMatchArm(arm) {
+			wildcardArm = arm
+			continue
+		}
+		valueArms = append(valueArms, arm)
+	}
+
+	preMatch := g.snapshotDestructors()
+
+	allTerminated := true
+	for _, arm := range valueArms {
+		patterns := g.tree.MatchArmPatterns(arm)
+		bodyBB := g.ctx.AddBasicBlock(g.curFn, "match.case")
+		nextBB := g.ctx.AddBasicBlock(g.curFn, "match.next")
+
+		for i, pattern := range patterns {
+			patVal := g.genExpr(pattern)
+			eq := g.genValueEqual(subjType, subjVal, patVal)
+
+			testBB := nextBB
+			if i < len(patterns)-1 {
+				testBB = g.ctx.AddBasicBlock(g.curFn, "match.test")
+			}
+			g.builder.CreateCondBr(eq, bodyBB, testBB)
+			g.builder.SetInsertPointAtEnd(testBB)
+		}
+
+		g.builder.SetInsertPointAtEnd(bodyBB)
+		g.restoreDestructors(preMatch)
+		terminated := g.genBlock(g.tree.MatchArmBody(arm))
+		if !terminated {
+			g.builder.CreateBr(mergeBB)
+		}
+		allTerminated = allTerminated && terminated
+
+		// Generating the arm's own body (just above) moved the builder's
+		// insert point away from nextBB (into bodyBB, and wherever the
+		// body's own nested control flow left it) - explicitly reposition
+		// back to nextBB, the block the pattern-testing loop above already
+		// wired as this arm's own false-edge continuation, before the next
+		// arm's own test chain (or, on the last arm, the wildcard's own
+		// body, just below) starts generating into it.
+		g.builder.SetInsertPointAtEnd(nextBB)
+	}
+
+	// The last arm's own nextBB (or, when there are no non-wildcard arms at
+	// all, the same block subjVal was evaluated in - the loop above never
+	// ran, so the builder is still positioned exactly there) is the
+	// wildcard's own body - sema's own checkValueMatchStmt already
+	// guarantees it's present.
+	g.restoreDestructors(preMatch)
+	wildcardTerminated := g.genBlock(g.tree.MatchArmBody(wildcardArm))
+	if !wildcardTerminated {
+		g.builder.CreateBr(mergeBB)
+	}
+	allTerminated = allTerminated && wildcardTerminated
+
+	// Whatever follows the match (reached only when at least one arm didn't
+	// terminate) must see exactly the pre-match state too, never a
+	// bookkeeping side effect the last-generated arm happened to leave
+	// behind - the same restore-once-more-afterward step genMatchStmt's own
+	// enum path (and genIfStmt's save-restore) already takes.
+	g.restoreDestructors(preMatch)
+
+	// mergeBB is unreachable itself only when every arm (including the
+	// wildcard) always terminates - matching genMatchStmt's own enum-path
+	// reasoning and matchStmtTerminates' identical sema-side verdict exactly
+	// (see AGENTS.md's "Missing return" section and emitFallbackTerminator,
+	// func.go, for this project's own "genuinely impossible per sema's own
+	// guarantee, so unreachable documents it directly" convention).
 	g.builder.SetInsertPointAtEnd(mergeBB)
 	if allTerminated {
 		g.builder.CreateUnreachable()

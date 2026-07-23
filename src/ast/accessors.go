@@ -308,16 +308,55 @@ func (t *Tree) MatchArms(n NodeIndex) []NodeIndex {
 	return t.Children(n)[1:]
 }
 
-// MatchArmPattern returns arm's (a MatchArm's) pattern child - see ast.Node's
-// own MatchArm doc comment for the [pattern, body] shape these two accessors
-// index into.
-func (t *Tree) MatchArmPattern(arm NodeIndex) NodeIndex {
-	return t.Child(arm, 0)
+// MatchArmPatterns returns arm's (a MatchArm's) pattern children, in source
+// order - every child except the trailing body (see ast.Node's own MatchArm
+// doc comment for the [pattern0, ..., patternN, body] shape). At least one
+// pattern is always present (parseMatchArm requires it) - a Go-`case a, b,
+// c:`-style comma-separated list, generalized from the enum-match feature's
+// original fixed single-pattern shape to also support a value-match arm's
+// multi-value-per-arm form (see LANGUAGE.md's "match" section). A plain
+// slice, not iter.Seq: every real caller (resolve/check/codegen) needs the
+// full set together - to loop over every pattern, to count them for the
+// enum-match "exactly one pattern" restriction, or to build a value-match
+// arm's own short-circuit comparison chain - never just a single forward
+// pass in isolation.
+func (t *Tree) MatchArmPatterns(arm NodeIndex) []NodeIndex {
+	children := t.Children(arm)
+	return children[:len(children)-1]
 }
 
-// MatchArmBody returns arm's (a MatchArm's) body child.
+// MatchArmPattern returns arm's (a MatchArm's) first pattern child - a
+// convenience for callers that only ever need to look at a single pattern:
+// the enum-match path (sema.checkEnumMatchStmt enforces exactly one pattern
+// per enum-match arm - see LANGUAGE.md's "match" section - so its own first
+// pattern is always the *only* pattern there). NOT a safe stand-in for
+// MatchArmPatterns in a context that must consider every pattern an arm may
+// have - a value-match arm can legitimately carry more than one.
+func (t *Tree) MatchArmPattern(arm NodeIndex) NodeIndex {
+	return t.MatchArmPatterns(arm)[0]
+}
+
+// MatchArmBody returns arm's (a MatchArm's) trailing body child - always the
+// last child, regardless of how many leading patterns precede it.
 func (t *Tree) MatchArmBody(arm NodeIndex) NodeIndex {
-	return t.Child(arm, 1)
+	children := t.Children(arm)
+	return children[len(children)-1]
+}
+
+// IsWildcardMatchArm reports whether arm (a MatchArm) is the bare wildcard
+// `_` arm: exactly one pattern, an Ident whose text is exactly "_". This is
+// deliberately more than a bare `Kind == Ident` check (which every call site
+// used before value-match patterns existed, back when an Ident pattern could
+// only ever legally be "_" - see resolve.go's old resolvePattern): a plain
+// identifier is now also a legal *value* pattern (referencing a variable/
+// constant as a case value - see LANGUAGE.md's "match" section), so "is this
+// arm the wildcard" and "is this arm's first pattern an Ident" are no longer
+// the same question, and every caller that needs the former (exhaustiveness/
+// coverage checks, codegen's own switch-default/final-fallback selection)
+// must ask it precisely this way rather than approximating it.
+func (t *Tree) IsWildcardMatchArm(arm NodeIndex) bool {
+	patterns := t.MatchArmPatterns(arm)
+	return len(patterns) == 1 && t.Nodes[patterns[0]].Kind == enums.NodeKinds.Ident && t.Text(patterns[0]) == "_"
 }
 
 // MultiAssignStmtTargets returns n's (a MultiAssignStmt's) leading lvalue

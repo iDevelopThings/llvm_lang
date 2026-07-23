@@ -354,6 +354,51 @@ func TestBinary_EnumsExample(t *testing.T) {
 	}
 }
 
+// matchValuesWant is the expected stdout for examples/match_values/match_values.llx
+// (see that file's own inline comments) - shared by the JIT and AOT tests
+// below, exactly like every other worked-example test pair in this file.
+const matchValuesWant = "1\n" +
+	"1\n" +
+	"2\n" +
+	"0\n" +
+	"small\n" +
+	"medium-or-large\n" +
+	"medium-or-large\n" +
+	"unknown\n" +
+	"1\n" +
+	"0"
+
+// TestBinary_MatchValuesExample runs examples/match_values/match_values.llx
+// end to end via the real binary - the worked dogfooding demo for this
+// round's generalization of `match` into a general Go-`switch`-style value
+// dispatcher (see LANGUAGE.md's "match" section's plain-value-pattern
+// extension): an int value-match with a multi-value arm, a string
+// value-match, a bool value-match, and the mandatory wildcard `_` arm every
+// value-match requires. Its own `main() int` returns 5 (see that file's own
+// inline comment breaking down exactly how), which becomes the exit code.
+func TestBinary_MatchValuesExample(t *testing.T) {
+	cmd := exec.Command(llvmcPath, "../../examples/match_values/match_values.llx")
+	out, err := cmd.Output()
+
+	if err != nil {
+		ee, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("running llvmc: %v", err)
+		}
+		if ee.ExitCode() != 5 {
+			t.Fatalf("exit code = %d, want 5, stderr:\n%s", ee.ExitCode(), ee.Stderr)
+		}
+	} else {
+		t.Fatal("expected llvmc to exit 5, got exit 0")
+	}
+
+	normalized := strings.ReplaceAll(string(out), "\r\n", "\n")
+	normalized = strings.TrimRight(normalized, "\n")
+	if normalized != matchValuesWant {
+		t.Errorf("stdout = %q, want %q", normalized, matchValuesWant)
+	}
+}
+
 // TestBinary_MainExitCode covers examples/features/features.llx end to end: its
 // three print calls' real stdout, and its `func main() int` return value
 // coming back as the child process's own exit code.
@@ -538,6 +583,37 @@ func TestBinary_AOT_Enums(t *testing.T) {
 		"6"
 	if normalized != want {
 		t.Errorf("stdout = %q, want %q", normalized, want)
+	}
+}
+
+// TestBinary_AOT_MatchValues AOT-compiles examples/match_values and confirms
+// identical output/exit code to its JIT-executed behavior
+// (TestBinary_MatchValuesExample) - proving genValueMatchStmt's own
+// runtime-comparison-chain lowering (as opposed to genMatchStmt's own LLVM
+// `switch` for an enum discriminant - see CODEGEN.md's "match codegen"
+// section) round-trips correctly through a real, standalone linked
+// executable, not just under JIT execution.
+func TestBinary_AOT_MatchValues(t *testing.T) {
+	exePath := aotCompile(t, "../../examples/match_values/match_values.llx")
+
+	cmd := exec.Command(exePath)
+	out, err := cmd.Output()
+	if err != nil {
+		ee, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("running %s: %v", exePath, err)
+		}
+		if ee.ExitCode() != 5 {
+			t.Fatalf("%s exit code = %d, want 5, stderr:\n%s", exePath, ee.ExitCode(), ee.Stderr)
+		}
+	} else {
+		t.Fatalf("expected %s to exit 5, got exit 0", exePath)
+	}
+
+	normalized := strings.ReplaceAll(string(out), "\r\n", "\n")
+	normalized = strings.TrimRight(normalized, "\n")
+	if normalized != matchValuesWant {
+		t.Errorf("stdout = %q, want %q", normalized, matchValuesWant)
 	}
 }
 

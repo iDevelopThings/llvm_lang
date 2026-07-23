@@ -336,10 +336,22 @@ func main() {
 `, 1)
 }
 
-func TestMatchOnNonEnumIsError(t *testing.T) {
+// TestMatchOnNonEnumIsError used to assert that matching on a plain int was
+// an error outright - before this round, match was scoped to enum values
+// only (see DECISIONS.md's original "why match is scoped to enum-variant
+// patterns only" entry). Now that a value-match (int/bool/string - see
+// LANGUAGE.md's "match" section's plain-value-pattern extension) is a real,
+// legal feature, matching on an int is no longer inherently an error - only
+// a genuinely unsupported subject type (f64, and every aggregate/reference
+// type - see sema.isValueMatchType) still is. See
+// TestMatchOnUnsupportedValueTypeIsError below for that regression instead,
+// and TestMatchOnIntWithWildcardIsFine/TestMatchOnIntMissingWildcardIsError
+// in the value-match section further down for this exact case's own new,
+// intentionally different behavior.
+func TestMatchOnUnsupportedValueTypeIsError(t *testing.T) {
 	expectCheckErrors(t, `
 func main() {
-	x := 5
+	x := 5.5
 	match x {
 		_ => {
 		}
@@ -586,4 +598,229 @@ func main() {
 	c := List.Cons(1, &n)
 }
 `)
+}
+
+// --- value-match (plain int/bool/string patterns - see LANGUAGE.md's
+// "match" section's plain-value-pattern extension) ---
+
+func TestValueMatchIntWithWildcardIsFine(t *testing.T) {
+	checkSrc(t, `
+func main() {
+	x := 5
+	match x {
+		1 => {
+		}
+		2, 3 => {
+		}
+		_ => {
+		}
+	}
+}
+`)
+}
+
+func TestValueMatchIntMissingWildcardIsError(t *testing.T) {
+	expectCheckErrors(t, `
+func main() {
+	x := 5
+	match x {
+		1 => {
+		}
+		2 => {
+		}
+	}
+}
+`, 1)
+}
+
+func TestValueMatchStringWithWildcardIsFine(t *testing.T) {
+	checkSrc(t, `
+func main() {
+	s := "b"
+	match s {
+		"a" => {
+		}
+		"b", "c" => {
+		}
+		_ => {
+		}
+	}
+}
+`)
+}
+
+func TestValueMatchBoolWithWildcardIsFine(t *testing.T) {
+	checkSrc(t, `
+func main() {
+	b := true
+	match b {
+		true => {
+		}
+		_ => {
+		}
+	}
+}
+`)
+}
+
+// TestValueMatchPatternWrongTypeIsError proves each arm's own pattern is
+// checked for equality-comparability against the subject's own type, exactly
+// like an ordinary == operand pair (checkEqualityOperands) - a string
+// pattern against an int subject is a clean diagnostic, not silently
+// accepted or a panic.
+func TestValueMatchPatternWrongTypeIsError(t *testing.T) {
+	expectCheckErrors(t, `
+func main() {
+	x := 5
+	match x {
+		"nope" => {
+		}
+		_ => {
+		}
+	}
+}
+`, 1)
+}
+
+// TestValueMatchVariablePatternIsFine proves a plain identifier referencing
+// an already-declared variable/constant is a legal value pattern too, not
+// just a bare literal - resolved as an ordinary value-expression reference
+// (see resolve.go's resolvePattern), the same way Go's own switch accepts
+// `case someVar:`.
+func TestValueMatchVariablePatternIsFine(t *testing.T) {
+	checkSrc(t, `
+func main() {
+	target := 3
+	x := 5
+	match x {
+		target => {
+		}
+		_ => {
+		}
+	}
+}
+`)
+}
+
+func TestValueMatchDuplicateLiteralArmIsError(t *testing.T) {
+	expectCheckErrors(t, `
+func main() {
+	x := 5
+	match x {
+		1 => {
+		}
+		1 => {
+		}
+		_ => {
+		}
+	}
+}
+`, 1)
+}
+
+// TestValueMatchDuplicateLiteralAcrossMultiPatternArmIsError proves the
+// duplicate-literal check also looks across a single arm's own several
+// comma-separated patterns, not just across different arms.
+func TestValueMatchDuplicateLiteralAcrossMultiPatternArmIsError(t *testing.T) {
+	expectCheckErrors(t, `
+func main() {
+	x := 5
+	match x {
+		1, 2, 1 => {
+		}
+		_ => {
+		}
+	}
+}
+`, 1)
+}
+
+// TestValueMatchOnFloatIsError proves f32/f64 stay deliberately excluded
+// from value-match subjects (float equality is a footgun this language
+// already avoids leaning into elsewhere - see DECISIONS.md).
+func TestValueMatchOnFloatIsError(t *testing.T) {
+	expectCheckErrors(t, `
+func main() {
+	x := 1.5
+	match x {
+		_ => {
+		}
+	}
+}
+`, 1)
+}
+
+// TestValueMatchOnStructIsError proves a struct subject is rejected too,
+// same as a float - only scalar leaf types make sense to switch on.
+func TestValueMatchOnStructIsError(t *testing.T) {
+	expectCheckErrors(t, `
+struct Point {
+	x int
+}
+func main() {
+	p := Point{1}
+	match p {
+		_ => {
+		}
+	}
+}
+`, 1)
+}
+
+// TestEnumMatchArmWithMultiplePatternsIsError proves an enum-match arm stays
+// restricted to exactly one variant pattern this round - binding several
+// differently-shaped variant patterns into one shared arm body is a real,
+// separate, deliberately deferred feature (see DECISIONS.md).
+func TestEnumMatchArmWithMultiplePatternsIsError(t *testing.T) {
+	expectCheckErrors(t, `
+enum Shape {
+	Circle(f64),
+	Point
+}
+func main() {
+	s := Shape.Point
+	match s {
+		Shape.Circle(r), Shape.Point => {
+		}
+		_ => {
+		}
+	}
+}
+`, 1)
+}
+
+// TestValueMatchAsLastStatementSatisfiesMissingReturn mirrors
+// TestMatchAsLastStatementSatisfiesMissingReturn one construct over - a
+// value-match, since sema.Check already guarantees it carries a wildcard
+// arm, terminates iff every arm's own body does (see matchStmtTerminates'
+// own updated doc comment).
+func TestValueMatchAsLastStatementSatisfiesMissingReturn(t *testing.T) {
+	checkSrc(t, `
+func classify(x int) int {
+	match x {
+		1, 2, 3 => {
+			return 1
+		}
+		_ => {
+			return 0
+		}
+	}
+}
+func main() {}
+`)
+}
+
+func TestValueMatchMissingReturnWhenNotEveryArmReturns(t *testing.T) {
+	expectCheckErrors(t, `
+func classify(x int) int {
+	match x {
+		1 => {
+			return 1
+		}
+		_ => {
+		}
+	}
+}
+func main() {}
+`, 1) // missing return: the wildcard arm doesn't itself return
 }

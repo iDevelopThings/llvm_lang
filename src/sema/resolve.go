@@ -984,86 +984,131 @@ func (r *resolver) resolveMatchStmt(scope *Scope, n ast.NodeIndex) {
 }
 
 func (r *resolver) resolveMatchArm(scope *Scope, arm ast.NodeIndex) {
-	pattern := r.tree.MatchArmPattern(arm)
+	patterns := r.tree.MatchArmPatterns(arm)
 	body := r.tree.MatchArmBody(arm)
 
 	armScope := newScope(ScopeBlock, scope, ast.InvalidNode)
 	r.info.Scopes[arm] = armScope
 
-	r.resolvePattern(armScope, pattern)
+	for _, pattern := range patterns {
+		r.resolvePattern(armScope, pattern)
+	}
 	r.resolveBlock(armScope, body)
 }
 
-// resolvePattern resolves one match arm's own pattern - deliberately NOT
-// routed through resolveExpr, even though every shape it accepts (Ident,
-// MemberExpr, CallExpr, CompositeLit) is a node kind resolveExpr already
-// knows how to walk: a pattern's own "arguments"/keyed-element values are
-// FRESH binding names being declared into scope, not references to
-// already-declared ones - the exact opposite of what resolveExpr's own
-// CallExpr/CompositeLit cases assume (see ast.Node's own MatchArm doc
-// comment).
+// resolvePattern resolves one match arm's own pattern. Resolve runs before
+// type-checking, so it can't yet know whether the enclosing match's subject
+// is an enum value or a plain int/bool/string one (see LANGUAGE.md's "match"
+// section's plain-value-pattern extension) - but it CAN decide, per pattern,
+// via an ordinary lexical lookup (patternIsEnumVariantRef, the same "does
+// this name resolve to a declared enum type" check resolveMemberPatternRef
+// itself makes), which of two genuinely different resolution paths applies:
+//
+//   - An enum-variant pattern (a MemberExpr/CallExpr/CompositeLit whose
+//     leading EnumName reference actually resolves to a declared enum type):
+//     resolved exactly as before this round - routed through
+//     resolveMemberPatternRef, NOT resolveExpr, since a pattern's own
+//     "arguments"/keyed-element values are FRESH binding names being
+//     declared into scope, not references to already-declared ones (the
+//     exact opposite of what resolveExpr's own CallExpr/CompositeLit cases
+//     assume).
+//   - Anything else - a bare value expression (a literal, a variable/
+//     constant reference, or any other expression shape whose lexical head
+//     doesn't resolve to an enum type) - is now resolved through the
+//     ordinary resolveExpr reference-resolution path instead, introducing no
+//     fresh bindings at all, exactly like a plain switch-case value in Go.
+//
+// The bare wildcard `_` (an Ident whose text is exactly "_") stays
+// special-cased exactly as before - resolved to nothing at all, neither a
+// binding nor a reference.
 func (r *resolver) resolvePattern(scope *Scope, pattern ast.NodeIndex) {
 	switch r.tree.Nodes[pattern].Kind {
 	case enums.NodeKinds.Ident:
-		if r.tree.Text(pattern) != "_" {
-			r.errorAt(pattern, "expected an enum variant pattern (EnumName.Variant) or the wildcard _, got %s", r.tree.Text(pattern))
+		if r.tree.Text(pattern) == "_" {
+			return
 		}
+		r.resolveExpr(scope, pattern)
 	case enums.NodeKinds.MemberExpr:
-		r.resolveMemberPatternRef(scope, pattern)
+		if objSym, ok := r.patternEnumVariantRef(scope, pattern); ok {
+			r.resolveMemberPatternRef(pattern, objSym)
+			return
+		}
+		r.resolveExpr(scope, pattern)
 	case enums.NodeKinds.CallExpr:
 		children := r.tree.Children(pattern)
 		callee, bindings := children[0], children[1:]
-		r.resolveMemberPatternRef(scope, callee)
+		objSym, ok := r.patternEnumVariantRef(scope, callee)
+		if !ok {
+			r.resolveExpr(scope, pattern)
+			return
+		}
+		r.resolveMemberPatternRef(callee, objSym)
 		for _, b := range bindings {
 			r.declarePatternBinding(scope, b)
 		}
 	case enums.NodeKinds.CompositeLit:
 		typeExpr, elems := r.tree.CompositeLitElems(pattern)
-		r.resolveMemberPatternRef(scope, typeExpr)
+		objSym, ok := r.patternEnumVariantRef(scope, typeExpr)
+		if !ok {
+			r.resolveExpr(scope, pattern)
+			return
+		}
+		r.resolveMemberPatternRef(typeExpr, objSym)
 		for _, elem := range elems {
 			if r.tree.IsKeyedElement(elem) {
 				// The key is a field name, resolved once the variant is
-				// known - Check's own job (checkMatchArm), mirroring how a
-				// real struct composite literal's own keyed field name is
-				// deferred the identical way (resolveCompositeLit).
+				// known - Check's own job (checkMatchArmPattern), mirroring
+				// how a real struct composite literal's own keyed field name
+				// is deferred the identical way (resolveCompositeLit).
 				r.declarePatternBinding(scope, r.tree.Child(elem, 1))
 				continue
 			}
 			r.errorAt(elem, "a struct-variant pattern requires keyed fields (field: name), not a positional element")
 		}
 	default:
-		r.errorAt(pattern, "invalid match pattern")
+		// Any other expression shape (a NumberLit/StringLit/BoolLit, a
+		// BinaryExpr, ...) - not a pattern shape construction ever uses, so
+		// it can only be a plain value pattern (see LANGUAGE.md's "match"
+		// section's plain-value-pattern extension), resolved as an ordinary
+		// expression like any of it.
+		r.resolveExpr(scope, pattern)
 	}
 }
 
-// resolveMemberPatternRef resolves a pattern's own EnumName.Variant reference
-// (whether the whole pattern, as in a unit-variant arm, or just a tuple-/
-// struct-variant pattern's own leading callee/type-expr) - object must
-// resolve lexically to a declared enum type, exactly like an ordinary
-// construction reference (resolveTypeMemberExpr/resolveExpr's own MemberExpr
-// case) - reusing resolveEnumVariantRef verbatim once the object itself is
-// confirmed to be one.
-func (r *resolver) resolveMemberPatternRef(scope *Scope, n ast.NodeIndex) {
+// patternEnumVariantRef reports whether n - a pattern's own MemberExpr
+// candidate for EnumName.Variant (the whole pattern for a unit-variant, or a
+// tuple-/struct-variant pattern's own leading callee/type-expr) - lexically
+// resolves to a declared enum type, returning that Symbol directly (so a
+// caller that goes on to treat this as a real enum-variant pattern doesn't
+// need a second, redundant scope lookup for the identical name) without
+// recording anything into r.info.Refs or reporting a diagnostic either way:
+// resolvePattern uses this purely as a peek to decide which of its two
+// pattern-resolution paths applies (a real enum-variant pattern with fresh
+// bindings - resolveMemberPatternRef - or an ordinary value expression -
+// resolveExpr), leaving the *real* resolution (which does record/report) to
+// whichever of those two it actually calls next.
+func (r *resolver) patternEnumVariantRef(scope *Scope, n ast.NodeIndex) (*Symbol, bool) {
 	if r.tree.Nodes[n].Kind != enums.NodeKinds.MemberExpr {
-		r.errorAt(n, "invalid match pattern")
-		return
+		return nil, false
 	}
 	object := r.tree.Child(n, 0)
 	if r.tree.Nodes[object].Kind != enums.NodeKinds.Ident {
-		r.errorAt(n, "invalid match pattern")
-		return
+		return nil, false
 	}
-	objName := r.tree.Text(object)
-	objSym, ok := scope.Lookup(objName)
-	if !ok {
-		r.errorAtLabel(object, "not found", "undefined: %s", objName)
-		return
+	objSym, ok := scope.Lookup(r.tree.Text(object))
+	if !ok || objSym.Kind != SymEnum {
+		return nil, false
 	}
+	return objSym, true
+}
+
+// resolveMemberPatternRef records n's own EnumName.Variant reference - given
+// objSym, already confirmed by patternEnumVariantRef to be n's own object's
+// resolved Symbol, a declared enum type - into r.info.Refs, then resolves
+// the variant name itself (resolveEnumVariantRef).
+func (r *resolver) resolveMemberPatternRef(n ast.NodeIndex, objSym *Symbol) {
+	object := r.tree.Child(n, 0)
 	r.info.Refs[object] = objSym
-	if objSym.Kind != SymEnum {
-		r.errorAt(n, "%s is not a declared enum type", objName)
-		return
-	}
 	r.resolveEnumVariantRef(n, objSym.EnumInfo)
 }
 

@@ -639,7 +639,7 @@ print(d)   // Point
 
 ## match
 
-A new **statement** (not an expression this round - see "Explicitly deferred" below) for exhaustively dispatching on an enum value's own active variant, destructuring its associated data (if any) into fresh local names scoped to the matching arm alone:
+A **statement** (not an expression this round - see "Explicitly deferred" below) for dispatching on a value - either exhaustively, on an enum value's own active variant, destructuring its associated data (if any) into fresh local names scoped to the matching arm alone; or, this round's own generalization, Go-`switch`-style on a plain int/bool/string value's equality against each arm's own pattern(s). Which of the two applies is decided purely by the subject's own type - the grammar itself is identical either way:
 
 ```go
 match shape {
@@ -658,22 +658,37 @@ match shape {
 }
 ```
 
-Each arm's **pattern** is one of:
+Each arm may now carry a comma-separated list of **one or more** patterns before its `=>` (Go's own `case a, b, c:` multi-value-per-arm shape) - all sharing that one arm's body:
+
+```go
+match x {
+    1, 2, 3 => {
+        print("low")
+    }
+    _ => {
+        print("other")
+    }
+}
+```
+
+Each pattern is one of:
 
 - `EnumName.Variant` (unit) - matches that variant, binding nothing.
 - `EnumName.Variant(binding0, binding1, ...)` (tuple) - matches that variant, binding each fresh local name positionally to the variant's own declared associated-data types, scoped to that arm's body only.
 - `EnumName.Variant{field0: binding0, ...}` (struct-style) - matches that variant, binding each named field to a fresh local name via an explicit `field: newLocalName` mapping, reusing the same keyed-composite-literal-style syntax construction uses.
-- the wildcard `_` - matches anything not otherwise covered by an earlier arm, binding nothing.
+- **an ordinary value expression** (new this round) - a literal, a variable/constant reference, or any other expression - checked for equality against the subject, exactly like a plain switch-case value in Go. Only legal when the subject itself is a value-match subject (see "Value matching" below), never alongside an enum subject.
+- the wildcard `_` - matches anything not otherwise covered by an earlier arm, binding nothing. Always a lone pattern on its own arm - never combined with any other pattern in the same comma-separated list.
 
 Each arm's body is an ordinary `Block` (braces). Control simply exits the whole `match` after one arm's body finishes running - **no fallthrough, no explicit `break` needed**, unlike C's `switch`.
 
-### Exhaustiveness checking
+### Enum matching and exhaustiveness checking
 
 A real, hard compile-time check - this is the entire point of building `match` as its own construct rather than an unchecked switch:
 
 - Every arm's pattern must name one of the *matched* enum's own declared variants - a pattern naming a variant belonging to some **other** enum type, or a nonexistent variant name, is a clean diagnostic, never a panic.
 - No variant may be matched by more than one arm - a duplicate is a clean diagnostic.
 - Either **every** variant must be covered by some arm, **or** a `_` wildcard arm must be present. Missing this is a clean "match is not exhaustive: missing variant(s) ..." diagnostic naming exactly which variants are uncovered.
+- **An enum-match arm may bind only one variant pattern.** The comma-separated multi-pattern arm shape above is a value-match-only feature - `Shape.Circle(r), Shape.Point => { ... }` is a clean diagnostic ("an enum match arm may bind only one variant pattern"), not silently only checking the first pattern or attempting to unify two differently-shaped variants' bindings into one shared arm body (see `DECISIONS.md` for why this stays a deliberate scope limit rather than being bundled into this round).
 
 ```go
 enum Shape { Circle(f64), Point }
@@ -692,10 +707,55 @@ match shape {
 
 A fully-exhaustive `match` (every arm ending in a terminating statement, with no wildcard needed because every variant is explicitly covered - or a wildcard arm present) counts as a terminating statement in its own right for this language's "Missing return" flow analysis (see below), the same way a fully-covered `if`/`else` already does - a function whose body ends in such a `match` needs no further `return` after it.
 
-### Explicitly deferred (Round B, a separate future extension) - not built this round
+### Value matching
 
-- **`match` supporting plain-value patterns** (ints, strings, bools - a general Go-`switch`-style value-equality dispatch, not just enum-variant destructuring). This round is enum-variant patterns only.
+`match`'s own general Go-`switch`-style extension: the subject may also be a plain `i8`/`i16`/`i32`/`i64`/`bool`/`string` value (an untyped numeric-literal subject defaults exactly like any other no-declared-type-context expression - see "Untyped numeric constants" above), rather than only an enum. Every arm's every pattern is then checked as an ordinary value expression, equality-comparable against the subject exactly like an ordinary `==` operand pair (the same untyped-literal-adapts-to-the-other-side rule that operator already follows):
+
+```go
+func classify(x int) string {
+    match x {
+        1, 2, 3 => {
+            return "low"
+        }
+        4, 5 => {
+            return "mid"
+        }
+        _ => {
+            return "other"
+        }
+    }
+}
+```
+
+**`f32`/`f64` are deliberately excluded** as a value-match subject - float equality is a footgun this language already avoids leaning into elsewhere (see `DECISIONS.md`), and it's simply rejected with a clean diagnostic, the same as any other unsupported subject type (a struct, array, pointer, map, or function value): `match requires an enum value, or an int/bool/string value to switch on, got <type>`.
+
+**A wildcard `_` arm is MANDATORY for a value-match** - deliberately stricter than Go's own `switch`, which allows no `default` at all and simply falls through doing nothing when no case matches. A value-match's own domain (an unbounded type like `int`/`string`) has no closed set of values the way an enum's own declared variants do, so there is **no exhaustiveness check possible** here - the mandatory wildcard is what keeps `match` a real safety net regardless:
+
+```go
+func f(x int) int {
+    match x {
+        1 => { return 1 }
+        2 => { return 2 }
+    }
+}
+// error: value match requires a wildcard _ arm (exhaustiveness cannot be
+// checked for int)
+```
+
+**Duplicate-literal detection is a nice-to-have, not a hard guarantee.** Two patterns that are both literal constants (the same literal kind, e.g. two `NumberLit`s or two `StringLit`s, with identical value) are flagged as a duplicate match case - but only when both sides are literals computable at compile time; a pattern that's a variable reference or any other computed expression is never checked against another for redundancy, the same limitation Go's own `switch` has for the identical reason (it isn't knowable until runtime):
+
+```go
+match x {
+    1 => { }
+    1 => { }   // error: duplicate match case 1
+    _ => { }
+}
+```
+
+### Explicitly deferred - not built this round
+
 - **`match` as an expression producing a value** (`x := match shape { ... }`). This round is a `match` *statement* only, each arm's body an ordinary side-effecting `Block`, not something that yields a value back to an enclosing expression.
+- **Binding-unification across several differently-shaped enum-variant patterns sharing one arm** (`Shape.Circle(r), Shape.Rectangle(w, h) => { ... }`) - a real, separate feature (deciding what a shared arm body may even reference when each pattern binds different names/types), deliberately not bundled into this round's multi-pattern-arm grammar, which stays enum-match-arm-restricted to exactly one pattern (see "Enum matching" above).
 
 ## Pointers
 

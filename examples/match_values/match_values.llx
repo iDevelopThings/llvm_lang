@@ -1,0 +1,85 @@
+// match_values.llx - `match` as a general Go-`switch`-style value dispatcher
+// (see LANGUAGE.md's "match" section's plain-value-pattern extension): a
+// plain int/bool/string value can now be matched directly, alongside the
+// pre-existing enum-variant matching (see examples/enums/enums.llx). Covers:
+//   - an int value-match with a multi-value arm (`1, 2, 3 => { ... }`,
+//     Go's own `case 1, 2, 3:` shape)
+//   - a string value-match
+//   - a bool value-match
+//   - the mandatory wildcard `_` arm every value-match requires
+//     (deliberately stricter than Go's own switch, which allows no
+//     `default` at all and just silently falls through - see DECISIONS.md's
+//     dated entry for why match stays a real safety net instead)
+//
+// Run with:
+//   .\llvmc.exe examples\match_values\match_values.llx
+//   echo $LASTEXITCODE   # (PowerShell) -> 5
+
+// classify demonstrates an int value-match: 1/2/3 share one arm, 4/5 share
+// another, anything else falls to the mandatory wildcard.
+func classify(x int) int {
+    match x {
+        1, 2, 3 => {
+            return 1
+        }
+        4, 5 => {
+            return 2
+        }
+        _ => {
+            return 0
+        }
+    }
+}
+
+// sizeName demonstrates a string value-match, also with a multi-value arm.
+func sizeName(s string) string {
+    match s {
+        "s" => {
+            return "small"
+        }
+        "m", "l" => {
+            return "medium-or-large"
+        }
+        _ => {
+            return "unknown"
+        }
+    }
+}
+
+// toggle demonstrates a bool value-match. Every one of bool's own two
+// values is covered here (true, then the wildcard covering false) - the
+// wildcard is still required regardless: value-match exhaustiveness can't
+// be checked the way an enum's own closed variant set can (see
+// LANGUAGE.md's "match" section), so the wildcard is unconditionally
+// mandatory, not just "mandatory when coverage happens to be incomplete".
+func toggle(b bool) int {
+    match b {
+        true => {
+            return 1
+        }
+        _ => {
+            return 0
+        }
+    }
+}
+
+func main() int {
+    print(classify(1))     // 1  - matched by the first pattern of "1, 2, 3"
+    print(classify(3))     // 1  - matched by the last pattern of "1, 2, 3"
+    print(classify(5))     // 2  - matched by "4, 5"
+    print(classify(9))     // 0  - falls to the wildcard
+
+    print(sizeName("s"))   // small
+    print(sizeName("m"))   // medium-or-large
+    print(sizeName("l"))   // medium-or-large
+    print(sizeName("xl"))  // unknown - falls to the wildcard
+
+    print(toggle(true))    // 1
+    print(toggle(false))   // 0  - falls to the wildcard
+
+    // classify(1)=1, classify(3)=1, classify(5)=2, classify(9)=0,
+    // toggle(true)=1, toggle(false)=0 -> 1+1+2+0+1+0 = 5, this program's
+    // own exit code.
+    total := classify(1) + classify(3) + classify(5) + classify(9) + toggle(true) + toggle(false)
+    return total
+}

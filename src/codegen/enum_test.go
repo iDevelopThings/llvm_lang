@@ -697,3 +697,194 @@ func main() int {
 		t.Errorf("main() = %d, want 1", got)
 	}
 }
+
+// --- value-match (plain int/bool/string patterns - genValueMatchStmt) ---
+
+// TestValueMatchIntMultiPatternArm covers an int subject with a multi-value
+// arm (`case 2, 3, 4:`-equivalent) alongside single-value arms and the
+// mandatory wildcard - proving genValueMatchStmt's own short-circuit
+// comparison chain picks the right arm for a value that matches the SECOND
+// pattern in a multi-pattern arm specifically (not just the first), and
+// falls through to the wildcard for anything uncovered.
+func TestValueMatchIntMultiPatternArm(t *testing.T) {
+	jm := compileAndJIT(t, `
+func classify(x int) int {
+	match x {
+		1 => {
+			return 10
+		}
+		2, 3, 4 => {
+			return 20
+		}
+		_ => {
+			return 99
+		}
+	}
+}
+`)
+	tests := []struct {
+		in, want int32
+	}{
+		{1, 10},
+		{2, 20},
+		{3, 20},
+		{4, 20},
+		{5, 99},
+	}
+	for _, tc := range tests {
+		if got := jm.runInt32(t, "classify", tc.in); got != tc.want {
+			t.Errorf("classify(%d) = %d, want %d", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestValueMatchStringSubject covers a string subject - proving
+// genValueMatchStmt reuses genValueEqual's own string-equality codegen
+// (genStringEqual) rather than a raw pointer/discriminant comparison.
+func TestValueMatchStringSubject(t *testing.T) {
+	jm := compileAndJIT(t, `
+func code(s string) int {
+	match s {
+		"a" => {
+			return 1
+		}
+		"b", "c" => {
+			return 2
+		}
+		_ => {
+			return 0
+		}
+	}
+}
+func isA() bool {
+	return code("a") == 1
+}
+func isBOrC() bool {
+	return code("b") == 2 && code("c") == 2
+}
+func isOther() bool {
+	return code("z") == 0
+}
+`)
+	if got := jm.runBool(t, "isA"); !got {
+		t.Errorf("isA() = %v, want true", got)
+	}
+	if got := jm.runBool(t, "isBOrC"); !got {
+		t.Errorf("isBOrC() = %v, want true", got)
+	}
+	if got := jm.runBool(t, "isOther"); !got {
+		t.Errorf("isOther() = %v, want true", got)
+	}
+}
+
+// TestValueMatchBoolSubject covers a bool subject, and that a variable
+// reference (not just a bare literal) is a legal value pattern - resolved as
+// an ordinary value expression (see resolve.go's resolvePattern).
+func TestValueMatchBoolSubject(t *testing.T) {
+	jm := compileAndJIT(t, `
+func describe(b bool) int {
+	yes := true
+	match b {
+		yes => {
+			return 1
+		}
+		_ => {
+			return 0
+		}
+	}
+}
+func trueIsOne() bool {
+	return describe(true) == 1
+}
+func falseIsZero() bool {
+	return describe(false) == 0
+}
+`)
+	if got := jm.runBool(t, "trueIsOne"); !got {
+		t.Errorf("trueIsOne() = %v, want true", got)
+	}
+	if got := jm.runBool(t, "falseIsZero"); !got {
+		t.Errorf("falseIsZero() = %v, want true", got)
+	}
+}
+
+// TestValueMatchWildcardOnlyIsFine covers the degenerate case (no
+// non-wildcard arms at all) - genValueMatchStmt's own valueArms loop never
+// runs, so the wildcard's body must still generate correctly straight off
+// the subject's own evaluation point.
+func TestValueMatchWildcardOnlyIsFine(t *testing.T) {
+	jm := compileAndJIT(t, `
+func always42(x int) int {
+	match x {
+		_ => {
+			return 42
+		}
+	}
+}
+`)
+	if got := jm.runInt32(t, "always42", 7); got != 42 {
+		t.Errorf("always42(7) = %d, want 42", got)
+	}
+}
+
+// valueMatchDestructorLeakSrc mirrors matchArmDestructorLeakSrc one lowering
+// strategy over - genValueMatchStmt applies the identical preMatch
+// destructor snapshot/restore discipline genMatchStmt's own enum path
+// already uses, at every arm. Split into two separate tests below (rather
+// than two calls inside one), exactly like matchArmDestructorLeakSrc's own
+// two tests are: `calls` is a real global, persisting across every call made
+// against the same compileAndJIT module, so each direction needs its own
+// fresh module/state to assert against, not a second call layered onto the
+// same one.
+const valueMatchDestructorLeakSrc = `
+struct Resource {
+	id int
+	constructor(v int) {
+		this.id = v
+	}
+	destructor() {
+		calls = calls + 1
+	}
+}
+var calls int = 0
+func run(x int) int {
+	outer := Resource(1)
+	match x {
+		1 => {
+			return 1
+		}
+		_ => {
+			return 2
+		}
+	}
+}
+func afterFirst() int {
+	run(1)
+	return calls
+}
+func afterWildcard() int {
+	run(9)
+	return calls
+}
+`
+
+// TestValueMatchFirstArmDestructorStackDoesNotLeak covers the first
+// (non-wildcard) arm's own path.
+func TestValueMatchFirstArmDestructorStackDoesNotLeak(t *testing.T) {
+	jm := compileAndJIT(t, valueMatchDestructorLeakSrc)
+	if got := jm.runInt32(t, "afterFirst"); got != 1 {
+		t.Errorf("afterFirst() = %d, want 1 (outer's destructor must fire on the first arm's own path)", got)
+	}
+}
+
+// TestValueMatchWildcardArmDestructorStackDoesNotLeak covers the wildcard's
+// own final-fallback path - the direction that actually exercises
+// genValueMatchStmt's own preMatch restore right before generating the
+// wildcard body, mirroring TestMatchSecondArmDestructorStackDoesNotLeakFromFirst's
+// identical reasoning one lowering strategy over.
+func TestValueMatchWildcardArmDestructorStackDoesNotLeak(t *testing.T) {
+	jm := compileAndJIT(t, valueMatchDestructorLeakSrc)
+	if got := jm.runInt32(t, "afterWildcard"); got != 1 {
+		t.Errorf("afterWildcard() = %d, want 1 (outer's destructor must fire on the wildcard's own path too)", got)
+	}
+}

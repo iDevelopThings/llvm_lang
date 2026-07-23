@@ -267,25 +267,40 @@ type Span struct {
 //     value being matched) always first (see LANGUAGE.md's "match" section) -
 //     a statement, not an expression, this round. Each arm is a MatchArm
 //     node, in source order.
-//   - MatchArm: [pattern, body] - fixed arity. pattern is whatever
-//     parseExpr's ordinary grammar already produces for one of: a bare
-//     wildcard (`_`, an Ident node - the only bare-Ident pattern shape this
-//     grammar accepts; sema, not the grammar, is what actually restricts an
-//     Ident pattern to exactly "_"), a unit-variant pattern (`EnumName.Variant`,
-//     a MemberExpr - identical shape to a unit variant's own construction
-//     expression), a tuple-variant pattern (`EnumName.Variant(a, b)`, a
-//     CallExpr whose "arguments" are fresh binding-name Ident nodes rather
-//     than value expressions - identical shape to a tuple variant's own
-//     construction call), or a struct-variant pattern
-//     (`EnumName.Variant{field: newName, ...}`, a CompositeLit whose keyed
-//     elements' values are likewise fresh binding names - identical shape to
-//     a struct variant's own construction literal). Reusing construction's
-//     own CallExpr/CompositeLit/MemberExpr grammar verbatim needs zero new
-//     expression-parsing code - only sema's pattern-resolution/type-checking
-//     (resolvePattern/checkMatchArm) actually tells "this MemberExpr/CallExpr/
-//     CompositeLit is a pattern, not an ordinary expression - the calls
-//     inside are fresh bindings, not references" apart from an ordinary
-//     construction use of the identical shape. body is an ordinary Block.
+//   - MatchArm: [pattern0, pattern1, ..., patternN, body] - variable arity,
+//     at least one pattern always present, body always last (see ast.Tree's
+//     MatchArmPatterns/MatchArmPattern/MatchArmBody accessors). Multiple
+//     comma-separated patterns per arm (`1, 2, 3 => { ... }`, Go's own
+//     `case a, b, c:` shape) is a value-match-only feature (see LANGUAGE.md's
+//     "match" section's plain-value-pattern extension) - an enum-match arm
+//     is restricted back down to exactly one pattern by sema
+//     (checkEnumMatchStmt), not by this grammar, since the grammar can't yet
+//     know whether the subject is an enum or a plain value. Each pattern is
+//     whatever parseExpr's ordinary grammar already produces for one of: a
+//     bare wildcard (`_`, an Ident node - the only Ident pattern shape
+//     resolve.go's resolvePattern special-cases; any *other* Ident is now
+//     instead an ordinary value-pattern reference, e.g. a constant/variable
+//     used as a case value - see LANGUAGE.md's "match" section), a
+//     unit-variant pattern (`EnumName.Variant`, a MemberExpr - identical
+//     shape to a unit variant's own construction expression), a tuple-variant
+//     pattern (`EnumName.Variant(a, b)`, a CallExpr whose "arguments" are
+//     fresh binding-name Ident nodes rather than value expressions -
+//     identical shape to a tuple variant's own construction call), a
+//     struct-variant pattern (`EnumName.Variant{field: newName, ...}`, a
+//     CompositeLit whose keyed elements' values are likewise fresh binding
+//     names - identical shape to a struct variant's own construction
+//     literal), or - new this round - an ordinary value expression (a
+//     literal, a variable/constant reference, or any other expression shape
+//     not recognized as one of the enum-pattern shapes above - see
+//     LANGUAGE.md's "match" section's plain-value-pattern extension).
+//     Reusing construction's own CallExpr/CompositeLit/MemberExpr grammar
+//     verbatim needs zero new expression-parsing code - only sema's
+//     pattern-resolution/type-checking (resolvePattern/checkMatchArmPattern)
+//     actually tells "this MemberExpr/CallExpr/CompositeLit is an
+//     enum-variant pattern, not an ordinary expression - the calls inside are
+//     fresh bindings, not references" apart from an ordinary construction use
+//     of the identical shape, or an ordinary value-expression use of it.
+//     body is an ordinary Block.
 //   - MultiAssignStmt: [target0, target1, ..., targetN, value] - the
 //     assignment-form counterpart to MultiShortVarDecl, identical shape:
 //     every child except the last is an already-existing lvalue target

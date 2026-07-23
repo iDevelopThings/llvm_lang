@@ -580,24 +580,38 @@ func (p *Parser) parseMatchStmt() ast.NodeIndex {
 	return p.tree.NewNode(enums.NodeKinds.MatchStmt, kwTok, span, children...)
 }
 
-// parseMatchArm parses one `pattern => { body }` arm. The pattern is parsed
-// with the ordinary expression grammar (parseExpr) - a wildcard `_` (a bare
-// Ident), a unit-variant pattern (a MemberExpr), a tuple-variant pattern (a
-// CallExpr whose "arguments" are fresh binding names), or a struct-variant
-// pattern (a CompositeLit whose keyed elements' values are fresh binding
-// names) - see ast.Node's own MatchArm doc comment for why this needs no new
+// parseMatchArm parses one `pattern0, pattern1, ... => { body }` arm - a
+// comma-separated list of one or more patterns (Go's own `case a, b, c:`
+// multi-value-per-arm shape), each parsed with the ordinary expression
+// grammar (parseExpr): a wildcard `_` (a bare Ident), a unit-variant pattern
+// (a MemberExpr), a tuple-variant pattern (a CallExpr whose "arguments" are
+// fresh binding names), a struct-variant pattern (a CompositeLit whose keyed
+// elements' values are fresh binding names), or - new this round - an
+// ordinary value expression (a literal, a variable reference, ...) - see
+// ast.Node's own MatchArm doc comment for why none of this needs any new
 // expression-parsing grammar at all: every one of these shapes already
-// parses via CallExpr/CompositeLit/MemberExpr's own existing grammar, since
-// a pattern's own shape is deliberately identical to a variant's own
-// construction expression.
+// parses via CallExpr/CompositeLit/MemberExpr/any-other-expression's own
+// existing grammar, since a pattern's own shape is deliberately identical to
+// either a variant's own construction expression or a plain value
+// expression. This grammar itself makes no attempt to restrict how many
+// patterns an arm may have (an enum-match arm's "exactly one pattern" rule
+// is sema's job - checkEnumMatchStmt - since the grammar has no notion yet
+// of whether the enclosing match's subject is an enum or a plain value).
 func (p *Parser) parseMatchArm() ast.NodeIndex {
-	pattern := p.parseExpr(precLowest)
+	patterns := []ast.NodeIndex{p.parseExpr(precLowest)}
+	for {
+		if _, ok := p.accept(enums.Lexemes.Comma); !ok {
+			break
+		}
+		patterns = append(patterns, p.parseExpr(precLowest))
+	}
 	p.expect(enums.Lexemes.FatArrow)
 	body := p.parseBlock()
 
 	span := ast.Span{
-		Start: p.tree.SpanOf(pattern).Start,
+		Start: p.tree.SpanOf(patterns[0]).Start,
 		End:   p.tree.SpanOf(body).End,
 	}
-	return p.tree.NewNode(enums.NodeKinds.MatchArm, lexer.Token{}, span, pattern, body)
+	children := append(patterns, body)
+	return p.tree.NewNode(enums.NodeKinds.MatchArm, lexer.Token{}, span, children...)
 }

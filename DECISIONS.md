@@ -1619,3 +1619,83 @@ full language-level rules (including both deferred-to-a-later-round
 boundaries called out above, documented there as deliberate scope, not
 gaps) and `CODEGEN.md`'s "Enums" section for the representation and
 codegen this entry describes.
+
+## 2026-07-23 - `match` generalized into a general value-switch: mandatory wildcard, float exclusion, enum arms stay single-pattern
+
+**Decision:** deliver the value-switch capability the previous entry
+explicitly deferred: `match` now also accepts a plain `i8`/`i16`/`i32`/
+`i64`/`bool`/`string` subject, Go-`switch`-style, dispatching on ordinary
+value equality rather than only an enum's own declared variants. Each arm's
+pattern list is generalized from a fixed single pattern to a
+comma-separated list of one or more (Go's own `case a, b, c:` shape),
+shared by both the enum-match and value-match paths at the grammar level -
+sema is what actually restricts an enum-match arm back down to exactly one
+pattern (see below). The two subject kinds get genuinely different
+type-checking (`checkEnumMatchStmt` vs. `checkValueMatchStmt`,
+`sema/typecheck.go`) and codegen (`genMatchStmt`'s existing LLVM `switch`
+vs. the new `genValueMatchStmt`'s runtime comparison chain, `codegen/enum.go`)
+- see `CODEGEN.md`'s "match codegen" section for the full lowering
+breakdown - dispatched purely by the subject's own resolved type, mirroring
+this project's other type-driven dispatch precedents (e.g. `genValueEqual`'s
+own per-`Type.Kind` switch).
+
+**Why a mandatory wildcard, where Go's own `switch` doesn't require one:**
+the previous entry's exhaustiveness reasoning still holds exactly as
+written - an unbounded domain like `int`/`string` has no closed set to
+check coverage against, so a *real* exhaustiveness check (the kind the
+enum-match path actually gets) is simply impossible here, full stop. Go's
+own answer to that is to not require anything at all: a `switch` with no
+matching case and no `default` just silently does nothing. This project
+deliberately takes the stricter position instead: `match` exists
+specifically to be a real safety net (see the previous entry's own "Why
+`match` is a statement" reasoning about the feature's motivating value), and
+a value-match that can silently no-op on an uncovered case would quietly
+undermine that for exactly the inputs a programmer is least likely to have
+tested. Requiring a wildcard converts "did I forget a case" from a silent
+runtime gap into a compile-time question the language actually answers,
+even though it can't tell *which* cases you forgot the way the enum path
+can name uncovered variants by name. The trade-off is a real one - a
+value-match here is slightly more ceremony than Go's own `switch` for the
+same job - but matches this project's own established bias (see e.g. the
+non-copyable-type rules) toward a stricter, more explicit default over
+silently matching a looser host-language precedent.
+
+**Why `f32`/`f64` are excluded as a value-match subject type:** float
+equality is already a known footgun this language deliberately doesn't lean
+into anywhere else - `==`/`!=` on floats works (IEEE `OEQ`/`UNE`, NaN
+handled per spec - see `LANGUAGE.md`'s "Operators" section), but nothing in
+this language *encourages* branching on float equality the way a value-match
+subject would. A `case` value in a switch is written expecting exact,
+reliable equality (that's the entire feature), and a float's own rounding
+behavior makes "this value equals exactly 1.5" a much shakier assumption to
+build a whole dispatch construct around than an int/bool/string ever is.
+Excluding it outright - a clean diagnostic, not a silently-accepted footgun
+- costs nothing real: nobody was relying on float value-matching before
+this round existed at all, and an ordinary `if`/`else if` chain with an
+explicit tolerance comparison remains the correct tool for float-based
+branching regardless.
+
+**Why an enum-match arm stays restricted to exactly one variant pattern,
+even though the grammar itself now allows several:** binding several
+differently-shaped variant patterns into one shared arm body is a real,
+separate feature question - `Shape.Circle(r), Shape.Rectangle(w, h) => { ... }`
+would need to decide what the shared body may even reference, since each
+pattern binds different names to different types (or, for a mix including a
+unit variant, no names at all). Go itself has no equivalent to reach for
+here (its own multi-value `case` arms are always plain values, never
+destructuring binds), so there's no existing precedent to lean on for how
+the bindings should unify, if at all. Rather than inventing and shipping
+that design half-considered alongside the (unrelated) value-switch feature
+this round was actually asked to deliver, an enum-match arm with more than
+one pattern is simply rejected with a clean diagnostic - the identical
+"ship the narrower, correct thing now; the richer generalization is a real,
+separable feature for whenever it's actually needed" reasoning the previous
+`match` entry itself used for scoping the feature to enum-variant patterns
+in the first place.
+
+**Status:** shipped. See `LANGUAGE.md`'s "match" section ("Enum matching",
+"Value matching", and the updated "Explicitly deferred" list - the
+plain-value-pattern bullet moved from deferred to shipped, replaced by the
+binding-unification-across-multiple-enum-patterns bullet as the new
+deliberate scope limit) and `CODEGEN.md`'s "match" sections for the
+resolution/check/codegen split this entry describes.

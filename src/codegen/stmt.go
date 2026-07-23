@@ -74,6 +74,32 @@ func (g *Generator) genDestructorCall(addr, fn llvm.Value, fnTy llvm.Type) {
 	g.builder.CreateCall(fnTy, fn, []llvm.Value{addr}, "")
 }
 
+// snapshotDestructors returns a fresh copy of Generator.destructors - shared
+// by every construct with several independent, mutually exclusive branches
+// generated sequentially against the one real Generator.destructors slice
+// (genIfStmt's then/else, genMatchStmt's own switch arms, genValueMatchStmt's
+// own comparison-chain arms): without a real snapshot to restore before each
+// branch's own codegen, an earlier branch's own return/break/continue
+// (which truncates the shared slice) would leave a later, mutually
+// exclusive branch's own fall-through unwind operating on the wrong,
+// already-shrunk state - silently skipping a destructor call for an
+// outer-scope local that branch's own runtime path never actually
+// destructed. A fresh copy, never just the slice's current length, since a
+// branch's own codegen may itself append fresh entries into the same
+// backing array, which a length-only restore could then read back
+// incorrectly (see restoreDestructors).
+func (g *Generator) snapshotDestructors() []destructorEntry {
+	return append([]destructorEntry(nil), g.destructors...)
+}
+
+// restoreDestructors resets Generator.destructors back to a previously
+// captured snapshot (snapshotDestructors) - always a fresh copy of snapshot
+// itself, for the identical "a branch may have appended into the same
+// backing array" reason snapshotDestructors' own doc comment gives.
+func (g *Generator) restoreDestructors(snapshot []destructorEntry) {
+	g.destructors = append([]destructorEntry(nil), snapshot...)
+}
+
 // genStmt lowers one statement, reporting whether it terminated the current
 // basic block. See ast.Node's doc comment: IfStmt's then/else and ForStmt's
 // init/post slots may hold any single statement, not just a Block, so this
@@ -515,10 +541,11 @@ func (g *Generator) genContinueStmt(n ast.NodeIndex) bool {
 // sibling branch never actually saw removed at runtime (only one branch
 // ever really executes), and, unlike a Block's own genBlock call, there's no
 // enclosing "restore to my own base" logic for either branch on its own -
-// genIfStmt is what has to do it explicitly, once per branch (preIf is
-// copied, not just its length re-sliced, since a branch's own codegen may
-// itself push fresh entries into the same backing array, which a
-// length-only restore could then read back incorrectly).
+// genIfStmt is what has to do it explicitly, once per branch, via the
+// shared snapshotDestructors/restoreDestructors pair (see their own doc
+// comments for the full reasoning - genMatchStmt's own switch arms and
+// genValueMatchStmt's own comparison-chain arms, enum.go, apply the
+// identical discipline one construct over).
 func (g *Generator) genIfStmt(n ast.NodeIndex) bool {
 	condNode := g.tree.Child(n, 0)
 	thenNode := g.tree.Child(n, 1)
@@ -535,14 +562,14 @@ func (g *Generator) genIfStmt(n ast.NodeIndex) bool {
 	}
 	g.builder.CreateCondBr(condVal, thenBB, elseBB)
 
-	preIf := append([]destructorEntry(nil), g.destructors...)
+	preIf := g.snapshotDestructors()
 
 	g.builder.SetInsertPointAtEnd(thenBB)
 	thenTerm := g.genStmt(thenNode)
 	if !thenTerm {
 		g.builder.CreateBr(mergeBB)
 	}
-	g.destructors = append([]destructorEntry(nil), preIf...)
+	g.restoreDestructors(preIf)
 
 	elseTerm := false
 	if hasElse {
@@ -551,7 +578,7 @@ func (g *Generator) genIfStmt(n ast.NodeIndex) bool {
 		if !elseTerm {
 			g.builder.CreateBr(mergeBB)
 		}
-		g.destructors = append([]destructorEntry(nil), preIf...)
+		g.restoreDestructors(preIf)
 	}
 
 	g.builder.SetInsertPointAtEnd(mergeBB)
