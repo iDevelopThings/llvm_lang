@@ -179,3 +179,26 @@ func (t *Tree) FuncReturnType(decl NodeIndex) NodeIndex {
 func (t *Tree) FuncBody(decl NodeIndex) NodeIndex {
 	return t.Child(decl, 4)
 }
+
+// ExternFuncName returns decl's (an ExternFuncDecl's) name child - see
+// Node's own ExternFuncDecl doc comment for the [name, paramList, returnType]
+// shape these three accessors index into. A deliberately separate, parallel
+// set of accessors from FuncName/FuncParamList/FuncReturnType above, rather
+// than reusing them against ExternFuncDecl's own 3-child layout - the two
+// node kinds' children start at different positions (FuncDecl reserves slot 0
+// for its receiver; ExternFuncDecl has none), so indexing an ExternFuncDecl
+// through FuncDecl's own accessors would silently read the wrong child.
+func (t *Tree) ExternFuncName(decl NodeIndex) NodeIndex {
+	return t.Child(decl, 0)
+}
+
+// ExternFuncParamList returns decl's (an ExternFuncDecl's) ParamList child.
+func (t *Tree) ExternFuncParamList(decl NodeIndex) NodeIndex {
+	return t.Child(decl, 1)
+}
+
+// ExternFuncReturnType returns decl's (an ExternFuncDecl's) return-type
+// child - InvalidNode when the declaration names no return type.
+func (t *Tree) ExternFuncReturnType(decl NodeIndex) NodeIndex {
+	return t.Child(decl, 2)
+}

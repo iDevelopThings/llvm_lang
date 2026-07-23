@@ -257,6 +257,8 @@ func (r *resolver) resolvePackage(trees []*ast.Tree) {
 				r.declareLocal(r.pkg, decl, tree.Child(decl, 0), SymVar)
 			case enums.NodeKinds.FuncDecl:
 				r.declareFunc(r.pkg, decl)
+			case enums.NodeKinds.ExternFuncDecl:
+				r.declareExternFunc(r.pkg, decl)
 			}
 		}
 	}
@@ -269,6 +271,8 @@ func (r *resolver) resolvePackage(trees []*ast.Tree) {
 				r.resolveVarDeclBody(fileScope, decl)
 			case enums.NodeKinds.FuncDecl:
 				r.resolveFuncBody(fileScope, decl)
+			case enums.NodeKinds.ExternFuncDecl:
+				r.resolveExternFuncDecl(fileScope, decl)
 			case enums.NodeKinds.StructDecl:
 				r.resolveStructFieldTypes(fileScope, decl)
 				r.resolveStructConstructors(fileScope, decl)
@@ -552,6 +556,47 @@ func (r *resolver) declareFunc(pkg *Scope, decl ast.NodeIndex) {
 	}
 	r.info.Refs[nameNode] = sym
 	r.addMethod(receiver, sym)
+}
+
+// declareExternFunc registers an `extern func Name(params) RetType` top-level
+// declaration into package scope - the ExternFuncDecl counterpart to
+// declareFunc's free-function branch, which this is otherwise identical to:
+// an extern func can never have a receiver clause (there's no grammar for
+// one - see parser.parseExternFuncDecl), so this is just the one-line
+// declareLocal call, no addMethod branch to choose between. Deliberately
+// reuses SymFunc as the declared Symbol's kind rather than inventing a new
+// SymbolKind (see LANGUAGE.md's "External functions (FFI)" section): a call
+// to an extern-backed function looks identical to a call to an ordinary one
+// from every caller's perspective (same g.funcs-keyed codegen path, same
+// funcSigForCall dispatch) - the only place anything ever needs to tell the
+// two apart is by checking tree.Nodes[sym.Decl].Kind directly (see
+// funcSigForDecl, typecheck.go), exactly like an ordinary call site never
+// needs to know whether its callee's FuncDecl has a receiver or not.
+func (r *resolver) declareExternFunc(pkg *Scope, decl ast.NodeIndex) {
+	nameNode := r.tree.ExternFuncName(decl)
+	r.declareLocal(pkg, decl, nameNode, SymFunc)
+}
+
+// resolveExternFuncDecl resolves an ExternFuncDecl's own type positions - each
+// parameter's declared type and the return type (when present), as ordinary
+// type references - mirroring resolveFuncBody's identical param/return-type
+// loop, minus everything that assumes a real body: no function scope, no
+// per-parameter declareLocal (a parameter name is never referenced anywhere -
+// there's no body for it to be visible in), and no `this`/receiver setup
+// (an extern func is never a method). scope is the caller's own fileScope
+// (see resolvePackage), exactly like resolveVarDeclBody's own scope
+// parameter - a type reference here still needs to see the declaring file's
+// own import bindings, same as any other type position.
+func (r *resolver) resolveExternFuncDecl(scope *Scope, decl ast.NodeIndex) {
+	paramList := r.tree.ExternFuncParamList(decl)
+	returnType := r.tree.ExternFuncReturnType(decl)
+
+	for _, param := range r.tree.Children(paramList) {
+		r.resolveType(scope, r.tree.Child(param, 1))
+	}
+	if returnType != ast.InvalidNode {
+		r.resolveType(scope, returnType)
+	}
 }
 
 func (r *resolver) addMethod(receiver ast.NodeIndex, sym *Symbol) {

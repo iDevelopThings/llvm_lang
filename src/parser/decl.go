@@ -23,9 +23,11 @@ func (p *Parser) parseTopLevelItem() ast.NodeIndex {
 		return p.parseFuncDecl()
 	case p.atKeyword(enums.Keywords.Struct):
 		return p.parseStructDecl()
+	case p.atKeyword(enums.Keywords.Extern):
+		return p.parseExternFuncDecl()
 	default:
 		tok := p.tok
-		p.errorAtSpan(tok.Start, tok.End, "expected a top-level declaration (import, var, func, or struct), found %s", p.describe(tok))
+		p.errorAtSpan(tok.Start, tok.End, "expected a top-level declaration (import, var, func, struct, or extern), found %s", p.describe(tok))
 		p.sync(enums.Lexemes.Semicolon)
 		return p.badNode(tok)
 	}
@@ -124,6 +126,40 @@ func (p *Parser) parseFuncDecl() ast.NodeIndex {
 		End:   p.tree.SpanOf(body).End,
 	}
 	return p.tree.NewNode(enums.NodeKinds.FuncDecl, kwTok, span, receiver, name, params, returnType, body)
+}
+
+// parseExternFuncDecl parses `extern func Name(params) RetType` - a top-level
+// FFI declaration binding an external C symbol, with no body at all (see
+// ast.Node's own ExternFuncDecl doc comment and LANGUAGE.md's "External
+// functions (FFI)" section). Reuses parseFuncDecl's own param-list/return-type
+// parsing verbatim, just skipping the receiver-clause parsing (an extern func
+// can never be a method) and skipping a `{ ... }` body entirely - the
+// declaration simply ends right after the optional return type, exactly like
+// a type-less `var` already does for statement termination (parseFile's own
+// semicolon-separator loop handles that, same as every other top-level item).
+func (p *Parser) parseExternFuncDecl() ast.NodeIndex {
+	kwTok := p.expectKeyword(enums.Keywords.Extern)
+	p.expectKeyword(enums.Keywords.Func)
+
+	nameTok := p.expectIdent()
+	name := p.tree.NewNode(enums.NodeKinds.Ident, nameTok, tokenSpan(nameTok))
+
+	params := p.parseParamList()
+
+	returnType := ast.InvalidNode
+	if !p.at(enums.Lexemes.Semicolon) && !p.at(enums.Lexemes.EOF) {
+		returnType = p.parseTypeExpr()
+	}
+
+	end := p.tree.SpanOf(params).End
+	if returnType != ast.InvalidNode {
+		end = p.tree.SpanOf(returnType).End
+	}
+	span := ast.Span{
+		Start: kwTok.Start,
+		End:   end,
+	}
+	return p.tree.NewNode(enums.NodeKinds.ExternFuncDecl, kwTok, span, name, params, returnType)
 }
 
 // parseParamList parses a comma-separated `(name Type, ...)` list, wrapped

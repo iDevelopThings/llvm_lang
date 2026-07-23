@@ -69,6 +69,57 @@ func (g *Generator) declareFuncSignature(decl ast.NodeIndex) {
 	}
 }
 
+// declareExternFuncSignature declares decl's (an ExternFuncDecl's) LLVM
+// function signature - the FFI counterpart to declareFuncSignature above,
+// binding a real external C symbol rather than lowering a function this
+// package itself generates a body for (see LANGUAGE.md's "External functions
+// (FFI)" section and ast.Node's own ExternFuncDecl doc comment: there is no
+// body at all, ever, so - unlike every other declare*Signature in this
+// package - genPackage below never follows this with a corresponding
+// "generate body" pass for it).
+//
+// Simpler than declareFuncSignature in exactly the ways an extern func's own
+// grammar already guarantees: no receiver (an extern func can never be a
+// method - there's no grammar for one, see parser.parseExternFuncDecl) and no
+// `main`-name special-casing (main is always a real, bodied FuncDecl,
+// trivially never an ExternFuncDecl at all). Declared with default linkage,
+// not private - exactly like printf/malloc/memcpy/memcmp in runtime.go -
+// since this name must resolve as a genuine external symbol: the JIT's
+// already-registered process-symbol generator (see cmd/llvmc/main.go's
+// bindMinGWMainThunk - no changes needed here at all) resolves it against
+// whatever real DLL export already loaded into the host process happens to
+// share this exact name, at JIT-execution time.
+//
+// Stores into the exact same g.funcs map declareFuncSignature does, keyed by
+// the identical sym (both declare a SymFunc symbol - see resolve.go's
+// declareExternFunc) - every call-site (genFuncCall, isDirectFuncCall,
+// genFuncValue/genFuncThunk) reads this map with zero awareness of which of
+// the two declare*Signature functions actually populated a given entry.
+func (g *Generator) declareExternFuncSignature(decl ast.NodeIndex) {
+	nameNode := g.tree.ExternFuncName(decl)
+	paramListNode := g.tree.ExternFuncParamList(decl)
+	returnTypeNode := g.tree.ExternFuncReturnType(decl)
+	sym := g.info.Refs[nameNode]
+
+	var paramTypes []llvm.Type
+	for _, paramNode := range g.tree.Children(paramListNode) {
+		paramTypes = append(paramTypes, g.llvmType(g.info.Types[g.tree.Child(paramNode, 1)]))
+	}
+
+	retType := sema.Type{Kind: sema.TypeVoid}
+	if returnTypeNode != ast.InvalidNode {
+		retType = g.info.Types[returnTypeNode]
+	}
+
+	fnType := llvm.FunctionType(g.llvmType(retType), paramTypes, false)
+	g.funcs[sym] = funcEntry{
+		fn:       llvm.AddFunction(g.mod, g.tree.Text(nameNode), fnType),
+		fnType:   fnType,
+		retType:  retType,
+		isMethod: false,
+	}
+}
+
 // genFuncBody lowers decl's body, given its signature already declared (see
 // declareFuncSignature). Every VarDecl/ShortVarDecl/Param in the body gets a
 // stack slot via createEntryAlloca; a method's receiver needs none of its

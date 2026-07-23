@@ -1121,6 +1121,77 @@ stops that block's remaining statements from being generated at all - there
 is no `goto`/labels in this language, so nothing could ever jump back into
 that dead code anyway.
 
+## External functions (FFI): declare-only, zero JIT-side changes
+
+See `LANGUAGE.md`'s "External functions (FFI)" section for the language-level
+feature (`extern func Name(params) RetType` - a top-level declaration with no
+body at all, binding a real external C symbol).
+
+**A brand-new, deliberately separate AST node kind** (`ExternFuncDecl`,
+`[name, paramList, returnType]`), not a nullable-body variant of `FuncDecl` -
+see `DECISIONS.md`'s dated entry for the full reasoning (in short:
+`FuncDecl`'s own body-always-present invariant is depended on unconditionally
+by a large amount of existing code - `resolveFuncBody`, `checkFuncDecl`'s
+return-flow analysis, `genFuncBody`'s whole lowering pass - so a nullable-body
+`FuncDecl` would ripple a defensive nil-check through all of that; a separate
+node kind keeps every one of them completely untouched).
+
+**Sema deliberately reuses `sema.SymFunc`** as the declared symbol's kind
+(`resolve.go`'s `declareExternFunc`), not a new `SymbolKind` - an extern-backed
+function is indistinguishable from an ordinary one at every *call site*; the
+only place anything ever needs to tell the two apart is by checking
+`tree.Nodes[sym.Decl].Kind` directly (`funcSigForDecl`, `typecheck.go`, which
+dispatches to `computeFuncSig` or `computeExternFuncSig` depending on which
+node shape it finds - the one place the two genuinely different child layouts
+matter at all).
+
+**Codegen's lowering is, deliberately, almost nothing**:
+
+- `declareExternFuncSignature` (`src/codegen/func.go`) mirrors
+  `declareFuncSignature`'s param/return-type-to-LLVM-type translation, minus
+  the receiver and `isMain` special-casing (neither ever applies - an extern
+  func can never be a method, and `main` is always a real, bodied `FuncDecl`).
+  It calls `llvm.AddFunction(g.mod, name, fnType)` with **default linkage**,
+  not private - exactly like `printf`/`malloc`/`memcpy`/`memcmp` in
+  `runtime.go` - since this name must resolve as a genuine external symbol,
+  not one of this package's own internal helpers.
+- It stores into the **exact same `Generator.funcs` map** `declareFuncSignature`
+  does, keyed by the identical `*sema.Symbol` - every call-site
+  (`genFuncCall`, `isDirectFuncCall`, `genFuncValue`/`genFuncThunk`,
+  `src/codegen/expr.go`) needed **zero changes** to correctly treat a direct
+  call to an extern function exactly like a direct call to an ordinary one:
+  none of them ever branch on *how* a `funcEntry` got populated, only on
+  whether one exists.
+- **There is no corresponding "generate body" pass at all** - nothing calls
+  `genFuncBody` (or anything like it) for an `ExternFuncDecl`, since it has no
+  body, ever. `genPackage`'s own signature-declaration pass
+  (`src/codegen/codegen.go`) walks every `ExternFuncDecl` in the whole program
+  alongside every `FuncDecl`, but the later body-generation pass only ever
+  walks `FuncDecl`s.
+
+**Zero JIT/runtime-side changes were needed for this feature at all.**
+`cmd/llvmc/main.go`'s `bindMinGWMainThunk` already registers
+`llvm.NewDynamicLibrarySearchGeneratorForProcess(jit.GlobalPrefix())` on the
+JIT's `MainJITDylib()` (predating this feature, for an unrelated reason - see
+that function's own doc comment) - any symbol already loaded into the host
+process (which includes every kernel32.dll export on Windows, and libc's own
+exports via the mingw64 runtime already linked into this compiler's own
+process) resolves automatically through this existing mechanism the moment an
+extern func's `declare`-only LLVM function is looked up and called. An extern
+func declared here but never actually present in the host process at
+JIT-execution time fails at `Lookup`/call time with an ordinary "symbol not
+found" error, not a compile-time one - the same class of failure a real
+statically-linked program would get from its own linker instead, just moved
+to run time because this project's execution model is JIT, not link-then-run.
+
+Mirrors what its type-restriction diagnostic (`checkExternType`,
+`sema/typecheck.go`) already stops before this: a `string`/struct-by-value/
+dynamic-array/function-typed parameter or return type is a sema-layer error,
+not a codegen-layer one - codegen never has to consider (or defend against)
+any of those four unsupported shapes reaching an `ExternFuncDecl`'s
+`llvmType` translation, since a tree with one already failed `sema.Check`
+(see this package's own doc comment: `Generate` assumes fully valid input).
+
 ## Multi-file packages: one shared Module per package
 
 See `LANGUAGE.md`'s "Multi-file packages" section for the language-level

@@ -452,6 +452,13 @@ func (g *Generator) genPackage(trees []*ast.Tree) {
 		for d := range tree.TopLevelDeclsOfKind(enums.NodeKinds.FuncDecl) {
 			g.declareFuncSignature(d)
 		}
+		// ExternFuncDecl gets a signature declared here, exactly like an
+		// ordinary FuncDecl - but, deliberately, no corresponding entry in
+		// the "generate every body" pass below: it has no body at all (see
+		// declareExternFuncSignature's own doc comment).
+		for d := range tree.TopLevelDeclsOfKind(enums.NodeKinds.ExternFuncDecl) {
+			g.declareExternFuncSignature(d)
+		}
 		for d := range tree.TopLevelDeclsOfKind(enums.NodeKinds.StructDecl) {
 			for ctor := range tree.StructConstructors(d) {
 				g.declareConstructorSignature(ctor)

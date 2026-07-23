@@ -55,6 +55,7 @@ const (
 	NodeKindNewExpr         NodeKind = 39
 	NodeKindDeleteStmt      NodeKind = 40
 	NodeKindSliceExpr       NodeKind = 41
+	NodeKindExternFuncDecl  NodeKind = 42
 )
 
 type NodeKindContainer struct {
@@ -100,6 +101,7 @@ type NodeKindContainer struct {
 	NewExpr         NodeKind
 	DeleteStmt      NodeKind
 	SliceExpr       NodeKind
+	ExternFuncDecl  NodeKind
 }
 
 // NodeKinds is the entry point for the NodeKind enum.
@@ -146,6 +148,7 @@ var NodeKinds = NodeKindContainer{
 	NewExpr:         NodeKindNewExpr,
 	DeleteStmt:      NodeKindDeleteStmt,
 	SliceExpr:       NodeKindSliceExpr,
+	ExternFuncDecl:  NodeKindExternFuncDecl,
 }
 
 // NodeKindInfo is the static metadata attached to a NodeKind.
@@ -323,6 +326,10 @@ var nodeKindInfos = map[NodeKind]NodeKindInfo{
 		NodeKind: NodeKindSliceExpr,
 		Name:     "SliceExpr",
 	},
+	NodeKindExternFuncDecl: {
+		NodeKind: NodeKindExternFuncDecl,
+		Name:     "ExternFuncDecl",
+	},
 }
 
 var nodeKindValues = []NodeKind{
@@ -368,6 +375,7 @@ var nodeKindValues = []NodeKind{
 	NodeKindNewExpr,
 	NodeKindDeleteStmt,
 	NodeKindSliceExpr,
+	NodeKindExternFuncDecl,
 }
 
 var nodeKindByName = map[string]NodeKind{
@@ -413,6 +421,7 @@ var nodeKindByName = map[string]NodeKind{
 	"newexpr":         NodeKindNewExpr,
 	"deletestmt":      NodeKindDeleteStmt,
 	"sliceexpr":       NodeKindSliceExpr,
+	"externfuncdecl":  NodeKindExternFuncDecl,
 }
 
 // Values returns every declared value in declaration order.

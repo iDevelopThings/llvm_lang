@@ -30,6 +30,7 @@ const (
 	KeywordDestructor  Keyword = "Destructor"
 	KeywordNew         Keyword = "New"
 	KeywordDelete      Keyword = "Delete"
+	KeywordExtern      Keyword = "Extern"
 )
 
 type KeywordContainer struct {
@@ -50,6 +51,7 @@ type KeywordContainer struct {
 	Destructor  Keyword
 	New         Keyword
 	Delete      Keyword
+	Extern      Keyword
 }
 
 // Keywords is the entry point for the Keyword enum.
@@ -71,6 +73,7 @@ var Keywords = KeywordContainer{
 	Destructor:  KeywordDestructor,
 	New:         KeywordNew,
 	Delete:      KeywordDelete,
+	Extern:      KeywordExtern,
 }
 
 // KeywordInfo is the static metadata attached to a Keyword.
@@ -166,6 +169,11 @@ var keywordInfos = map[Keyword]KeywordInfo{
 		Name:    "Delete",
 		String:  "delete",
 	},
+	KeywordExtern: {
+		Keyword: KeywordExtern,
+		Name:    "Extern",
+		String:  "extern",
+	},
 }
 
 var keywordValues = []Keyword{
@@ -186,6 +194,7 @@ var keywordValues = []Keyword{
 	KeywordDestructor,
 	KeywordNew,
 	KeywordDelete,
+	KeywordExtern,
 }
 
 var keywordByName = map[string]Keyword{
@@ -206,6 +215,7 @@ var keywordByName = map[string]Keyword{
 	"destructor":  KeywordDestructor,
 	"new":         KeywordNew,
 	"delete":      KeywordDelete,
+	"extern":      KeywordExtern,
 }
 
 // Values returns every declared value in declaration order.

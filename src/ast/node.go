@@ -43,7 +43,10 @@ type Span struct {
 //   - ShortVarDecl: the `:=` token
 //   - VarDecl, FuncDecl, StructDecl, IfStmt, ForStmt, ReturnStmt, BreakStmt,
 //     ContinueStmt, FuncType, ConstructorDecl, DestructorDecl, FuncLit,
-//     NewExpr, DeleteStmt: the leading keyword token (FuncType's is the `func`
+//     NewExpr, DeleteStmt, ExternFuncDecl: the leading keyword token
+//     (ExternFuncDecl's is the `extern` keyword, not the `func` that follows
+//     it - see LANGUAGE.md's "External functions (FFI)" section; FuncType's
+//     is the `func`
 //     that introduces a function-type expression, e.g. `func(int) int`, see
 //     LANGUAGE.md's Types section; FuncLit's is the `func` that introduces a
 //     function-literal expression, e.g. `func(x int) int { return x }`, see
@@ -166,6 +169,19 @@ type Span struct {
 //     value-producing call, the same way BreakStmt/ContinueStmt/ReturnStmt
 //     are their own dedicated statement forms rather than call-shaped
 //     builtins.
+//   - ExternFuncDecl: [name, paramList, returnType] - fixed arity; returnType
+//     may be InvalidNode (an implicitly-void extern declaration). A deliberate,
+//     separate top-level declaration kind for `extern func Name(params)
+//     RetType` (see LANGUAGE.md's "External functions (FFI)" section) - NOT a
+//     nullable-body variant of FuncDecl: FuncDecl's own body slot is always
+//     present everywhere else this grammar/sema/codegen relies on that (see
+//     DECISIONS.md), so binding an external C symbol (no body at all, ever)
+//     gets its own narrow node kind instead of threading a nil-body case
+//     through all of that. No receiver clause (an extern func can never be a
+//     method) and no body - the declaration ends right after the optional
+//     return type, exactly like a type-less `var` already does for statement
+//     termination. Reuses the exact same ParamList grammar node FuncDecl's own
+//     paramList child does (parameters are still `name Type` pairs).
 //   - SliceExpr: [object, low, high] - fixed arity; a Go-style slice
 //     expression (`s[a:b]`, `s[:b]`, `s[a:]`, `s[:]` - see LANGUAGE.md's
 //     "Slicing" section). low/high are each InvalidNode when omitted (the

@@ -1192,3 +1192,86 @@ A package-qualified name can also appear in **type position**
 same-package visibility (see the "Multi-file packages" section above) -
 `Exported`/export enforcement only ever applies to a name reached through an
 actual package qualifier.
+
+## External functions (FFI)
+
+`extern func Name(params) RetType` declares a function this compiler doesn't
+generate a body for at all - a binding to a real external C symbol, resolved
+at link/JIT-execution time rather than lowered by this package's own codegen.
+It lives at top level, alongside `import`/`var`/`func`/`struct`:
+
+```go
+extern func abs(x i32) i32
+
+func main() int {
+    return abs(-5)   // 5 - a real call into libc's own abs
+}
+```
+
+A call to an extern-backed function looks, type-checks, and codegens exactly
+like a call to an ordinary `func` - same argument-count/type checking, same
+direct-call lowering, same ability to appear anywhere a call expression can
+(a bare statement, ignoring the result; an operand inside a larger
+expression; assigned to a variable). There is no separate "declare, then
+bind" step and no special call syntax - the only difference from an ordinary
+`func` is that this one has no `{ body }` at all, ever:
+
+```go
+extern func QueryPerformanceCounter(counter *i64) bool
+
+func elapsed() i64 {
+    start := i64(0)
+    QueryPerformanceCounter(&start)   // result ignored, as a bare statement
+    // ...
+    end := i64(0)
+    ok := QueryPerformanceCounter(&end)   // result used, as an ordinary bool
+    return end - start
+}
+```
+
+**The declared name is the linked symbol name, verbatim** - there is no
+separate alias/rename clause this round. `extern func abs(...)` binds exactly
+the symbol named `abs`, wherever the linker/JIT finds it exported from.
+
+**No receiver, no body, no `"C"`-style ABI string.** An extern func can never
+be a method (there's no grammar for a receiver clause here) and is always
+terminated right after its optional return type, exactly like a type-less
+`var` already is for statement termination - there's nothing after that to
+parse, ever. There's also no ABI-string annotation the way some other
+languages spell this (`extern "C"`): this project only ever targets one ABI
+(the C calling convention, via mingw64/libc) - there is nothing to
+disambiguate, so nothing to write.
+
+**Type restriction.** Every parameter type and the return type of an extern
+func must be one of:
+
+- a numeric type (`i8`/`i16`/`i32`/`i64`/`f32`/`f64`)
+- `bool`
+- a pointer type (`*T`, recursively - `T` itself is never restricted, since a
+  pointer is always just a raw address at the ABI level regardless of what it
+  points to)
+
+`string`, a struct type by value, a dynamic array (`[]T`), and a function
+type are all explicitly rejected with a compile error, not silently
+mishandled: none of these have a well-defined "just pass this to a real C
+function" representation in this compiler's current ABI-level shape (each is
+really a small fat struct/closure under the hood, not a single scalar/pointer
+value a C caller would recognize) - solving that is explicitly out of scope
+for this round.
+
+```go
+extern func bad1(s string) int        // error: string is not supported
+extern func bad2() []int              // error: []int is not supported
+extern func bad3(p Point) int         // error: a struct by value is not supported
+extern func bad4(cb func(int) int) int // error: a function type is not supported
+
+extern func ok1(p *string) int   // fine - a pointer is always just an address,
+                                  // whatever it points to
+```
+
+**Explicitly out of scope for this round** (deliberately deferred, not
+built): `extern var` (binding an external global variable), variadic extern
+functions, struct-by-value ABI marshaling/rename syntax for the linked symbol
+name, and any platform other than Windows. See `DECISIONS.md` for why this
+round is scoped this narrowly, and `CODEGEN.md` for how an extern func
+declaration actually lowers.

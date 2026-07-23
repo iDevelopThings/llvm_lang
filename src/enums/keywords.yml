@@ -42,3 +42,5 @@ values:
     string: "new"
   - name: Delete
     string: "delete"
+  - name: Extern
+    string: "extern"

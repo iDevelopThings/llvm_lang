@@ -781,3 +781,72 @@ user-facing semantics (including the non-copyable exclusion) and
 implementation, with new coverage in `src/codegen/lambda_test.go`
 (`TestForLoopCapturedHeaderVariableGetsPerIterationValue` and its
 sibling tests covering `continue`, `break`, and nested loops).
+
+---
+
+## 2026-07-23 - External functions (FFI): a general `extern func` mechanism instead of one-off builtins
+
+**Decision:** add a general-purpose FFI declaration, `extern func Name(params)
+RetType` at top level - a real, user-declarable binding to an external C
+symbol, resolved at JIT-execution time - rather than hand-rolling one more
+bespoke compiler builtin the way `print`/`make`/`append`/`len` already are.
+
+**Why:** the immediate need (`ScopeTimer`, a RAII-style timing helper,
+needing Windows' `QueryPerformanceCounter`/`QueryPerformanceFrequency`) could
+have been solved with a fifth hardcoded builtin, exactly like the existing
+four - but every one of those already required its own bespoke parser/sema/
+codegen special-casing, and a fifth one-off would only buy exactly one more
+function, forever. A general mechanism costs barely more to build (this
+project's own internal externs - `printf`/`malloc`/`free`/`memcpy`/`memcmp`/
+`memset`/`llvm.trap`, `src/codegen/runtime.go` - were already just
+`llvm.AddFunction` calls with no body; this feature is that same primitive,
+made user-declarable) and buys something the one-off approach never could:
+a future "standard library" can simply be ordinary `.llx` packages wrapping
+`extern func` declarations behind the existing import system (see
+`LANGUAGE.md`'s "Multi-file packages"/"Imports" sections) - no new language
+concept needed for that, ever again.
+
+A brand-new, separate `ExternFuncDecl` AST node kind was chosen over a
+nullable-body `FuncDecl` variant specifically because `FuncDecl`'s own
+always-has-a-body invariant is depended on unconditionally by a large amount
+of already-shipped code (`resolveFuncBody`, `checkFuncDecl`'s return-flow
+analysis, `genFuncBody`'s whole lowering pass) - see `CODEGEN.md`'s own
+"External functions (FFI)" section for the full reasoning, matching this
+project's own established precedent (`ConstructorDecl`/`DestructorDecl` were
+each their own new node kind for the identical reason, not shoehorned into
+`FuncDecl`).
+
+This round's scope was deliberately narrowed on several axes, each a
+plausible-but-separate follow-up rather than a forgotten piece:
+
+- **Type-allowlist, not general marshaling.** Only a numeric type, `bool`, or
+  a pointer type may cross an extern func's signature - `string`, a struct by
+  value, a dynamic array, and a function type are all rejected with a real
+  diagnostic. Each of the four rejected shapes is really a small fat struct/
+  closure in this compiler's own representation, not a single scalar/pointer
+  value a real C caller would recognize - solving "how does a `{ptr,i32}`
+  string cross a real C ABI boundary" is a genuinely separate, harder problem
+  (does the C side expect null-terminated? whose responsibility is it to
+  allocate?) that would have blocked landing the much narrower, already-
+  motivated pointer/numeric case indefinitely.
+- **No rename/alias syntax.** The declared name is the linked symbol name,
+  verbatim, this round - deferred rather than designing a syntax
+  (`extern func Name = "realSymbol"(...)`?) with no concrete motivating case
+  yet.
+- **No variadic extern functions, no `extern var`.** Neither was needed by
+  the motivating case; both are separate mechanisms with their own design
+  questions (a variadic C call's own argument-promotion rules; how an
+  external global's storage/initialization would even work under this
+  project's JIT execution model) not worth answering speculatively.
+- **No non-Windows platform consideration.** This project currently only
+  targets Windows/mingw64 at all (see `AGENTS.md`/`SETUP.md`) - there is no
+  second platform yet for a platform-conditional extern declaration to
+  matter against.
+
+**Status:** shipped. See `LANGUAGE.md`'s "External functions (FFI)" section
+for the full language-level rule and `CODEGEN.md`'s own section of the same
+name for the lowering (in short: `declareExternFuncSignature` populates the
+exact same `Generator.funcs` map an ordinary `FuncDecl` does, so every
+existing direct-call codegen path needed zero changes), plus the new
+`examples/scope_timer` worked example and test coverage across
+`src/parser`/`src/sema`/`src/codegen`.

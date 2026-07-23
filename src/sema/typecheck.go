@@ -308,6 +308,8 @@ func (c *checker) checkPackage(trees []*ast.Tree) {
 				c.declType(decl)
 			case enums.NodeKinds.FuncDecl:
 				c.checkFuncDecl(decl)
+			case enums.NodeKinds.ExternFuncDecl:
+				c.checkExternFuncDecl(decl)
 			}
 		}
 	}
@@ -445,14 +447,29 @@ func (c *checker) checkMainReturnType(decl ast.NodeIndex, sig funcSignature) {
 	c.errorAt(c.tree.FuncReturnType(decl), "main must return either nothing or int, got %s", sig.Return)
 }
 
-// funcSigForDecl returns decl's (a FuncDecl's) signature, computing and
-// caching it on first use.
+// funcSigForDecl returns decl's signature, computing and caching it on first
+// use - decl is either a FuncDecl (computeFuncSig) or an ExternFuncDecl
+// (computeExternFuncSig), dispatched by node kind right here rather than
+// having every call site (funcSigForCall's Ident case, typeOfSymbolValue's
+// SymFunc case) tell the two apart itself: both node kinds declare a SymFunc
+// symbol (see resolve.go's declareFunc/declareExternFunc), so a caller
+// dereferencing sym.Decl has no way to know in advance which shape it's
+// about to read - this is the one place that distinction actually matters,
+// since the two node kinds have genuinely different child layouts
+// (FuncDecl's [receiver, name, paramList, returnType, body] vs
+// ExternFuncDecl's own [name, paramList, returnType] - see ast.Node's doc
+// comment for both).
 func (c *checker) funcSigForDecl(decl ast.NodeIndex) funcSignature {
 	key := nodeRef{c.tree, decl}
 	if sig, ok := c.funcSigs[key]; ok {
 		return sig
 	}
-	sig := c.computeFuncSig(decl)
+	var sig funcSignature
+	if c.tree.Nodes[decl].Kind == enums.NodeKinds.ExternFuncDecl {
+		sig = c.computeExternFuncSig(decl)
+	} else {
+		sig = c.computeFuncSig(decl)
+	}
 	c.funcSigs[key] = sig
 	return sig
 }
@@ -474,6 +491,95 @@ func (c *checker) computeFuncSig(decl ast.NodeIndex) funcSignature {
 	return funcSignature{
 		Params: params,
 		Return: ret,
+	}
+}
+
+// checkExternFuncDecl type-checks decl's (an ExternFuncDecl's) own signature
+// exactly once (see LANGUAGE.md's "External functions (FFI)" section) - an
+// extern func has no body to check (see ast.Node's own ExternFuncDecl doc
+// comment: there is nothing else to check about one beyond its params/return
+// type), so this just forces funcSigForDecl's own memoized computation
+// (computeExternFuncSig) to run eagerly from checkPackage's top-level pass,
+// mirroring checkFuncDecl's identical funcSigForDecl call one node-kind over -
+// without this, a declared-but-never-called extern func (very plausibly one
+// half of a matched pair, like this feature's own QueryPerformanceCounter/
+// QueryPerformanceFrequency worked example, where only one of the two might
+// ever actually be called from a given program) would only get its own
+// type-restriction diagnostics the first time some call site happened to
+// reference it - or never, if no call site ever does.
+func (c *checker) checkExternFuncDecl(decl ast.NodeIndex) {
+	c.funcSigForDecl(decl)
+}
+
+// computeExternFuncSig builds decl's (an ExternFuncDecl's) signature from its
+// own [name, paramList, returnType] shape (see ast.Node's doc comment) - the
+// ExternFuncDecl counterpart to computeFuncSig, reusing the same declType/
+// typeFromNode helpers (a Param node's shape is identical regardless of
+// whether its parent is a FuncDecl or an ExternFuncDecl, so declType(param)
+// needs no changes of its own to serve both). The one thing genuinely new
+// here: every parameter type and the return type must be a type this round's
+// FFI mechanism can actually pass across a real C ABI boundary (see
+// checkExternType) - a restriction an ordinary FuncDecl's own signature never
+// needed, since an ordinary call/return never has to cross out of this
+// compiler's own representation into a foreign calling convention.
+func (c *checker) computeExternFuncSig(decl ast.NodeIndex) funcSignature {
+	paramList := c.tree.ExternFuncParamList(decl)
+	returnTypeNode := c.tree.ExternFuncReturnType(decl)
+
+	paramNodes := c.tree.Children(paramList)
+	params := make([]Type, len(paramNodes))
+	for i, param := range paramNodes {
+		t := c.declType(param)
+		params[i] = t
+		c.checkExternType(param, t, "parameter")
+	}
+
+	ret := voidType
+	if returnTypeNode != ast.InvalidNode {
+		ret = c.typeFromNode(returnTypeNode)
+		c.checkExternType(returnTypeNode, ret, "return")
+	}
+	return funcSignature{
+		Params: params,
+		Return: ret,
+	}
+}
+
+// checkExternType reports a diagnostic at n when t isn't one of the types
+// this round's FFI mechanism allows crossing an extern func's signature (see
+// isValidExternType) - what names the position for the diagnostic's own
+// wording ("parameter" or "return"). A TypeInvalid t is skipped silently -
+// already reported by whatever produced it (an undefined type name, e.g.),
+// so this would only add a redundant follow-on error, not a new root cause.
+func (c *checker) checkExternType(n ast.NodeIndex, t Type, what string) {
+	if t.IsInvalid() {
+		return
+	}
+	if !isValidExternType(t) {
+		c.errorAt(n, "extern func %s type %s is not supported - only numeric types, bool, and pointer types can cross an extern function signature", what, t)
+	}
+}
+
+// isValidExternType reports whether t is a type this round's FFI mechanism
+// can pass across a real C ABI boundary (see LANGUAGE.md's "External
+// functions (FFI)" section): a numeric type of any width (i8/i16/i32/i64/f32/
+// f64), bool, or a pointer type. A pointer is valid unconditionally, whatever
+// its own pointee type is (even one otherwise disallowed here, like *string
+// or a pointer to a struct) - a pointer is always just a raw address at the
+// ABI level regardless of what it points to, so there's nothing to recurse
+// into; TypePointer alone already covers `**T` and deeper exactly the same
+// way, since each nesting level is still just TypePointer at its own Kind.
+// Explicitly excluded: string (a {ptr,i32} fat struct, not a real C ABI
+// shape), a struct type by value, a dynamic array (`[]T`, also a fat
+// struct), and a function type (a fat closure pointer) - none of these have
+// a well-defined "just pass this to a real C function" representation in
+// this compiler yet, and solving that is explicitly out of scope this round.
+func isValidExternType(t Type) bool {
+	switch t.Kind {
+	case TypeI8, TypeI16, TypeI32, TypeI64, TypeF32, TypeF64, TypeBool, TypePointer:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -2657,13 +2763,18 @@ func (c *checker) checkNewExpr(n ast.NodeIndex) Type {
 // differs, never the type-checking):
 //
 //   - A direct call - a plain Ident resolving (via Info.Refs) to an actual
-//     declared free function (SymFunc with a real FuncDecl, i.e.
+//     declared free function (SymFunc with a real declaration, i.e.
 //     Decl != InvalidNode - this excludes the predeclared `print` builtin,
 //     though isPrintCall already intercepts that case earlier and never
 //     reaches this function at all), or a MemberExpr naming a method
 //     (methodSigForCallee) - gets no info.Types entry for callee itself:
 //     the callee names a fixed declaration, not a value with its own Type,
-//     same as before this round.
+//     same as before this round. The declaration itself may be a FuncDecl or
+//     an ExternFuncDecl (see LANGUAGE.md's "External functions (FFI)"
+//     section) - funcSigForDecl dispatches on which, so this call site (and
+//     codegen's identical isDirectFuncCall/genFuncCall) needs no awareness of
+//     the distinction at all: a call to an extern-backed function type-checks
+//     and lowers exactly like a call to an ordinary one.
 //   - Anything else that type-checks as callable - a function-typed
 //     variable/parameter, an ordinary (non-method) struct field of function
 //     type (`cb.fn(5)` - methodSigForCallee's isField result), or any other

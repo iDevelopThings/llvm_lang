@@ -1,0 +1,59 @@
+// scope_timer.llx - a general `extern func` FFI declaration (see LANGUAGE.md's
+// "External functions (FFI)" section), demonstrated end to end by binding
+// Windows' own QueryPerformanceCounter/QueryPerformanceFrequency (both
+// exported from kernel32.dll, always loaded in every Windows process - no
+// JIT-side change needed at all, see CODEGEN.md) and using them from inside
+// a struct's constructor/destructor to build a small RAII-style scope timer.
+//
+// Exercises: an extern call taking a pointer argument (`&this.start`), an
+// extern call as a bool-returning expression whose result is ignored as a
+// bare statement, and calling extern functions from inside a constructor and
+// a destructor.
+//
+// Run with:
+//   .\llvmc.exe examples\scope_timer\scope_timer.llx
+
+extern func QueryPerformanceCounter(counter *i64) bool
+extern func QueryPerformanceFrequency(freq *i64) bool
+
+// ScopeTimer prints how many performance-counter ticks elapsed between its
+// own construction and destruction - constructed at the start of the scope
+// being timed, destructed (automatically, at ordinary scope exit - see
+// LANGUAGE.md's "Destructors" section) at the end of it.
+struct ScopeTimer {
+    label string
+    start i64
+
+    constructor(label string) {
+        this.label = label
+        QueryPerformanceCounter(&this.start)
+    }
+
+    destructor() {
+        end := i64(0)
+        QueryPerformanceCounter(&end)
+        freq := i64(0)
+        QueryPerformanceFrequency(&freq)
+        elapsedTicks := end - this.start
+        print(this.label)
+        print(elapsedTicks)
+        print(freq)
+    }
+}
+
+func slowWork() int {
+    t := ScopeTimer("slowWork")
+    sum := 0
+    i := 0
+    for i < 1000000 {
+        sum = sum + i
+        i++
+    }
+    return sum
+}
+
+func main() int {
+    result := slowWork()
+    print(result)
+    return 0
+}

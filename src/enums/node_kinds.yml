@@ -50,3 +50,4 @@ values:
   - name: NewExpr
   - name: DeleteStmt
   - name: SliceExpr
+  - name: ExternFuncDecl
