@@ -95,6 +95,7 @@ const (
 	TypeArray
 	TypeFunc
 	TypePointer
+	TypeMap
 
 	TypeUntypedInt
 	TypeUntypedFloat
@@ -144,6 +145,14 @@ type Type struct {
 	Elem    *Type
 	Size    int64
 	Dynamic bool
+
+	// Key is set when Kind == TypeMap: the map's own declared key type
+	// (`map[K]V`'s K - see LANGUAGE.md's "Maps" section). Elem doubles as the
+	// map's *value* type (V) for this Kind too - the same "wraps one other
+	// Type" field TypeArray/TypePointer already share, just with a second
+	// wrapped Type of its own (Key) a map alone needs, since unlike an array
+	// or a pointer a map has two independent type parameters, not one.
+	Key *Type
 
 	// Params and Return are set when Kind == TypeFunc: a function value's
 	// parameter types and return type (TypeVoid for a function type that
@@ -269,6 +278,8 @@ func (t Type) Equal(u Type) bool {
 		return t.Elem.Equal(*u.Elem)
 	case TypePointer:
 		return t.Elem.Equal(*u.Elem)
+	case TypeMap:
+		return t.Key.Equal(*u.Key) && t.Elem.Equal(*u.Elem)
 	case TypeFunc:
 		if len(t.Params) != len(u.Params) {
 			return false
@@ -334,6 +345,8 @@ func (t Type) String() string {
 		return fmt.Sprintf("[%d]%s", t.Size, t.Elem.String())
 	case TypePointer:
 		return "*" + t.Elem.String()
+	case TypeMap:
+		return "map[" + t.Key.String() + "]" + t.Elem.String()
 	case TypeFunc:
 		parts := make([]string, len(t.Params))
 		for i, p := range t.Params {

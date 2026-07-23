@@ -74,6 +74,13 @@ type Span struct {
 //   - BinaryExpr: [left, right] - fixed arity
 //   - ArrayType: [size, elem] - fixed arity; size is InvalidNode for a
 //     dynamic/slice type (`[]T`) rather than a fixed-size one (`[N]T`)
+//   - MapType: [key, elem] - fixed arity, a type-position node for `map[K]V`
+//     (see LANGUAGE.md's "Maps" section) - the map counterpart to ArrayType's
+//     own [size, elem] shape, minus the size slot a map type has no use for
+//     (a map's own runtime element count is never part of its declared
+//     type, unlike a fixed-size array's `N`). Parsed by parseTypeExpr the
+//     exact same recursive-into-element-type way `[]T` already is, keyed on
+//     the `map` keyword instead of `[` - see parser's own parseTypeExpr.
 //   - CompositeLit: [typeExpr, elem0, elem1, ...] - variable arity, typeExpr
 //     (an Ident or ArrayType) always first; each elem is either a bare
 //     expression (positional) or a KeyValueExpr (keyed)

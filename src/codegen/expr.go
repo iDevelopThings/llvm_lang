@@ -649,7 +649,21 @@ func (g *Generator) genExpr(n ast.NodeIndex) llvm.Value {
 			return llvm.ConstNull(g.ptrTy)
 		}
 		return g.genLoad(n)
-	case enums.NodeKinds.MemberExpr, enums.NodeKinds.IndexExpr:
+	case enums.NodeKinds.MemberExpr:
+		return g.genLoad(n)
+	case enums.NodeKinds.IndexExpr:
+		// A map index (`m[k]`) never goes through genAddr/genLoad's generic
+		// address-then-load path (maps.go's genMapIndexRead handles a missing
+		// key/nil map by returning V's own zero value directly, rather than
+		// genAddr needing to somehow produce an address for a slot that may
+		// not even exist yet - see LANGUAGE.md's "Maps" section and
+		// sema.isAddressableChain's own explicit map exclusion: `&m[k]` is
+		// illegal for exactly this reason). An ordinary array/string index
+		// still goes through genLoad, unchanged.
+		if g.isMapIndex(n) {
+			v, _ := g.genMapIndexRead(n)
+			return v
+		}
 		return g.genLoad(n)
 	case enums.NodeKinds.ThisExpr:
 		// `this` is typed *T now (checkThisExpr, sema/typecheck.go), matching
@@ -1037,6 +1051,10 @@ func (g *Generator) genCallExpr(n ast.NodeIndex) llvm.Value {
 	}
 	if g.isBuiltinCall(calleeNode, "args") {
 		return g.genArgsCall()
+	}
+	if g.isBuiltinCall(calleeNode, "remove") {
+		g.genMapRemoveCall(argNodes)
+		return llvm.Value{}
 	}
 	if g.isConstructorCall(calleeNode) {
 		return g.genConstructorCall(calleeNode, argNodes)

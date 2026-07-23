@@ -1,0 +1,51 @@
+// word_freq.llx - a real dogfooding demo for this round's `map[K]V` feature
+// (see LANGUAGE.md's "Maps" section): a word-frequency counter, splitting a
+// sentence on spaces via std/strings.Split (already built this session) and
+// counting occurrences into a map[string]int. Demonstrates make, insertion
+// (both a fresh key and an update to an already-present one), the
+// `v, ok := m[k]` idiom (checking both a key that exists and one that
+// doesn't), len, and remove - every operation this round's map feature
+// supports.
+//
+// Every printed/returned value below is hand-verifiable - see the inline
+// comments next to each print for the expected value.
+//
+// Run with:
+//   .\llvmc.exe examples\word_freq\word_freq.llx
+//   echo $LASTEXITCODE   # (PowerShell) -> 5  (counts["the"] [3] + foxCount [2])
+
+import "../../std/strings"
+
+func main() int {
+    text := "the quick brown fox jumps over the lazy dog the fox runs"
+    words := strings.Split(text, " ")
+
+    counts := make(map[string]int)
+    i := 0
+    for i < len(words) {
+        w := words[i]
+        counts[w] = counts[w] + 1   // missing key reads as 0 - insert-or-update in one line
+        i++
+    }
+
+    print(len(counts))              // 9 - distinct words: the, quick, brown, fox, jumps, over, lazy, dog, runs
+
+    theCount := counts["the"]
+    print(theCount)                  // 3 - "the" appears 3 times
+
+    foxCount, foxOk := counts["fox"] // present key: (2, true)
+    print(foxCount)                   // 2
+    print(foxOk)                      // true
+
+    catCount, catOk := counts["cat"] // absent key: (0, false) - never appears
+    print(catCount)                   // 0
+    print(catOk)                      // false
+
+    remove(counts, "the")
+    print(len(counts))                // 8 - one fewer distinct word after removal
+
+    _, stillThere := counts["the"]
+    print(stillThere)                  // false - removed key correctly reports not-found
+
+    return theCount + foxCount         // 3 + 2 = 5
+}

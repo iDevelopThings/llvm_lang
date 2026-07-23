@@ -44,3 +44,5 @@ values:
     string: "delete"
   - name: Extern
     string: "extern"
+  - name: Map
+    string: "map"

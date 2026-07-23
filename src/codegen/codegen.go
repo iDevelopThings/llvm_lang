@@ -182,6 +182,21 @@ type Generator struct {
 	// serves every element type.
 	dynArrTy llvm.Type
 
+	// mapCtrlTy is a map's (`map[K]V`) control-block LLVM representation:
+	// the literal struct {ptr, i32, i32} = {bucketsPtr, count, bucketCount} -
+	// see maps.go's own top-of-file doc comment and CODEGEN.md's "Maps"
+	// section. A map's own runtime value is a single `ptr` (like TypePointer
+	// - see llvmType) pointing at one of these, arena-allocated once by
+	// genMapMake and never moved thereafter - only its buckets/bucketCount
+	// fields change in place as the table grows (genMapGrowIfNeeded).
+	mapCtrlTy llvm.Type
+
+	// fmtMapNilTrap is the cached format-string global for the "assignment
+	// to entry in nil map" runtime trap (genMapTrapIfNil, maps.go) - built
+	// once, in setupMapTypes, exactly like every other cached trap-message
+	// global in this package (see the fmt*Trap fields below).
+	fmtMapNilTrap llvm.Value
+
 	structLayouts map[*sema.StructInfo]*structLayout
 	globals       map[*sema.Symbol]llvm.Value
 
@@ -427,6 +442,7 @@ func GeneratePackage(trees []*ast.Tree, infos map[*ast.Tree]*sema.Info, moduleNa
 		g.allDiags[tree] = diag.NewBag()
 	}
 	g.setupTypes()
+	g.setupMapTypes()
 	g.setupRuntime()
 	g.setupArgsGlobal()
 	g.genPackage(trees)

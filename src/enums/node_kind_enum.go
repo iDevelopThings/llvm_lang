@@ -60,6 +60,7 @@ const (
 	NodeKindMultiValueExpr    NodeKind = 44
 	NodeKindMultiShortVarDecl NodeKind = 45
 	NodeKindMultiAssignStmt   NodeKind = 46
+	NodeKindMapType           NodeKind = 47
 )
 
 type NodeKindContainer struct {
@@ -110,6 +111,7 @@ type NodeKindContainer struct {
 	MultiValueExpr    NodeKind
 	MultiShortVarDecl NodeKind
 	MultiAssignStmt   NodeKind
+	MapType           NodeKind
 }
 
 // NodeKinds is the entry point for the NodeKind enum.
@@ -161,6 +163,7 @@ var NodeKinds = NodeKindContainer{
 	MultiValueExpr:    NodeKindMultiValueExpr,
 	MultiShortVarDecl: NodeKindMultiShortVarDecl,
 	MultiAssignStmt:   NodeKindMultiAssignStmt,
+	MapType:           NodeKindMapType,
 }
 
 // NodeKindInfo is the static metadata attached to a NodeKind.
@@ -358,6 +361,10 @@ var nodeKindInfos = map[NodeKind]NodeKindInfo{
 		NodeKind: NodeKindMultiAssignStmt,
 		Name:     "MultiAssignStmt",
 	},
+	NodeKindMapType: {
+		NodeKind: NodeKindMapType,
+		Name:     "MapType",
+	},
 }
 
 var nodeKindValues = []NodeKind{
@@ -408,6 +415,7 @@ var nodeKindValues = []NodeKind{
 	NodeKindMultiValueExpr,
 	NodeKindMultiShortVarDecl,
 	NodeKindMultiAssignStmt,
+	NodeKindMapType,
 }
 
 var nodeKindByName = map[string]NodeKind{
@@ -458,6 +466,7 @@ var nodeKindByName = map[string]NodeKind{
 	"multivalueexpr":    NodeKindMultiValueExpr,
 	"multishortvardecl": NodeKindMultiShortVarDecl,
 	"multiassignstmt":   NodeKindMultiAssignStmt,
+	"maptype":           NodeKindMapType,
 }
 
 // Values returns every declared value in declaration order.

@@ -418,7 +418,12 @@ func universeScope() *Scope {
 	// typecheck.go/runtime.go) and check/lower it with its own bespoke logic
 	// instead of an ordinary call's argument-count/type matching against a
 	// declared signature.
-	for _, name := range []string{"make", "append", "len", "args"} {
+	// remove is predeclared exactly like make/append/len/args - see
+	// LANGUAGE.md's "Maps" section: a deliberately new, distinctly-named
+	// builtin for map key removal (`remove(m, k)`), not an extension of the
+	// existing `delete p` statement (a wholly unrelated real pointer/heap
+	// deallocation operation).
+	for _, name := range []string{"make", "append", "len", "args", "remove"} {
 		u.Define(&Symbol{
 			Name:  name,
 			Kind:  SymFunc,

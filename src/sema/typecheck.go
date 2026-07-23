@@ -792,6 +792,36 @@ func (c *checker) checkDestructureSource(value ast.NodeIndex, wantCount int, con
 		invalid[i] = invalidType
 	}
 
+	// `v, ok := m[k]` - Go's own "two-result index expression" rule, specific
+	// to map indexing (see LANGUAGE.md's "Maps" section) - is a genuinely
+	// distinct case from a multi-return function call: a map IndexExpr is
+	// never itself a TypeMultiReturn-typed expression (checkIndexExpr always
+	// yields V alone, the ordinary single-value case - see its own doc
+	// comment), so this is checked structurally, up front, entirely
+	// separately from the CallExpr/TypeMultiReturn path below. checkExpr (not
+	// checkValueExpr) drives the actual target/key type-checking exactly
+	// once, via checkIndexExpr - reading back the target's own already-cached
+	// Type (populated by checkIndexExpr's own checkValueExpr(target) call)
+	// to decide whether this is really a map index at all, rather than
+	// re-checking the target a second time and risking duplicate diagnostics.
+	if c.tree.Nodes[value].Kind == enums.NodeKinds.IndexExpr {
+		targetNode := c.tree.Child(value, 0)
+		vt := c.checkExpr(value)
+		tt := c.info.Types[targetNode]
+		if tt.Kind != TypeMap {
+			c.errorAt(value, "cannot destructure a single-value index expression (%s) into %d targets", vt, wantCount)
+			return invalid
+		}
+		if wantCount != 2 {
+			c.errorAt(value, "wrong number of values in %s: a map index yields 2 values (value, ok), got %d target(s)", context, wantCount)
+			return invalid
+		}
+		if vt.IsInvalid() {
+			return invalid
+		}
+		return []Type{vt, boolType}
+	}
+
 	if c.tree.Nodes[value].Kind != enums.NodeKinds.CallExpr {
 		c.errorAt(value, "right-hand side of a %s must be exactly one function call", context)
 		c.checkValueExpr(value)
@@ -1115,6 +1145,8 @@ func (c *checker) computeTypeFromNode(n ast.NodeIndex) Type {
 		return c.typeFromSymbol(sym)
 	case enums.NodeKinds.ArrayType:
 		return c.arrayTypeFromNode(n)
+	case enums.NodeKinds.MapType:
+		return c.mapTypeFromNode(n)
 	case enums.NodeKinds.PointerType:
 		return c.pointerTypeFromNode(n)
 	case enums.NodeKinds.FuncType:
@@ -1311,6 +1343,71 @@ func (c *checker) constArraySize(sizeNode ast.NodeIndex) (int64, bool) {
 	return n, true
 }
 
+// mapTypeFromNode converts a MapType type-position node (`map[K]V` - see
+// LANGUAGE.md's "Maps" section and ast.Node's own MapType doc comment) into a
+// Type - the map counterpart to arrayTypeFromNode, minus the size handling a
+// map type has no use for. Unlike an array's element type (unrestricted), a
+// map's key type is checked right here, at every declaration site, against
+// this language's own comparability rule (typeIsComparableKeyType) - a
+// dynamic array, function type, or another map is rejected outright with a
+// real diagnostic, the same "grammar accepts the general shape, sema
+// enforces the feature's own narrower rule" division of labor
+// arrayTypeFromNode's own non-copyable-element check already uses.
+func (c *checker) mapTypeFromNode(n ast.NodeIndex) Type {
+	keyNode := c.tree.Child(n, 0)
+	elemNode := c.tree.Child(n, 1)
+	key := c.typeFromNode(keyNode)
+	elem := c.typeFromNode(elemNode)
+
+	if !key.IsInvalid() && !c.typeIsComparableKeyType(key) {
+		c.errorAt(keyNode, "invalid map key type %s: a map key must be comparable (a dynamic array, function type, or another map cannot be used as a key)", key)
+	}
+
+	return Type{
+		Kind: TypeMap,
+		Key:  &key,
+		Elem: &elem,
+	}
+}
+
+// typeIsComparableKeyType reports whether t may be used as a map's key type
+// (see LANGUAGE.md's "Maps" section): any type this language's own `==`/`!=`
+// already supports - a numeric type, bool, string, a pointer, or a struct/
+// fixed-size array whose own fields/elements are themselves all comparable,
+// recursively (mirroring structCopyable's own recursive-field-walk shape,
+// just checking comparability instead of copyability) - a dynamic array
+// (`[]T`), a function type, or another map are all explicitly rejected: none
+// of them are meaningfully hashable/comparable the way this language
+// currently represents them (see AGENTS.md's Operators section - `==`/`!=`
+// themselves already reject a dynamic array outright, and never define
+// anything for a function or map type at all).
+func (c *checker) typeIsComparableKeyType(t Type) bool {
+	switch t.Kind {
+	case TypeArray:
+		if t.Dynamic {
+			return false
+		}
+		return t.Elem == nil || c.typeIsComparableKeyType(*t.Elem)
+	case TypeFunc, TypeMap:
+		return false
+	case TypeStruct:
+		if t.Struct == nil {
+			return true
+		}
+		restore := c.pushTree(t.Struct.Symbol.Tree)
+		defer restore()
+		for _, field := range c.tree.StructFields(t.Struct.Symbol.Decl) {
+			fieldType := c.typeFromNode(c.tree.Child(field, 1))
+			if !c.typeIsComparableKeyType(fieldType) {
+				return false
+			}
+		}
+		return true
+	default:
+		return true
+	}
+}
+
 // checkBlock type-checks every statement of block in order. Unlike
 // resolveBlock, this needs no Scope of its own - name resolution already
 // happened; every Ident this pass looks at is already keyed into info.Refs.
@@ -1400,7 +1497,28 @@ func (c *checker) checkAssignStmt(n ast.NodeIndex) {
 		}
 		return
 	}
+	if c.isMapIndexTarget(target) {
+		c.errorAt(target, "map element does not support compound assignment (%s) - read it, modify the value, and store it back with a plain = instead", op)
+		return
+	}
 	c.checkCompoundOp(value, op, tt, vt)
+}
+
+// isMapIndexTarget reports whether n is a map index expression (`m[k]`) -
+// shared by checkAssignStmt's own compound-assignment rejection and
+// checkIncDecStmt's identical one just below: `m[k] = v` (a plain insert-or-
+// update) is the only assignment form maps support this round (see
+// LANGUAGE.md's "Maps" section) - `m[k] += v`/`m[k]++`/`m[k]--` would each
+// need a real "read-modify-write in one map operation" primitive this round
+// deliberately doesn't build, so they're rejected here with a clear
+// diagnostic instead of reaching codegen (which has no lowering for them at
+// all) on an otherwise-valid-looking tree.
+func (c *checker) isMapIndexTarget(n ast.NodeIndex) bool {
+	if c.tree.Nodes[n].Kind != enums.NodeKinds.IndexExpr {
+		return false
+	}
+	target := c.tree.Child(n, 0)
+	return c.info.Types[target].Kind == TypeMap
 }
 
 // checkCompoundOp checks a compound-assignment operator (+= -= *= /=)
@@ -1484,6 +1602,10 @@ func (c *checker) checkIncDecStmt(n ast.NodeIndex) {
 	target := c.tree.Child(n, 0)
 	t, ok := c.checkLValue(target)
 	if !ok {
+		return
+	}
+	if c.isMapIndexTarget(target) {
+		c.errorAt(n, "map element does not support %s - read it, modify the value, and store it back with a plain = instead", c.tree.Text(n))
 		return
 	}
 	if !t.IsNumeric() {
@@ -1995,6 +2117,16 @@ func (c *checker) isAddressableChain(n ast.NodeIndex) bool {
 		if targetType.Kind == TypeArray && targetType.Dynamic {
 			return true
 		}
+		if targetType.Kind == TypeMap {
+			// A map value is never addressable - mirroring Go's own real
+			// "cannot take the address of a map index expression" rule (see
+			// LANGUAGE.md's "Maps" section): unlike a fixed-size array
+			// element (inline storage inside the array's own addressable
+			// backing), a map slot doesn't necessarily exist at all until an
+			// actual insert runs, so there's no stable address to hand back
+			// regardless of whether the map variable itself is addressable.
+			return false
+		}
 		return c.isAddressableChain(target)
 	case enums.NodeKinds.UnaryExpr:
 		return c.tree.Text(n) == "*"
@@ -2258,6 +2390,19 @@ func (c *checker) checkIndexExpr(n ast.NodeIndex) Type {
 	index := c.tree.Child(n, 1)
 
 	tt := c.checkValueExpr(target)
+
+	// A map index (`m[k]`) checks its key against the map's own declared key
+	// type instead of requiring a plain int (see LANGUAGE.md's "Maps"
+	// section) - a plain single-target `x := m[k]` reads V, missing-key
+	// returning V's own zero value at runtime (see CODEGEN.md); the "two-
+	// result index expression" form (`v, ok := m[k]`) is a context-dependent
+	// special case handled entirely in checkDestructureSource instead, not
+	// here - this always yields just V, the ordinary single-value case.
+	if tt.Kind == TypeMap {
+		c.checkMapIndexKey(index, tt)
+		return *tt.Elem
+	}
+
 	it := c.checkValueExpr(index)
 	if !it.IsInvalid() {
 		switch {
@@ -2276,6 +2421,18 @@ func (c *checker) checkIndexExpr(n ast.NodeIndex) Type {
 		return invalidType
 	}
 	return *tt.Elem
+}
+
+// checkMapIndexKey type-checks a map index expression's key operand (`m[k]`)
+// against mapType's own declared key type, adapting an untyped constant
+// exactly like any other position (checkAssignable) - shared by
+// checkIndexExpr's own map case and checkRemoveCall's own key argument.
+func (c *checker) checkMapIndexKey(index ast.NodeIndex, mapType Type) {
+	it := c.checkValueExpr(index)
+	if it.IsInvalid() {
+		return
+	}
+	c.checkAssignable(index, *mapType.Key, it, "map index")
 }
 
 // checkSliceExpr types a Go-style slice expression `s[a:b]` / `s[:b]` /
@@ -2577,6 +2734,9 @@ func (c *checker) checkCallExpr(n ast.NodeIndex) Type {
 	if c.isBuiltinCall(callee, "args") {
 		return c.checkArgsCall(n, args)
 	}
+	if c.isBuiltinCall(callee, "remove") {
+		return c.checkRemoveCall(n, args)
+	}
 	if t, ok := c.checkConstructorCall(n, callee, args); ok {
 		return t
 	}
@@ -2661,26 +2821,22 @@ func (c *checker) isBuiltinCall(callee ast.NodeIndex, name string) bool {
 	return ok && sym.Kind == SymFunc && sym.Decl == ast.InvalidNode && sym.Name == name
 }
 
-// checkMakeCall type-checks `make([]T, n)` / `make([]T, n, cap)` - see
-// LANGUAGE.md's "Dynamic arrays" section. Unlike every other call this
+// checkMakeCall type-checks `make([]T, n)` / `make([]T, n, cap)` (see
+// LANGUAGE.md's "Dynamic arrays" section) or `make(map[K]V)` (see
+// LANGUAGE.md's "Maps" section - a map's own make call takes no n/cap
+// argument at all: it always starts out empty). Unlike every other call this
 // language has, make's first argument (args[0]) is a type-position node (an
-// ArrayType, built by the parser's own bespoke make grammar - see
+// ArrayType or MapType, built by the parser's own bespoke make grammar - see
 // parser/expr.go's parseMakeArgs), not a value expression, so it goes
-// through typeFromNode rather than checkValueExpr. n and cap are ordinary
-// runtime int expressions - unlike [N]T's N (see constArraySize), neither is
-// required to be a compile-time constant; that's the entire point of
-// "dynamic" (see codegen's genMakeCall for the runtime cap>=n check this
-// implies, since sema can't reject a bad runtime relationship between two
-// arbitrary expressions at compile time).
+// through typeFromNode rather than checkValueExpr. A dynamic array's n/cap
+// are ordinary runtime int expressions - unlike [N]T's N (see
+// constArraySize), neither is required to be a compile-time constant; that's
+// the entire point of "dynamic" (see codegen's genMakeCall for the runtime
+// cap>=n check this implies, since sema can't reject a bad runtime
+// relationship between two arbitrary expressions at compile time).
 func (c *checker) checkMakeCall(n ast.NodeIndex, args []ast.NodeIndex) Type {
-	if len(args) < 2 || len(args) > 3 {
-		c.errorAtNodes(args, n, "make requires 2 or 3 arguments, got %d", len(args))
-		if len(args) > 0 {
-			c.typeFromNode(args[0])
-			for _, a := range args[1:] {
-				c.checkValueExpr(a)
-			}
-		}
+	if len(args) == 0 {
+		c.errorAtNodes(args, n, "make requires at least 1 argument, got %d", len(args))
 		return invalidType
 	}
 
@@ -2692,8 +2848,27 @@ func (c *checker) checkMakeCall(n ast.NodeIndex, args []ast.NodeIndex) Type {
 		}
 		return invalidType
 	}
+
+	if target.Kind == TypeMap {
+		if len(args) != 1 {
+			c.errorAtNodes(args[1:], n, "make(map[K]V) takes no further arguments, got %d", len(args)-1)
+			for _, a := range args[1:] {
+				c.checkValueExpr(a)
+			}
+		}
+		return target
+	}
+
 	if target.Kind != TypeArray || !target.Dynamic {
-		c.errorAt(typeNode, "make requires a dynamic array type ([]T), got %s", target)
+		c.errorAt(typeNode, "make requires a dynamic array type ([]T) or a map type (map[K]V), got %s", target)
+		for _, a := range args[1:] {
+			c.checkValueExpr(a)
+		}
+		return invalidType
+	}
+
+	if len(args) < 2 || len(args) > 3 {
+		c.errorAtNodes(args, n, "make requires 2 or 3 arguments, got %d", len(args))
 		for _, a := range args[1:] {
 			c.checkValueExpr(a)
 		}
@@ -2753,10 +2928,11 @@ func (c *checker) checkAppendCall(n ast.NodeIndex, args []ast.NodeIndex) Type {
 }
 
 // checkLenCall type-checks `len(x)` - a dynamic array's runtime length, a
-// fixed-size array's compile-time-known size, or a string's runtime length
-// (see LANGUAGE.md's "Dynamic arrays" section) - matching Go's own `len`
-// working across all three. Not meaningful for anything else (a struct,
-// numeric type, or bool), rejected with a clear diagnostic.
+// fixed-size array's compile-time-known size, a string's runtime length (see
+// LANGUAGE.md's "Dynamic arrays" section), or a map's runtime entry count
+// (see LANGUAGE.md's "Maps" section) - matching Go's own `len` working across
+// all four. Not meaningful for anything else (a struct, numeric type, or
+// bool), rejected with a clear diagnostic.
 func (c *checker) checkLenCall(n ast.NodeIndex, args []ast.NodeIndex) Type {
 	if len(args) != 1 {
 		c.errorAtNodes(args, n, "len takes exactly 1 argument, got %d", len(args))
@@ -2769,11 +2945,41 @@ func (c *checker) checkLenCall(n ast.NodeIndex, args []ast.NodeIndex) Type {
 	if t.IsInvalid() {
 		return invalidType
 	}
-	if t.Kind == TypeArray || t.Kind == TypeString {
+	if t.Kind == TypeArray || t.Kind == TypeString || t.Kind == TypeMap {
 		return i32Type
 	}
 	c.errorAt(args[0], "len is not defined for %s", t)
 	return invalidType
+}
+
+// checkRemoveCall type-checks the predeclared `remove(m, k)` builtin (see
+// LANGUAGE.md's "Maps" section) - a deliberately new, distinctly-named
+// builtin for map key removal, not an extension of this language's existing
+// `delete p` statement (real pointer/heap deallocation - a wholly unrelated
+// operation; reusing that keyword here would be a confusing collision, see
+// LANGUAGE.md). Returns void, like print - there's nothing to return.
+func (c *checker) checkRemoveCall(n ast.NodeIndex, args []ast.NodeIndex) Type {
+	if len(args) != 2 {
+		c.errorAtNodes(args, n, "remove requires exactly 2 arguments (a map and a key), got %d", len(args))
+		for _, a := range args {
+			c.checkValueExpr(a)
+		}
+		return invalidType
+	}
+
+	mapType := c.checkValueExpr(args[0])
+	if mapType.IsInvalid() {
+		c.checkValueExpr(args[1])
+		return invalidType
+	}
+	if mapType.Kind != TypeMap {
+		c.errorAt(args[0], "remove requires a map (map[K]V), got %s", mapType)
+		c.checkValueExpr(args[1])
+		return invalidType
+	}
+
+	c.checkMapIndexKey(args[1], mapType)
+	return voidType
 }
 
 // checkArgsCall type-checks `args()` - the predeclared builtin returning the

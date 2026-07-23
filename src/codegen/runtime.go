@@ -427,6 +427,11 @@ func (g *Generator) genArenaAllocElems(elemLLType llvm.Type, count llvm.Value) (
 // become an enormous unsigned byte count instead of a clean trap.
 func (g *Generator) genMakeCall(callNode ast.NodeIndex, args []ast.NodeIndex) llvm.Value {
 	target := g.info.Types[callNode]
+
+	if target.Kind == sema.TypeMap {
+		return g.genMapMake(target)
+	}
+
 	elemLLType := g.llvmType(*target.Elem)
 
 	nVal := g.genExpr(args[1])
@@ -543,7 +548,8 @@ func (g *Generator) genAppendCall(args []ast.NodeIndex) llvm.Value {
 // genLenCall lowers `len(x)` - a dynamic array's runtime len field, a
 // fixed-size array's compile-time-known size (folded to a constant directly,
 // the same value its own bounds check already uses - see sema's
-// checkLenCall), or a string's runtime length field.
+// checkLenCall), a string's runtime length field, or a map's own live entry
+// count (genMapLenValue - see LANGUAGE.md's "Maps" section).
 func (g *Generator) genLenCall(argNode ast.NodeIndex) llvm.Value {
 	t := g.info.Types[argNode]
 	switch {
@@ -555,9 +561,12 @@ func (g *Generator) genLenCall(argNode ast.NodeIndex) llvm.Value {
 	case t.Kind == sema.TypeString:
 		v := g.genExpr(argNode)
 		return g.builder.CreateExtractValue(v, 1, "")
+	case t.Kind == sema.TypeMap:
+		v := g.genExpr(argNode)
+		return g.genMapLenValue(v)
 	default:
-		// Only a dynamic array, fixed-size array, or string reach here on a
-		// tree that already passed sema.Check (see checkLenCall,
+		// Only a dynamic array, fixed-size array, string, or map reach here
+		// on a tree that already passed sema.Check (see checkLenCall,
 		// sema/typecheck.go, and the package doc comment).
 		panic("codegen: genLenCall reached an unsupported type " + t.String())
 	}

@@ -171,6 +171,29 @@ func (g *Generator) genMultiShortVarDecl(n ast.NodeIndex) {
 	names := g.tree.MultiShortVarDeclNames(n)
 	valueNode := g.tree.MultiShortVarDeclValue(n)
 
+	// `v, ok := m[k]` (see LANGUAGE.md's "Maps" section) - Go's own "two-
+	// result index expression," specific to map indexing, not a real
+	// TypeMultiReturn-typed call result (see sema's checkDestructureSource)
+	// - is a genuinely distinct source shape from every other case this
+	// function handles: valueNode is an IndexExpr, not a CallExpr, and
+	// genMapIndexRead already returns both components as two separate Go
+	// values directly, with no aggregate struct to ExtractValue out of at
+	// all.
+	if g.tree.Nodes[valueNode].Kind == enums.NodeKinds.IndexExpr {
+		value, found := g.genMapIndexRead(valueNode)
+		values := [2]llvm.Value{value, found}
+		for i, nameNode := range names {
+			sym := g.info.Refs[nameNode]
+			t := g.info.Types[nameNode]
+			llt := g.llvmType(t)
+			addr := g.allocLocalSlot(sym, llt, sym.Name)
+			g.locals[sym] = addr
+			g.pushDestructorEntry(sym, t)
+			g.builder.CreateStore(values[i], addr)
+		}
+		return
+	}
+
 	aggregate := g.genExpr(valueNode)
 	for i, nameNode := range names {
 		sym := g.info.Refs[nameNode]
@@ -288,9 +311,23 @@ func (g *Generator) deleteLocalSlot(operand ast.NodeIndex) (llvm.Value, bool) {
 func (g *Generator) genAssignStmt(n ast.NodeIndex) {
 	targetNode := g.tree.Child(n, 0)
 	valueNode := g.tree.Child(n, 1)
-	addr := g.genAddr(targetNode)
-
 	op := g.tree.Text(n)
+
+	// A map-index target (`m[k] = v`) never goes through genAddr - unlike an
+	// array element, a map slot may not exist yet, and inserting one is a
+	// real get-or-insert-with-possible-growth operation (see maps.go's
+	// genMapWriteAddr/genMapGetOrInsertAddr and LANGUAGE.md's "Maps"
+	// section), not a plain address computation. Compound assignment/++/--
+	// against a map element is rejected by sema (checkAssignStmt/
+	// checkIncDecStmt's own isMapIndexTarget checks) - this is always a
+	// plain "=" insert-or-update by the time it reaches here.
+	if g.isMapIndex(targetNode) {
+		addr := g.genMapWriteAddr(targetNode)
+		g.storeValueInto(addr, valueNode)
+		return
+	}
+
+	addr := g.genAddr(targetNode)
 	if op == "=" {
 		g.storeValueInto(addr, valueNode)
 		return
@@ -328,7 +365,24 @@ func (g *Generator) genMultiAssignStmt(n ast.NodeIndex) {
 
 	addrs := make([]llvm.Value, len(targets))
 	for i, target := range targets {
-		addrs[i] = g.genAddr(target)
+		if g.isMapIndex(target) {
+			addrs[i] = g.genMapWriteAddr(target)
+		} else {
+			addrs[i] = g.genAddr(target)
+		}
+	}
+
+	// `v, ok = m[k]` - the assignment-form counterpart to
+	// genMultiShortVarDecl's own identical special case just above; see its
+	// doc comment for why this is a distinct IndexExpr shape, not a real
+	// TypeMultiReturn-typed CallExpr result.
+	if g.tree.Nodes[valueNode].Kind == enums.NodeKinds.IndexExpr {
+		value, found := g.genMapIndexRead(valueNode)
+		values := [2]llvm.Value{value, found}
+		for i, addr := range addrs {
+			g.builder.CreateStore(values[i], addr)
+		}
+		return
 	}
 
 	aggregate := g.genExpr(valueNode)

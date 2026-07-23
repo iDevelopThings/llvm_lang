@@ -1173,3 +1173,104 @@ component types, both destructuring forms including non-ident assignment
 targets, and 3+ return values), plus a real worked example
 (`examples/multireturn/multireturn.llx`) exercised end to end - JIT and AOT
 alike - by `cmd/llvmc/main_test.go`.
+
+---
+
+## 2026-07-23 - Maps: open addressing + tombstones, a word-wise FNV-1a-style hash, `remove` over reusing `delete`
+
+**Decision:** `map[K]V` is a real hash table, backed by the same arena
+allocator every other heap-needing feature already routes through - open
+addressing with linear probing and tombstone-marked deletions (not separate
+chaining), a word-wise FNV-1a-*style* recursive hash combinator (not a
+literal byte-for-byte FNV-1a pass over a key's raw memory), doubling growth
+at a 0.75 load factor, and a brand-new predeclared `remove(m, k)` builtin
+for key removal rather than reusing the existing `delete p` statement.
+Scoped to storage/lookup/removal only - no `range`-style iteration, no
+`keys(m)`/`values(m)` helpers, no map composite-literal syntax.
+
+**Why open addressing + tombstones over separate chaining:** genuinely
+simpler to implement correctly and reason about - one flat, arena-allocated
+bucket array per map (`{ptr buckets, i32 count, i32 bucketCount}` control
+block plus a `{i8 tag, K key, V value}` bucket array), no per-entry pointer
+indirection/chaining links to allocate, walk, or reason about aliasing for.
+The one real wrinkle open addressing introduces - a naive "clear the slot on
+delete" would break a probe sequence that legitimately continues past a
+deleted slot to reach a still-live key further along the same original
+chain - is solved the standard way: a distinct tombstone tag, never treated
+as "probe stops here" the way a genuine empty slot is, but still eligible to
+be reused as an insertion point.
+
+**Why a word-wise recursive hash combinator over literal byte-for-byte
+FNV-1a:** this project's own struct/array *values* are real LLVM aggregates
+built via `InsertValue`, with no guarantee their own inter-field padding
+bytes are ever deterministically zeroed - hashing "every raw byte the LLVM
+type occupies" risks hashing two logically-identical struct values (equal in
+every field) to two different results, purely from whatever garbage bits sat
+in their own padding, silently breaking the one property a hash table can't
+survive without (equal keys MUST hash equal). Recursing through a key's own
+*logical* structure - each numeric field/element's own bit pattern, a
+string's own real content bytes, walked recursively for a nested struct/
+array - and mixing only those bits with the same simple FNV-1a-style
+`seed = (seed XOR word) * 16777619` fold sidesteps the padding hazard
+entirely, while staying exactly as simple a mixing function as literal
+FNV-1a itself. See `CODEGEN.md`'s "Maps" section for the full worked
+rationale.
+
+**Why `remove(m, k)` as a genuinely new builtin, not an extension of
+`delete p`:** `delete p` is a real, unrelated operation - heap pointer
+deallocation via `new`/`delete` (see LANGUAGE.md's "Pointers" section) -
+operating on a completely different kind of value (a `*T`) for a completely
+different reason (freeing memory, not removing a table entry). Overloading
+that one keyword for "also remove a map key" would be a confusing collision
+between two unrelated concepts sharing only surface-level vocabulary
+("delete something"); a clean, distinctly-named `remove(m, k)` builtin (the
+same predeclared-function-with-no-declaration-site mechanism `make`/
+`append`/`len`/`args` already use) avoids the collision entirely and needs
+no new grammar at all.
+
+**Why map iteration (`for k, v := range m`) was left out entirely, not just
+narrowly deferred:** this language has **no `range`-style for-loop grammar
+at all yet**, for anything - only the three plain C-style `for` forms exist.
+Inventing `range` just for maps, when nothing else in the language has it
+either, is a substantially bigger, genuinely separate feature (new grammar,
+new sema iteration-variable binding rules, a real design question of its
+own for what a future array/slice `range` would look like too) - not
+something to back into narrowly scoped to maps alone. `keys(m)`/`values(m)`
+helpers were considered as a smaller consolation but likewise deferred,
+since they weren't needed to make the feature's own worked example
+(`examples/word_freq/word_freq.llx`) complete - every value the demo needs
+is reached by direct lookup, never enumeration.
+
+**Why a map composite literal (`map[string]int{"a": 1}`) was left out:**
+Go has this, but it's a real, separate grammar extension - this language's
+existing `CompositeLit` machinery is built specifically around struct/array
+shapes (a bare positional or `field: value` element list), not a `key:
+value` *pair* list keyed by arbitrary expressions the way a map literal
+needs. `make(map[K]V)` plus individual `m[k] = v` insertions was judged
+sufficient for this round; writing `map[...]...{...}` today is simply a
+plain parse error (`map` has nowhere legal to start an expression), not a
+silently-mishandled case.
+
+**Status:** shipped. See `LANGUAGE.md`'s new "Maps" section for the full
+language-level rule (key-comparability restriction, the `v, ok := m[k]`
+two-result index expression and its precise distinction from a real
+multi-return call, every explicit scope boundary above) and `CODEGEN.md`'s
+new "Maps" section for the hash table's exact representation/growth/
+collision-resolution scheme. New coverage across `src/parser`
+(`map_test.go` - `map[K]V` grammar/`Tree.Dump` shape, nested maps, `make`'s
+own bespoke argument grammar applied to a map type, and the clean parse
+diagnostic for a bare `map[...]...{...}` expression), `src/sema`
+(`map_test.go` - the type itself, `make`/`len`/`remove`'s own dispatch, the
+key-comparability restriction across every rejected/accepted shape, the
+two-result index expression's context-dependent typing alongside a real
+multi-return call's own unchanged rejection, and every mutation restriction
+- `&m[k]`, compound assignment, `++`/`--`), and `src/codegen`
+(`map_test.go`, JIT-executed - make/insert/lookup/overwrite, `len`, `remove`
+(including from a nil map and an absent key), the two-result idiom for both
+a present and absent key alongside a plain single-value read in the same
+program, a real growth/rehash forced by 50 distinct integer keys with every
+one still correctly retrievable afterward, struct-typed keys colliding by
+structural value rather than identity, and a nested `map[K]map[K2]V2`
+value), plus a real worked example (`examples/word_freq/word_freq.llx` - a
+word-frequency counter over `std/strings.Split`) exercised end to end -
+JIT and AOT alike, both producing byte-identical, hand-verified output.

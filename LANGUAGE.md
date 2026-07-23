@@ -243,6 +243,163 @@ view[0] = 100
 print(arr[1])           // 100 - shares the fixed array's own storage
 ```
 
+## Maps
+
+`map[K]V` - Go-style prefix type syntax, following exactly the same
+bracket-prefix, recurse-into-element-type shape `[N]T`/`[]T` already use,
+just keyed on the `map` keyword instead of a leading `[`:
+
+```go
+var m map[string]int
+```
+
+A map value is a real hash table (see `CODEGEN.md`'s "Maps" section for the
+exact representation/growth scheme) - **a reference type**, like Go's own
+real maps: assigning one map-typed variable to another (or passing one as an
+argument, or returning one) copies only a small header, not the table
+itself, so both sides still observe the identical live table and its
+mutations.
+
+Deliberately scoped to **storage/lookup/removal only this round** - no
+iteration (see "Explicitly out of scope" below).
+
+- **`make(map[K]V)`** creates a fresh, empty map - unlike `make([]T, n)`,
+  this takes no further arguments at all: a map always starts out empty,
+  growing on demand as entries are inserted.
+
+  ```go
+  m := make(map[string]int)
+  ```
+
+- **`m[k] = v`** inserts a fresh key or updates an already-present one, in
+  one uniform operation - there's no separate "insert" vs. "update" spelling,
+  matching Go exactly.
+
+  ```go
+  m := make(map[string]int)
+  m["a"] = 1     // insert
+  m["a"] = 2     // update - m["a"] is now 2
+  ```
+
+- **`m[k]`** as a plain, single-value read yields `V` - **a missing key
+  returns `V`'s own zero value**, exactly matching Go's real behavior, not a
+  trap or an error:
+
+  ```go
+  m := make(map[string]int)
+  m["a"] = 1
+  x := m["a"]        // 1
+  y := m["missing"]  // 0 - int's zero value, no error
+  ```
+
+- **`v, ok := m[k]`** (or `v, ok = m[k]` against already-declared targets) -
+  Go's own "two-result index expression," reusing the multi-target
+  destructuring grammar this language's multi-return values already
+  introduced (see "Go-style multi-return values" below): `ok` reports
+  whether the key was actually present, `v` is `V`'s zero value when it
+  wasn't.
+
+  ```go
+  m := make(map[string]int)
+  m["a"] = 1
+  v, ok := m["a"]        // v == 1, ok == true
+  v2, ok2 := m["missing"] // v2 == 0, ok2 == false
+  ```
+
+  This is a genuinely different rule from a real multi-return function call
+  used in the same position (see that section's own precise wording): a map
+  index expression's own type is always just plain `V` - a 2-target
+  destructuring context is the only place that additionally exposes the
+  `ok` component; an ordinary single-value `m[k]` (as above) is completely
+  unaffected and needs no special casing at all. This mirrors Go's own real
+  spec, which calls map indexing (and channel receives, which don't exist
+  here) a distinct "two-result index expression" rule, never a general
+  multi-value-returning expression the way a function call is.
+
+- **`len(m)`** - the map's current live entry count, extending the same
+  `len` builtin that already works on a dynamic array, a fixed-size array,
+  and a `string`.
+
+- **`remove(m, k)`** - a new, dedicated predeclared builtin that deletes `k`
+  from `m` (a no-op if `k` isn't present, or if `m` is `nil` - never an
+  error either way, matching Go's own `delete(m, k)`). Deliberately a
+  **distinct** builtin, not a reuse of this language's existing `delete p`
+  **statement** (see "Pointers" below) - that's a wholly unrelated
+  operation, real pointer/heap deallocation; reusing the same keyword for
+  map-key removal would be a confusing collision between two unrelated
+  concepts, so this gets a clean new name instead, needing no new grammar at
+  all (it's an ordinary call, exactly like `len`/`make`).
+
+  ```go
+  m := make(map[string]int)
+  m["a"] = 1
+  remove(m, "a")
+  _, ok := m["a"]   // ok == false
+  print(len(m))      // 0
+  ```
+
+**Key-type restriction.** A map key must be a type this language's own
+`==`/`!=` already supports: any numeric type, `bool`, `string`, a pointer, or
+a struct/fixed-size array whose own fields/elements are themselves all
+comparable, recursively. A **dynamic array (`[]T`)**, a **function type**, or
+**another map** as a key type is rejected outright, with a diagnostic
+pointing at the key type itself, reported the moment the `map[K]V` type
+itself is declared (a struct field, a `var`, a parameter, `make`'s own
+argument, ...) - none of these are meaningfully hashable/comparable the way
+this language currently represents them:
+
+```go
+var bad1 map[[]int]int              // error: []int is not a comparable key type
+var bad2 map[func(int) int]int      // error: func(int) int is not a comparable key type
+var bad3 map[map[string]int]int     // error: map[string]int is not a comparable key type
+
+struct Point { x int; y int }
+var ok map[Point]string             // fine - every field is itself comparable
+```
+
+**A map element is not addressable and not independently mutable in place.**
+`&m[k]` is a compile error (mirroring Go's own identical restriction exactly
+- a map slot may not even exist yet, so there's no stable address to hand
+back), and compound assignment/`++`/`--` against a map element
+(`m[k] += 1`, `m[k]++`) are rejected too, with a clear diagnostic - read the
+current value, compute the new one, and store it back with a plain `=`
+instead:
+
+```go
+m := make(map[string]int)
+m["a"] = 1
+m["a"] = m["a"] + 1   // fine - 2
+m["a"]++               // error: map element does not support ++
+```
+
+**Nested maps and a map-typed struct field both just work** - a map's value
+type is "any type," including another map, falling out for free from the
+general type-position grammar with no extra work needed:
+
+```go
+struct Box {
+    counts map[string]int
+}
+
+var nested map[string]map[string]int
+```
+
+**Explicitly out of scope this round:**
+
+- **Map iteration** (`for k, v := range m`) - this language has **no
+  `range`-style for-loop grammar at all yet**, for anything (only the three
+  plain C-style `for` forms exist - see "Loops" above); inventing `range`
+  just for maps, when nothing else in the language has it either, is a
+  separate, much bigger feature. There are likewise no `keys(m)`/`values(m)`
+  helper builtins this round.
+- **A map composite-literal syntax** (`map[string]int{"a": 1, "b": 2}`) -
+  Go has this, but it's a real, separate grammar extension on top of this
+  language's existing `CompositeLit` machinery (built around struct/array
+  shapes specifically); `make(map[K]V)` plus individual `m[k] = v`
+  insertions covers everything this round needs. Writing `map[...]...{...}`
+  as an expression today is a plain parse error (`map` has nowhere legal to
+  start an expression, since there's no literal form for it), not a panic.
+
 ## Structs
 
 Data-only declarations - no nested methods:

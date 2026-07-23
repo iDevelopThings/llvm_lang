@@ -372,6 +372,179 @@ original (and vice versa) - and `TestSliceRangeCheckTraps` (same file) for
 the range-check's own actual trap behavior, using the same re-exec-as-a-
 child-process pattern `TestOutOfBoundsIndexTraps` above already established.
 
+## Maps
+
+See `LANGUAGE.md`'s "Maps" section for the language-level feature
+(`map[K]V`, `make`/insert/lookup/`len`/`remove`, the key-comparability
+restriction, the `v, ok := m[k]` two-result index expression, iteration/
+composite-literal explicitly out of scope). All of this lives in its own
+file, `src/codegen/maps.go` - a genuinely new runtime mechanism, unlike
+dynamic arrays (which mostly reuse the arena allocator's existing "grow a
+{ptr,len,cap} buffer" shape) - with no prior precedent in this codebase to
+extend.
+
+**Representation.** A map value is a single opaque `ptr` (`g.ptrTy` -
+`sema.Type{Kind: TypeMap}`'s `llvmType` case treats it exactly like
+`TypePointer`), pointing at a small, arena-allocated **control block**
+(`g.mapCtrlTy`, one shared LLVM struct type for every map instantiation,
+mirroring `dynArrTy`'s own "one shape serves every element type" reasoning):
+
+```
+{ ptr buckets, i32 count, i32 bucketCount }
+```
+
+The control block's own address never changes across the map's lifetime -
+only what `buckets`/`bucketCount` point at/hold changes, in place, when the
+table grows (`genMapGrowIfNeeded`). This is exactly what makes assigning one
+map-typed variable to another share the same live table (LANGUAGE.md's own
+"maps are a reference type" rule): copying the map value just copies this
+one pointer, and every copy still reaches the identical, mutable control
+block.
+
+**Bucket layout.** Each bucket is `{ i8 tag, K key, V value }` - built fresh
+per call site via `g.mapBucketType(keyT, valT)` (`g.ctx.StructType(...)`),
+not cached per-(K,V) pair on the `Generator`: LLVM's own context already
+structurally interns two identical unnamed struct types, so a Generator-side
+cache would only save a little bookkeeping, not a real allocation - the same
+reasoning `TypeMultiReturn`'s own `llvmType` case already relies on. `tag` is
+one of three sentinel byte values (`mapTagEmpty` = 0, `mapTagOccupied` = 1,
+`mapTagTombstone` = 2) - zero-filling a freshly allocated bucket array
+(`memset`, exactly like `genMakeCall`'s own dynamic-array buffer) is what
+makes every bucket start life `mapTagEmpty` for free, with no separate
+per-bucket initialization loop needed.
+
+**Collision resolution: open addressing with linear probing and
+tombstones**, not separate chaining - genuinely simple, no extra pointer
+indirection per entry: `genMapProbe` (`maps.go`) starts at
+`hash(key) mod bucketCount` and walks forward one bucket at a time
+(wrapping around), for at most `bucketCount` steps (a bound the growth
+policy below always guarantees is never actually reached - a real
+`mapTagEmpty` slot is always found well before then), stopping the instant
+it finds either a matching occupied key (a hit) or a genuine `mapTagEmpty`
+slot (a definitive miss - open addressing's own standard rule: an empty slot
+means the key can't possibly appear any further along the probe chain). A
+`mapTagTombstone` slot (a deleted entry) never stops the probe on its own -
+a live key further along the same original probe chain must still be
+reachable past it - but the *first* available slot (empty or tombstone)
+passed along the way is remembered as the eventual insertion point, so a
+fresh insert naturally reuses an earlier tombstone instead of always
+appending past it.
+
+**`remove(m, k)`** marks the matching bucket `mapTagTombstone` (not
+`mapTagEmpty` - `genMapRemoveCall`) rather than clearing it outright, for
+exactly the probe-chain reason above, and decrements `count`. A no-op
+against a nil map or an absent key, matching Go's own real `delete(m, k)`
+behavior exactly.
+
+**Growth: doubling, triggered at a 0.75 load factor**, mirroring dynamic
+arrays' own doubling-capacity convention (`genMapGrowIfNeeded`): checked
+right before any insert that isn't just overwriting an existing key's value,
+growing whenever `(count+1)*4 > bucketCount*3` (computed in `i64` to stay
+safe against `i32` overflow for a very large map). Growing allocates a fresh,
+double-sized, zero-filled bucket array (the same arena-backed
+`genArenaAllocElems` primitive `make`/`append` already share), walks every
+still-`mapTagOccupied` bucket of the *old* array in a bounded runtime loop,
+and re-probes each one's own key into the new array (reusing `genMapProbe`
+itself for this - a freshly zeroed array with no duplicate keys inserted yet
+always reports a miss on the very first probed slot, so no separate
+"probe for an empty slot only" variant is needed at all) before finally
+overwriting the control block's own `buckets`/`bucketCount` fields in place.
+**The old bucket array is simply abandoned once rehashing finishes, never
+freed** - consistent with this project's already-documented "the arena
+never frees" design (see "The arena allocator" above), the identical
+tradeoff `genAppendCall`'s own growth path already makes for a dynamic
+array's abandoned pre-growth buffer.
+
+**Hash function: a recursive, word-wise FNV-1a-*style* mixing combinator**
+(`genMapHash`/`genHashInto`), not a literal byte-for-byte FNV-1a pass over a
+key value's raw in-memory representation, despite that being the more
+"obvious" literal reading of "hash however many bytes the key type's own
+LLVM representation occupies, FNV-1a-style" - and this deviation is
+deliberate, not a shortcut: this project's own struct/array *values* are
+real LLVM aggregates built via `InsertValue` (see "Structs/arrays/strings
+are passed and returned as real LLVM aggregate types" above), with no
+guarantee that inter-field padding bytes are ever deterministically zeroed.
+Hashing "every raw byte the type occupies" could hash two logically-identical
+struct values (equal in every field) to two *different* results, purely
+because of whatever garbage bits happened to sit in their own padding -
+silently breaking the one property a hash table absolutely cannot survive
+without (equal keys MUST hash equal). Recursing through a key's own logical
+structure instead - each numeric field/element's own bit pattern
+individually, a string's own real content bytes, a nested struct/array's own
+fields/elements recursively - and mixing only *those* bits sidesteps the
+padding hazard entirely, while remaining exactly the same kind of
+"genuinely simple, well-known mixing function" FNV-1a itself is: each 32-bit
+word is folded in via `seed = (seed XOR word) * 16777619`, seeded from FNV's
+own standard 32-bit offset basis (`2166136261`). An `i64`/`f64`/pointer key
+splits into two 32-bit halves and mixes each in turn; a `string` key's real
+bytes are walked with an actual bounded runtime loop (`genHashStringInto`),
+since a string's length isn't known until the program runs.
+
+**Key equality: `genMapKeyEqual`, a dedicated, self-contained recursive
+function - not a reuse of `genValueEqual`** (the existing whole-value
+`==`/`!=` lowering, "Structs/arrays/strings..." section's own neighbor).
+This is a real, separate function because a map key must support every
+`Kind` `sema.typeIsComparableKeyType` accepts - every integer width, both
+float widths, and a pointer - while `genValueEqual`'s own switch only
+actually implements `TypeInt`(i32)/`TypeBool`/`TypeString`/`TypeStruct`/
+`TypeArray`, panicking on anything else (i8/i16/i64/f32/f64/a pointer
+field) - a real, pre-existing gap in that function, orthogonal to this
+feature (flagged separately for a future fix, not patched here, since
+widening `genValueEqual` itself is a wider change than this round's own
+map-key-comparison need). `genMapKeyEqual` implements every comparable kind
+directly instead: `ICmp` for every integer width/bool/pointer, `FCmp
+FloatOEQ` for both float widths, `genStringEqual` for `string`, and the
+same recursive field-by-field/element-by-element `And`-together shape
+`genValueEqual` already established for `TypeStruct`/`TypeArray`.
+
+**`m[k]` (read) and `m[k] = v` (write) never go through `genAddr`/`genLoad`'s
+generic array-indexing path at all** - a real, deliberate divergence from
+how a fixed-size/dynamic array element is addressed. An array index always
+has a real address to hand back (or fail a bounds check trying); a map slot
+might not exist yet, and "does this key exist" can only be answered by
+actually running the probe - there's no way to produce "an address, maybe
+for a slot that doesn't exist" the way `genAddr`'s uniform contract expects.
+Concretely: `genExpr`'s own `IndexExpr` case (`isMapIndex`) diverts a
+map-typed target straight to `genMapIndexRead`, which returns `V`'s own zero
+value for a nil map or a genuinely missing key (Go's own "reading a missing
+key returns the zero value" rule) with **no mutation at all** - critically
+different from a write, which is a real get-or-insert-with-possible-growth
+operation (`genMapWriteAddr`/`genMapGetOrInsertAddr`, reached from
+`genAssignStmt`'s own map branch and `genMultiAssignStmt`'s per-target
+loop). This is also exactly why `&m[k]` is illegal (see
+`sema.isAddressableChain`'s own explicit map exclusion, LANGUAGE.md) - a
+map index never has a stable address to begin with, unlike a fixed array
+element's inline storage.
+
+**`v, ok := m[k]`/`v, ok = m[k]`** (the two-result index expression - see
+LANGUAGE.md's own precise distinction from a real multi-return call)
+similarly never builds a `TypeMultiReturn`-shaped aggregate the way an
+actual multi-return function call's result does: `genMultiShortVarDecl`/
+`genMultiAssignStmt` each special-case a `MultiShortVarDecl`/
+`MultiAssignStmt` whose sole value node is an `IndexExpr` up front, calling
+`genMapIndexRead` directly and storing its two returned Go values (`value`,
+`found`) into each target's own storage directly - no `ExtractValue` on an
+aggregate at all, since there never was one to begin with. Every other
+value shape (an actual multi-return `CallExpr`) still goes through the
+existing aggregate-`ExtractValue` path, completely unchanged.
+
+**Writing to a nil (never-`make`'d) map traps at runtime** (`genMapTrapIfNil`
+- the same printf-then-`llvm.trap`+`unreachable` mechanism every other
+runtime safety check in this package already uses - see "Runtime trap
+diagnostics" below), mirroring Go's own real "assignment to entry in nil
+map" panic exactly. **Reading a nil map is perfectly legal** and needs no
+trap at all - `genMapIndexRead`/`genMapLenValue` both branch on a null
+control-block pointer and return a zero value/`false`/`0` directly, matching
+Go's own "reading a nil map is fine" rule.
+
+```
+$ llvmc.exe program.llx
+runtime error: assignment to entry in nil map
+```
+(followed by the real process crash, unchanged - the exact same hard-abort
+failure mode as every other trap in this package, not a softer recoverable
+panic.)
+
 ## Runtime trap diagnostics
 
 Every runtime safety trap this package emits - `genBoundsCheck`/

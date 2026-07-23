@@ -55,3 +55,4 @@ values:
   - name: MultiValueExpr
   - name: MultiShortVarDecl
   - name: MultiAssignStmt
+  - name: MapType

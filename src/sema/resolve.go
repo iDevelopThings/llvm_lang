@@ -809,6 +809,12 @@ func (r *resolver) resolveType(scope *Scope, n ast.NodeIndex) {
 		r.resolveType(scope, r.tree.Child(n, 1))
 	case enums.NodeKinds.PointerType:
 		r.resolveType(scope, r.tree.Child(n, 0))
+	case enums.NodeKinds.MapType:
+		// `map[K]V` (see LANGUAGE.md's "Maps" section) - both K and V are
+		// ordinary type positions, resolved exactly like any other nested
+		// type reference (ArrayType's own element type just above).
+		r.resolveType(scope, r.tree.Child(n, 0))
+		r.resolveType(scope, r.tree.Child(n, 1))
 	case enums.NodeKinds.FuncType:
 		paramList := r.tree.Child(n, 0)
 		for _, param := range r.tree.Children(paramList) {
@@ -947,6 +953,13 @@ func (r *resolver) resolveExpr(scope *Scope, n ast.NodeIndex) {
 		// and LANGUAGE.md's "Dynamic arrays" section). Either way this is a
 		// type position, not a value, so it's forwarded to resolveType
 		// rather than resolved (or silently ignored) as one.
+		r.resolveType(scope, n)
+	case enums.NodeKinds.MapType:
+		// Reachable exactly one way: make's own first argument
+		// (`make(map[K]V)`, parsed as a bare MapType by the same bespoke make
+		// grammar - see parser/expr.go's parseMakeArgs and LANGUAGE.md's
+		// "Maps" section) - the map counterpart to the ArrayType case just
+		// above, same reasoning.
 		r.resolveType(scope, n)
 	case enums.NodeKinds.CompositeLit:
 		r.resolveCompositeLit(scope, n)

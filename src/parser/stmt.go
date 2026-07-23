@@ -74,9 +74,12 @@ func (p *Parser) parseBlock() ast.NodeIndex {
 // (dynamic - parsed now, rejected later at a semantic stage once one
 // exists, so the grammar doesn't need to change when dynamic arrays land),
 // a pointer type `*T` (see LANGUAGE.md's "Pointers" section - a leading `*`
-// prefix modifier, same shape as `[N]T`'s own leading `[`), or a function
+// prefix modifier, same shape as `[N]T`'s own leading `[`), a function
 // type `func(T1, T2) R` (see parseFuncType) - first-class function values
-// (LANGUAGE.md's "First-class functions" section).
+// (LANGUAGE.md's "First-class functions" section) - or a map type
+// `map[K]V` (see LANGUAGE.md's "Maps" section) - the same recursive-into-
+// element-type shape `[N]T`/`[]T` already use just above, keyed on the
+// `map` keyword instead of a leading `[`.
 func (p *Parser) parseTypeExpr() ast.NodeIndex {
 	if starTok, ok := p.accept(enums.Lexemes.Asterisk); ok {
 		elem := p.parseTypeExpr()
@@ -103,6 +106,17 @@ func (p *Parser) parseTypeExpr() ast.NodeIndex {
 	}
 	if p.atKeyword(enums.Keywords.Func) {
 		return p.parseFuncType()
+	}
+	if kwTok, ok := p.acceptKeyword(enums.Keywords.Map); ok {
+		p.expect(enums.Lexemes.LeftBracket)
+		key := p.parseTypeExpr()
+		p.expect(enums.Lexemes.RightBracket)
+		elem := p.parseTypeExpr()
+		span := ast.Span{
+			Start: kwTok.Start,
+			End:   p.tree.SpanOf(elem).End,
+		}
+		return p.tree.NewNode(enums.NodeKinds.MapType, lexer.Token{}, span, key, elem)
 	}
 	nameTok := p.expectIdent()
 	ident := p.tree.NewNode(enums.NodeKinds.Ident, nameTok, tokenSpan(nameTok))

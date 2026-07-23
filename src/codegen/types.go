@@ -109,6 +109,15 @@ func (g *Generator) llvmType(t sema.Type) llvm.Type {
 		// value (see LANGUAGE.md's "Pointers" section) reuses it directly
 		// rather than needing its own distinct LLVM pointer-to-X type.
 		return g.ptrTy
+	case sema.TypeMap:
+		// A map's own runtime value is likewise just a single opaque `ptr` -
+		// the address of its own arena-allocated control block (g.mapCtrlTy -
+		// see maps.go's own top-of-file doc comment and CODEGEN.md's "Maps"
+		// section), never moved once allocated. This is exactly what makes
+		// assigning one map-typed variable to another share the same live
+		// table (Go's own real map-is-a-reference-type behavior): copying
+		// this pointer value is all an assignment/argument/return ever does.
+		return g.ptrTy
 	default:
 		panic(fmt.Sprintf("codegen: type %s reached llvmType - only valid, checked types are supported", t))
 	}
