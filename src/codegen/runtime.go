@@ -124,6 +124,14 @@ func (g *Generator) setupRuntime() {
 	g.fmtNewline = g.defineCString(".fmt.newline", "\n")
 	g.fmtPtrBare = g.defineCString(".fmt.ptr.bare", "%p")
 
+	// An enum's tuple-variant printing (genPrintEnumVariant below) wraps its
+	// associated values in parens, e.g. "Circle(5)" - the enum-specific
+	// counterpart to fmtLBrace/fmtRBrace (a struct variant reuses those two
+	// directly, printing exactly like an ordinary struct value already does -
+	// see LANGUAGE.md's "Enums" section).
+	g.fmtLParen = g.defineCString(".fmt.lparen", "(")
+	g.fmtRParen = g.defineCString(".fmt.rparen", ")")
+
 	// Runtime trap diagnostics (see genBoundsCheck/genSliceRangeCheck, expr.go,
 	// and genMakeSizeCheck below) - one printf call with the actual runtime
 	// values already in hand substituted in, immediately before every
@@ -739,6 +747,9 @@ func (g *Generator) genPrintCall(argNode ast.NodeIndex) {
 	case sema.TypeArray:
 		g.genPrintArrayValue(t, v)
 		g.genPrintLiteral(g.fmtNewline)
+	case sema.TypeEnum:
+		g.genPrintEnumValue(t, v)
+		g.genPrintLiteral(g.fmtNewline)
 	default:
 		// Every numeric width, string/bool/pointer/struct/array are the only
 		// Types print's single argument can ever have on a tree that already
@@ -806,6 +817,8 @@ func (g *Generator) genPrintValueBare(t sema.Type, v llvm.Value) {
 		g.genPrintStructValue(t, v)
 	case sema.TypeArray:
 		g.genPrintArrayValue(t, v)
+	case sema.TypeEnum:
+		g.genPrintEnumValue(t, v)
 	default:
 		// Every numeric width, string/bool/pointer/struct/array are the only
 		// Types a struct field or array element reaching here can ever have

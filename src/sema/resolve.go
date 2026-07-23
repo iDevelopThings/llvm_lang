@@ -49,6 +49,7 @@ type Info struct {
 	Refs     map[ast.NodeIndex]*Symbol
 	Scopes   map[ast.NodeIndex]*Scope
 	Structs  map[string]*StructInfo
+	Enums    map[string]*EnumInfo
 	Types    map[ast.NodeIndex]Type
 	Captures map[ast.NodeIndex][]*Symbol
 }
@@ -77,6 +78,7 @@ type resolver struct {
 
 	pkg     *Scope                 // shared package scope, every file's top-level names
 	structs map[string]*StructInfo // shared struct catalog, every file's structs
+	enums   map[string]*EnumInfo   // shared enum catalog, every file's enums
 
 	// fileImports is this package's input (nil for a plain single-package
 	// ResolvePackage call, which has no imports at all): each file's own
@@ -162,6 +164,7 @@ func resolveOnePackage(name string, trees []*ast.Tree, fileImports map[*ast.Tree
 		infos:       make(map[*ast.Tree]*Info, len(trees)),
 		bags:        make(map[*ast.Tree]*diag.Bag, len(trees)),
 		structs:     make(map[string]*StructInfo),
+		enums:       make(map[string]*EnumInfo),
 		fileImports: fileImports,
 		fileScopes:  make(map[*ast.Tree]*Scope, len(trees)),
 	}
@@ -173,6 +176,7 @@ func resolveOnePackage(name string, trees []*ast.Tree, fileImports map[*ast.Tree
 			Refs:     make(map[ast.NodeIndex]*Symbol),
 			Scopes:   make(map[ast.NodeIndex]*Scope),
 			Structs:  r.structs,
+			Enums:    r.enums,
 			Captures: make(map[ast.NodeIndex][]*Symbol),
 		}
 		r.bags[tree] = diag.NewBag()
@@ -200,6 +204,7 @@ func resolveOnePackage(name string, trees []*ast.Tree, fileImports map[*ast.Tree
 		Name:    name,
 		Scope:   r.pkg,
 		Structs: r.structs,
+		Enums:   r.enums,
 	}
 }
 
@@ -248,6 +253,9 @@ func (r *resolver) resolvePackage(trees []*ast.Tree) {
 		for decl := range tree.TopLevelDeclsOfKind(enums.NodeKinds.StructDecl) {
 			r.declareStruct(r.pkg, decl)
 		}
+		for decl := range tree.TopLevelDeclsOfKind(enums.NodeKinds.EnumDecl) {
+			r.declareEnum(r.pkg, decl)
+		}
 	}
 	for _, tree := range trees {
 		r.enterFile(tree)
@@ -277,6 +285,9 @@ func (r *resolver) resolvePackage(trees []*ast.Tree) {
 				r.resolveStructFieldTypes(fileScope, decl)
 				r.resolveStructConstructors(fileScope, decl)
 				r.resolveStructDestructors(fileScope, decl)
+			case enums.NodeKinds.EnumDecl:
+				r.resolveEnumVariantTypes(fileScope, decl)
+				r.resolveEnumDestructors(fileScope, decl)
 			}
 		}
 	}
@@ -442,6 +453,157 @@ func (r *resolver) declareDestructor(info *StructInfo, dtor ast.NodeIndex) {
 	info.Destructor = dtorSym
 }
 
+// declareEnum registers decl's own name into pkg (SymEnum) and catalogs every
+// variant it declares - the enum-kind counterpart to declareStruct. Each
+// variant's shape (unit/tuple/struct, discriminant index) is determined
+// purely from its own node shape (ast.Tree.ClassifyEnumVariant) - resolved
+// entirely here, at declaration time, since none of it depends on any other
+// type; the variant's own associated-data *types* are deliberately left for
+// Check (checkEnumDecl, typecheck.go) to compute, mirroring how a struct
+// field's own Type is likewise computed lazily via typeFromNode rather than
+// here.
+func (r *resolver) declareEnum(pkg *Scope, decl ast.NodeIndex) {
+	nameNode := r.tree.Child(decl, 0)
+	sym := r.declareLocal(pkg, decl, nameNode, SymEnum)
+
+	info := &EnumInfo{
+		Symbol:   sym,
+		Variants: make(map[string]*EnumVariant),
+		Methods:  make(map[string]*Symbol),
+	}
+	sym.EnumInfo = info
+	r.info.Enums[sym.Name] = info
+
+	for i, variantNode := range r.tree.EnumVariants(decl) {
+		name := r.tree.Text(variantNode)
+		variant := &EnumVariant{
+			Name:  name,
+			Index: i,
+			Kind:  classifyEnumVariantKind(r.tree.ClassifyEnumVariant(variantNode)),
+			Decl:  variantNode,
+			Enum:  info,
+		}
+		variantSym := &Symbol{
+			Name:     info.Symbol.Name + "." + name,
+			Kind:     SymEnumVariant,
+			Decl:     variantNode,
+			Tree:     r.tree,
+			Scope:    sym.Scope,
+			Exported: isExportedName(name),
+			EnumInfo: info,
+			Variant:  variant,
+		}
+		variant.Sym = variantSym
+		r.info.Refs[variantNode] = variantSym
+
+		if _, exists := info.Variants[name]; exists {
+			r.errorAt(variantNode, "variant %s redeclared in enum %s", name, sym.Name)
+			continue
+		}
+		info.Variants[name] = variant
+		info.Order = append(info.Order, variant)
+	}
+
+	for dtor := range r.tree.EnumDestructors(decl) {
+		r.declareEnumDestructor(info, dtor)
+	}
+}
+
+// classifyEnumVariantKind adapts ast.EnumVariantKind (the parser/AST-facing
+// classification) to sema's own EnumVariantKind - two distinct types kept
+// deliberately separate (see AGENTS.md's Architecture section: no layer
+// should reach into a lower one's types unnecessarily), even though their
+// three values line up 1:1.
+func classifyEnumVariantKind(k ast.EnumVariantKind) EnumVariantKind {
+	switch k {
+	case ast.EnumVariantTuple:
+		return EnumVariantTuple
+	case ast.EnumVariantStruct:
+		return EnumVariantStruct
+	default:
+		return EnumVariantUnit
+	}
+}
+
+// declareEnumDestructor catalogs one `destructor() {...}` block nested inside
+// an EnumDecl - the enum-kind counterpart to declareDestructor, identical
+// reasoning (a second destructor on the same enum is a structural problem
+// regardless of whether either is ever used).
+func (r *resolver) declareEnumDestructor(info *EnumInfo, dtor ast.NodeIndex) {
+	dtorSym := &Symbol{
+		Name:     info.Symbol.Name + ".destructor",
+		Kind:     SymDestructor,
+		Decl:     dtor,
+		Tree:     r.tree,
+		Scope:    info.Symbol.Scope,
+		EnumInfo: info,
+	}
+	r.info.Refs[dtor] = dtorSym
+
+	if info.Destructor != nil {
+		r.errorAt(dtor, "enum %s already has a destructor", info.Symbol.Name)
+		return
+	}
+	info.Destructor = dtorSym
+}
+
+// resolveEnumVariantTypes resolves every associated-data type name in decl's
+// (an EnumDecl's) own variants - a tuple variant's own positional types, or a
+// struct variant's own field types - as ordinary type-position references
+// (mirroring resolveStructFieldTypes exactly one level down).
+func (r *resolver) resolveEnumVariantTypes(pkg *Scope, decl ast.NodeIndex) {
+	for _, variantNode := range r.tree.EnumVariants(decl) {
+		switch r.tree.ClassifyEnumVariant(variantNode) {
+		case ast.EnumVariantTuple:
+			for _, typeNode := range r.tree.Children(variantNode) {
+				r.resolveType(pkg, typeNode)
+			}
+		case ast.EnumVariantStruct:
+			for _, field := range r.tree.Children(variantNode) {
+				r.resolveType(pkg, r.tree.Child(field, 1))
+			}
+		}
+	}
+}
+
+// resolveEnumDestructors resolves every destructor nested inside decl (an
+// EnumDecl) - mirroring resolveStructDestructors exactly, one type kind over.
+func (r *resolver) resolveEnumDestructors(pkg *Scope, decl ast.NodeIndex) {
+	nameNode := r.tree.Child(decl, 0)
+	info, ok := r.info.Enums[r.tree.Text(nameNode)]
+	if !ok {
+		return
+	}
+	for dtor := range r.tree.EnumDestructors(decl) {
+		r.resolveEnumDestructorBody(pkg, info, dtor)
+	}
+}
+
+// resolveEnumDestructorBody resolves an enum destructor's body - mirroring
+// resolveDestructorBody almost exactly, one type kind over (EnumInfo rather
+// than StructInfo).
+func (r *resolver) resolveEnumDestructorBody(pkg *Scope, info *EnumInfo, dtor ast.NodeIndex) {
+	paramList := r.tree.DestructorParamList(dtor)
+	body := r.tree.DestructorBody(dtor)
+
+	fnScope := newScope(ScopeFunc, pkg, dtor)
+	r.info.Scopes[dtor] = fnScope
+	fnScope.Receiver = &Symbol{
+		Name:  "this",
+		Kind:  SymReceiver,
+		Decl:  info.Symbol.Decl,
+		Tree:  info.Symbol.Tree,
+		Scope: fnScope,
+	}
+
+	for _, param := range r.tree.Children(paramList) {
+		r.declareLocal(fnScope, param, r.tree.Child(param, 0), SymParam)
+		r.resolveType(fnScope, r.tree.Child(param, 1))
+	}
+
+	r.resolveBlock(fnScope, body)
+}
+
 func (r *resolver) resolveStructFieldTypes(pkg *Scope, decl ast.NodeIndex) {
 	for _, field := range r.tree.StructFields(decl) {
 		r.resolveType(pkg, r.tree.Child(field, 1))
@@ -599,20 +761,36 @@ func (r *resolver) resolveExternFuncDecl(scope *Scope, decl ast.NodeIndex) {
 	}
 }
 
+// addMethod attaches sym (a method's own Symbol) to whichever catalog its
+// receiver name actually names - a declared struct or a declared enum (see
+// LANGUAGE.md's "Enums" section: methods reuse the exact same receiver-clause
+// syntax structs already have, needing zero parser grammar changes - a
+// receiver clause is already just an identifier token naming *some* declared
+// type). Checks Structs first, then Enums, with a combined "not a declared
+// struct or enum" error if the name is neither.
 func (r *resolver) addMethod(receiver ast.NodeIndex, sym *Symbol) {
 	receiverName := r.tree.Text(receiver)
-	info, ok := r.info.Structs[receiverName]
-	if !ok {
-		r.errorAt(receiver, "undefined: %s (method receiver must be a declared struct)", receiverName)
+	if info, ok := r.info.Structs[receiverName]; ok {
+		r.info.Refs[receiver] = info.Symbol
+		sym.Scope = info.Symbol.Scope
+		if _, exists := info.Methods[sym.Name]; exists {
+			r.errorAt(sym.Decl, "method %s redeclared on struct %s", sym.Name, receiverName)
+			return
+		}
+		info.Methods[sym.Name] = sym
 		return
 	}
-	r.info.Refs[receiver] = info.Symbol
-	sym.Scope = info.Symbol.Scope
-	if _, exists := info.Methods[sym.Name]; exists {
-		r.errorAt(sym.Decl, "method %s redeclared on struct %s", sym.Name, receiverName)
+	if info, ok := r.info.Enums[receiverName]; ok {
+		r.info.Refs[receiver] = info.Symbol
+		sym.Scope = info.Symbol.Scope
+		if _, exists := info.Methods[sym.Name]; exists {
+			r.errorAt(sym.Decl, "method %s redeclared on enum %s", sym.Name, receiverName)
+			return
+		}
+		info.Methods[sym.Name] = sym
 		return
 	}
-	info.Methods[sym.Name] = sym
+	r.errorAt(receiver, "undefined: %s (method receiver must be a declared struct or enum)", receiverName)
 }
 
 // resolveVarDeclBody resolves a VarDecl's type (as a type reference) and
@@ -636,17 +814,26 @@ func (r *resolver) resolveFuncBody(pkg *Scope, decl ast.NodeIndex) {
 	r.info.Scopes[decl] = fnScope
 
 	if receiver != ast.InvalidNode {
-		if info, ok := r.info.Structs[r.tree.Text(receiver)]; ok {
+		receiverName := r.tree.Text(receiver)
+		var receiverDecl ast.NodeIndex
+		var receiverTree *ast.Tree
+		if info, ok := r.info.Structs[receiverName]; ok {
+			receiverDecl, receiverTree = info.Symbol.Decl, info.Symbol.Tree
+		} else if info, ok := r.info.Enums[receiverName]; ok {
+			receiverDecl, receiverTree = info.Symbol.Decl, info.Symbol.Tree
+		}
+		if receiverTree != nil {
 			fnScope.Receiver = &Symbol{
 				Name: "this",
 				Kind: SymReceiver,
-				Decl: info.Symbol.Decl,
-				// The receiver struct may be declared in a different file
-				// than the method itself (see Symbol.Tree's doc comment) -
-				// this must be the struct's own owning tree, not r.tree
-				// (this method's file), so a later cross-file dereference
-				// (sema/typecheck.go's checkThisExpr) reads the right one.
-				Tree:  info.Symbol.Tree,
+				Decl: receiverDecl,
+				// The receiver struct/enum may be declared in a different
+				// file than the method itself (see Symbol.Tree's doc
+				// comment) - this must be the receiver's own owning tree, not
+				// r.tree (this method's file), so a later cross-file
+				// dereference (sema/typecheck.go's checkThisExpr) reads the
+				// right one.
+				Tree:  receiverTree,
 				Scope: fnScope,
 			}
 		}
@@ -737,6 +924,8 @@ func (r *resolver) resolveStmt(scope *Scope, n ast.NodeIndex) {
 		r.resolveIfStmt(scope, n)
 	case enums.NodeKinds.ForStmt:
 		r.resolveForStmt(scope, n)
+	case enums.NodeKinds.MatchStmt:
+		r.resolveMatchStmt(scope, n)
 	}
 }
 
@@ -780,6 +969,120 @@ func (r *resolver) resolveForStmt(parent *Scope, n ast.NodeIndex) {
 		r.resolveStmt(scope, post)
 	}
 	r.resolveBlock(scope, r.tree.Child(n, 3))
+}
+
+// resolveMatchStmt resolves a `match subject { pattern => body, ... }`
+// statement (see LANGUAGE.md's "match" section) - the subject is an
+// ordinary value expression; each arm gets its own fresh child scope (so
+// one arm's own bindings never leak into a sibling's), used both for its
+// pattern's own fresh bindings (see resolvePattern) and its body.
+func (r *resolver) resolveMatchStmt(scope *Scope, n ast.NodeIndex) {
+	r.resolveExpr(scope, r.tree.MatchSubject(n))
+	for _, arm := range r.tree.MatchArms(n) {
+		r.resolveMatchArm(scope, arm)
+	}
+}
+
+func (r *resolver) resolveMatchArm(scope *Scope, arm ast.NodeIndex) {
+	pattern := r.tree.MatchArmPattern(arm)
+	body := r.tree.MatchArmBody(arm)
+
+	armScope := newScope(ScopeBlock, scope, ast.InvalidNode)
+	r.info.Scopes[arm] = armScope
+
+	r.resolvePattern(armScope, pattern)
+	r.resolveBlock(armScope, body)
+}
+
+// resolvePattern resolves one match arm's own pattern - deliberately NOT
+// routed through resolveExpr, even though every shape it accepts (Ident,
+// MemberExpr, CallExpr, CompositeLit) is a node kind resolveExpr already
+// knows how to walk: a pattern's own "arguments"/keyed-element values are
+// FRESH binding names being declared into scope, not references to
+// already-declared ones - the exact opposite of what resolveExpr's own
+// CallExpr/CompositeLit cases assume (see ast.Node's own MatchArm doc
+// comment).
+func (r *resolver) resolvePattern(scope *Scope, pattern ast.NodeIndex) {
+	switch r.tree.Nodes[pattern].Kind {
+	case enums.NodeKinds.Ident:
+		if r.tree.Text(pattern) != "_" {
+			r.errorAt(pattern, "expected an enum variant pattern (EnumName.Variant) or the wildcard _, got %s", r.tree.Text(pattern))
+		}
+	case enums.NodeKinds.MemberExpr:
+		r.resolveMemberPatternRef(scope, pattern)
+	case enums.NodeKinds.CallExpr:
+		children := r.tree.Children(pattern)
+		callee, bindings := children[0], children[1:]
+		r.resolveMemberPatternRef(scope, callee)
+		for _, b := range bindings {
+			r.declarePatternBinding(scope, b)
+		}
+	case enums.NodeKinds.CompositeLit:
+		typeExpr, elems := r.tree.CompositeLitElems(pattern)
+		r.resolveMemberPatternRef(scope, typeExpr)
+		for _, elem := range elems {
+			if r.tree.IsKeyedElement(elem) {
+				// The key is a field name, resolved once the variant is
+				// known - Check's own job (checkMatchArm), mirroring how a
+				// real struct composite literal's own keyed field name is
+				// deferred the identical way (resolveCompositeLit).
+				r.declarePatternBinding(scope, r.tree.Child(elem, 1))
+				continue
+			}
+			r.errorAt(elem, "a struct-variant pattern requires keyed fields (field: name), not a positional element")
+		}
+	default:
+		r.errorAt(pattern, "invalid match pattern")
+	}
+}
+
+// resolveMemberPatternRef resolves a pattern's own EnumName.Variant reference
+// (whether the whole pattern, as in a unit-variant arm, or just a tuple-/
+// struct-variant pattern's own leading callee/type-expr) - object must
+// resolve lexically to a declared enum type, exactly like an ordinary
+// construction reference (resolveTypeMemberExpr/resolveExpr's own MemberExpr
+// case) - reusing resolveEnumVariantRef verbatim once the object itself is
+// confirmed to be one.
+func (r *resolver) resolveMemberPatternRef(scope *Scope, n ast.NodeIndex) {
+	if r.tree.Nodes[n].Kind != enums.NodeKinds.MemberExpr {
+		r.errorAt(n, "invalid match pattern")
+		return
+	}
+	object := r.tree.Child(n, 0)
+	if r.tree.Nodes[object].Kind != enums.NodeKinds.Ident {
+		r.errorAt(n, "invalid match pattern")
+		return
+	}
+	objName := r.tree.Text(object)
+	objSym, ok := scope.Lookup(objName)
+	if !ok {
+		r.errorAtLabel(object, "not found", "undefined: %s", objName)
+		return
+	}
+	r.info.Refs[object] = objSym
+	if objSym.Kind != SymEnum {
+		r.errorAt(n, "%s is not a declared enum type", objName)
+		return
+	}
+	r.resolveEnumVariantRef(n, objSym.EnumInfo)
+}
+
+// declarePatternBinding declares n - a match pattern's own fresh binding name
+// (a tuple pattern's positional binding, or a struct pattern's own keyed
+// binding) - as a plain local var directly into scope, exactly like
+// declareLocal's identical role for a ShortVarDecl/Param's own name. Reports
+// a diagnostic instead for anything that isn't a plain identifier - the
+// pattern grammar itself (reusing CallExpr/CompositeLit's own argument/
+// element grammar verbatim) accepts any expression there, so this is what
+// actually narrows it down to a fresh name, mirroring finishShortVarDecl's
+// own "left side of := must be an identifier" parser-level check one layer
+// up, for a position the parser alone can't restrict.
+func (r *resolver) declarePatternBinding(scope *Scope, n ast.NodeIndex) {
+	if r.tree.Nodes[n].Kind != enums.NodeKinds.Ident {
+		r.errorAt(n, "match pattern binding must be a plain identifier")
+		return
+	}
+	r.declareLocal(scope, n, n, SymVar)
 }
 
 // resolveType resolves n as a type reference (an Ident naming a builtin or
@@ -833,15 +1136,17 @@ func (r *resolver) resolveType(scope *Scope, n ast.NodeIndex) {
 	}
 }
 
-// resolveTypeMemberExpr resolves a package-qualified type reference
-// (`pkg.Point` - parsed as a MemberExpr node in type position, see
-// parser.parseTypeExpr) - the type-position counterpart to
-// resolvePackageMemberExpr below. Unlike an ordinary struct field/method
-// access, this needs no type information at all (a package's own scope is
-// already fully built by the time anything imports it - see
-// ResolveProgram's dependency-ordering guarantee), so - unlike a value-level
-// MemberExpr - it resolves entirely here, during Resolve, not deferred to
-// Check.
+// resolveTypeMemberExpr resolves a MemberExpr reached in type position - a
+// package-qualified type reference (`pkg.Point`, see parser.parseTypeExpr),
+// or an enum variant named as a composite-literal's own type expression
+// (`Shape.Triangle{...}` - see LANGUAGE.md's "Enums" section: a struct-style
+// variant's construction syntax reuses this project's existing keyed-literal
+// grammar, so its own type-expr position is a MemberExpr exactly like a
+// package-qualified struct type's is). Neither needs any type information at
+// all (a package's own scope, or an enum's own variant catalog, is already
+// fully built by the time either is referenced), so - unlike an ordinary
+// struct-value field/method MemberExpr - both resolve entirely here, during
+// Resolve, not deferred to Check.
 func (r *resolver) resolveTypeMemberExpr(scope *Scope, n ast.NodeIndex) {
 	object := r.tree.Child(n, 0)
 	if r.tree.Nodes[object].Kind != enums.NodeKinds.Ident {
@@ -855,8 +1160,13 @@ func (r *resolver) resolveTypeMemberExpr(scope *Scope, n ast.NodeIndex) {
 		return
 	}
 	r.info.Refs[object] = objSym
+
+	if objSym.Kind == SymEnum {
+		r.resolveEnumVariantRef(n, objSym.EnumInfo)
+		return
+	}
 	if objSym.Kind != SymPackage {
-		r.errorAt(n, "%s is not a package", objName)
+		r.errorAt(n, "%s is not a package or a declared enum type", objName)
 		return
 	}
 
@@ -875,6 +1185,27 @@ func (r *resolver) resolveTypeMemberExpr(scope *Scope, n ast.NodeIndex) {
 		return
 	}
 	r.info.Refs[n] = sym
+}
+
+// resolveEnumVariantRef resolves n's own Tok (see ast.Node's MemberExpr doc
+// comment: the field-name token) against enumInfo's own Variants catalog -
+// shared by every context an `EnumName.Variant` reference can appear in: a
+// bare unit-variant value/pattern (resolveExpr's MemberExpr case), a tuple-
+// variant call's callee or a struct-variant composite-literal's own type
+// expression (both reach here the identical way, through either
+// resolveExpr's or resolveType's own MemberExpr case). On success, n's own
+// Info.Refs entry is set directly to the variant's own Symbol
+// (SymEnumVariant) - the same "record which specific declaration this
+// reference resolved to" idea a constructor call's own callee Ref already
+// captures (see resolve.go's declareConstructor/checkConstructorCall).
+func (r *resolver) resolveEnumVariantRef(n ast.NodeIndex, enumInfo *EnumInfo) {
+	name := r.tree.Text(n)
+	variant, ok := enumInfo.Variants[name]
+	if !ok {
+		r.errorAtLabel(n, "not found", "undefined: %s.%s", enumInfo.Symbol.Name, name)
+		return
+	}
+	r.info.Refs[n] = variant.Sym
 }
 
 // resolveExpr resolves n as a value expression. See Info's doc comment for
@@ -924,15 +1255,23 @@ func (r *resolver) resolveExpr(scope *Scope, n ast.NodeIndex) {
 	case enums.NodeKinds.MemberExpr:
 		// The object always resolves lexically first. A package-qualified
 		// access (`mathutils.Add` - the object is a bare Ident that
-		// resolves to an import binding) is fully resolved right here, same
-		// as resolveTypeMemberExpr's type-position counterpart - it needs no
-		// type information, unlike a struct field/method access, which is
-		// deliberately left for type-checking (needs the object's type).
+		// resolves to an import binding) or an enum-qualified variant
+		// reference (`Shape.Circle`/`Shape.Point` - the object resolves to a
+		// declared enum type, see LANGUAGE.md's "Enums" section) is fully
+		// resolved right here, same as resolveTypeMemberExpr's type-position
+		// counterpart - neither needs any type information, unlike an
+		// ordinary struct field/method access, which is deliberately left
+		// for type-checking (needs the object's type).
 		object := r.tree.Child(n, 0)
 		r.resolveExpr(scope, object)
 		if r.tree.Nodes[object].Kind == enums.NodeKinds.Ident {
-			if objSym, ok := r.info.Refs[object]; ok && objSym.Kind == SymPackage {
-				r.resolvePackageMemberExpr(n, objSym)
+			if objSym, ok := r.info.Refs[object]; ok {
+				switch objSym.Kind {
+				case SymPackage:
+					r.resolvePackageMemberExpr(n, objSym)
+				case SymEnum:
+					r.resolveEnumVariantRef(n, objSym.EnumInfo)
+				}
 			}
 		}
 	case enums.NodeKinds.MultiValueExpr:

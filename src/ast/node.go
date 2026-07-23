@@ -44,7 +44,10 @@ type Span struct {
 //   - ShortVarDecl, MultiShortVarDecl: the `:=` token
 //   - VarDecl, FuncDecl, StructDecl, IfStmt, ForStmt, ReturnStmt, BreakStmt,
 //     ContinueStmt, FuncType, ConstructorDecl, DestructorDecl, FuncLit,
-//     NewExpr, DeleteStmt, ExternFuncDecl: the leading keyword token
+//     NewExpr, DeleteStmt, ExternFuncDecl, EnumDecl, MatchStmt: the leading
+//     keyword token (EnumDecl's is `enum`, MatchStmt's is `match` - see
+//     LANGUAGE.md's "Enums"/"match" sections)
+//   - EnumVariant: the variant's own name identifier token
 //     (ExternFuncDecl's is the `extern` keyword, not the `func` that follows
 //     it - see LANGUAGE.md's "External functions (FFI)" section; FuncType's
 //     is the `func` that introduces a function-type expression, e.g.
@@ -64,7 +67,7 @@ type Span struct {
 //   - everything else (File, Block, ParamList, Param, Field, CallExpr,
 //     ParenExpr, IndexExpr, ArrayType, PointerType, CompositeLit,
 //     KeyValueExpr, ExprStmt, ParamTypeList, MapType, MultiReturnType,
-//     MultiValueExpr): unused, left as the zero Token
+//     MultiValueExpr, MatchArm): unused, left as the zero Token
 //
 // Children shapes, by kind:
 //   - CallExpr: [callee, arg0, arg1, ...] - variable arity, callee always first
@@ -237,6 +240,52 @@ type Span struct {
 //     MultiShortVarDeclValue accessors rather than indexing directly - the
 //     split point (last child vs. everything before it) isn't a fixed
 //     position the way most other variable-arity node's "special" slot is.
+//   - EnumDecl: [name, member0, member1, ...] - variable arity, name always
+//     first - the exact same shape StructDecl already uses (see LANGUAGE.md's
+//     "Enums" section). Each member is either an EnumVariant node or (at most
+//     one) a DestructorDecl, interspersed in declaration order, reusing
+//     DestructorDecl completely unchanged (an enum's destructor fires once,
+//     regardless of which variant is actually active, exactly like a
+//     struct's) - see ast.Tree's EnumVariants/EnumDestructors accessors,
+//     which each filter the full member list down to their own kind, mirroring
+//     StructFields/StructDestructors.
+//   - EnumVariant: Tok is the variant's own name identifier. Children vary by
+//     which of the three variant kinds this is, distinguished purely by
+//     shape - no separate kind flag on the node itself:
+//   - a unit variant (`Point`) has no children at all.
+//   - a tuple variant (`Circle(f64)`) has one child per associated type,
+//     each an ordinary type-position node (Ident/ArrayType/PointerType/
+//     MapType/FuncType/MemberExpr) - never a Field node.
+//   - a struct variant (`Triangle { base f64, height f64 }`) has one Field
+//     child ([name, type], the exact same shape a struct's own field
+//     already uses) per named associated field.
+//     Since a type-position node is never itself Kind == Field, inspecting
+//     the first child's own Kind (when any children exist at all) is
+//     sufficient to tell a tuple variant from a struct variant - see
+//     ast.Tree's EnumVariantKind-classifying accessor.
+//   - MatchStmt: [subject, arm0, arm1, ...] - variable arity, subject (the
+//     value being matched) always first (see LANGUAGE.md's "match" section) -
+//     a statement, not an expression, this round. Each arm is a MatchArm
+//     node, in source order.
+//   - MatchArm: [pattern, body] - fixed arity. pattern is whatever
+//     parseExpr's ordinary grammar already produces for one of: a bare
+//     wildcard (`_`, an Ident node - the only bare-Ident pattern shape this
+//     grammar accepts; sema, not the grammar, is what actually restricts an
+//     Ident pattern to exactly "_"), a unit-variant pattern (`EnumName.Variant`,
+//     a MemberExpr - identical shape to a unit variant's own construction
+//     expression), a tuple-variant pattern (`EnumName.Variant(a, b)`, a
+//     CallExpr whose "arguments" are fresh binding-name Ident nodes rather
+//     than value expressions - identical shape to a tuple variant's own
+//     construction call), or a struct-variant pattern
+//     (`EnumName.Variant{field: newName, ...}`, a CompositeLit whose keyed
+//     elements' values are likewise fresh binding names - identical shape to
+//     a struct variant's own construction literal). Reusing construction's
+//     own CallExpr/CompositeLit/MemberExpr grammar verbatim needs zero new
+//     expression-parsing code - only sema's pattern-resolution/type-checking
+//     (resolvePattern/checkMatchArm) actually tells "this MemberExpr/CallExpr/
+//     CompositeLit is a pattern, not an ordinary expression - the calls
+//     inside are fresh bindings, not references" apart from an ordinary
+//     construction use of the identical shape. body is an ordinary Block.
 //   - MultiAssignStmt: [target0, target1, ..., targetN, value] - the
 //     assignment-form counterpart to MultiShortVarDecl, identical shape:
 //     every child except the last is an already-existing lvalue target

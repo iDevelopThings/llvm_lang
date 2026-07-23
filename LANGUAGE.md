@@ -11,7 +11,7 @@ The language is supposed to be similar to go's syntax.
 
 ## Top level
 
-File scope is Go-style, not script-style: only `import`, `var`, `func`, and `struct` declarations are legal directly at the top level - no bare `if`/`for`/`:=`/expression-statements there. This isn't an arbitrary restriction: LLVM has no notion of "just run a statement at global scope," only static data initializers, so a top-level `var` is a real global (no function needed to "run" it) while anything actually executable needs a real entry point, same as Go/C/Rust - `func main()` is required for that. See "Imports" below for `import`'s own rules (it must come first in a file, before any other declaration).
+File scope is Go-style, not script-style: only `import`, `var`, `func`, `struct`, and `enum` declarations are legal directly at the top level - no bare `if`/`for`/`:=`/expression-statements there. This isn't an arbitrary restriction: LLVM has no notion of "just run a statement at global scope," only static data initializers, so a top-level `var` is a real global (no function needed to "run" it) while anything actually executable needs a real entry point, same as Go/C/Rust - `func main()` is required for that. See "Imports" below for `import`'s own rules (it must come first in a file, before any other declaration).
 
 ```go
 
@@ -528,6 +528,174 @@ A **dynamic array (`[]T`) whose element type is non-copyable is rejected outrigh
 ### Known limitation: no automatic recursive member destruction
 
 Embedding a destructor-having value **by value** as a struct field does **not** automatically cascade a destructor call into that field when the containing struct's own scope ends, if the containing struct declares no `destructor()` of its own - the field's destructor simply never fires in that case. This is a real, documented v1 limitation, not a bug: the intended pattern for a resource-owning type is to hold a `*T` **pointer** field to what it owns and manually `delete` it in its own destructor body (exactly like the `FileHandle` example at the top of this section), not to embed a destructor-having value directly as a field expecting it to clean itself up automatically.
+
+## Enums
+
+Rust-style tagged unions: a top-level `enum Name { ... }` declaration, alongside `struct`/`func`/`extern func`/`var`, whose named variants each carry their own shape of associated data (or none at all):
+
+```go
+enum Shape {
+    Point,
+    Circle(f64),
+    Triangle { base f64, height f64 }
+}
+```
+
+Three variant kinds coexist freely in the same enum, distinguished purely by how each is written:
+
+- **Unit variants** (`Point`) - a bare name, no associated data at all.
+- **Tuple variants** (`Circle(f64)`) - positional associated data, any number of types.
+- **Struct variants** (`Triangle { base f64, height f64 }`) - named associated data, reusing this language's existing `name Type` field-declaration shape verbatim (the exact same syntax a struct's own fields already use) rather than inventing a new one.
+
+### Construction
+
+Each variant kind has its own construction syntax, always spelled `EnumName.Variant...`:
+
+- **Unit**: a bare, uncalled value - `Shape.Point`. This is an ordinary `MemberExpr` naming a variant with no associated data; nothing follows it.
+- **Tuple**: call syntax - `Shape.Circle(5.0)` - type-checked against that variant's own declared positional types exactly like an ordinary function call's arguments.
+- **Struct**: composite-literal syntax, reusing this project's existing keyed-literal grammar - `Shape.Triangle{base: 3.0, height: 4.0}`. Both keyed and positional forms work, identically to a struct's own composite literal (see "Structs" above): a keyed literal may omit fields, a positional one must supply exactly one value per field in declaration order.
+
+```go
+c := Shape.Circle(5.0)
+t := Shape.Triangle{base: 3.0, height: 4.0}
+p := Shape.Point
+```
+
+**Deliberately no separate `constructor(){}` block for enums** - unlike a struct (which needs constructors specifically because a bare composite literal doesn't run custom logic), variant construction already fully serves that role: there is no "raw structural construction that bypasses custom logic" to distinguish it from, since a variant *is* its own data, not a wrapper around it.
+
+### Methods
+
+Methods are declared exactly the same receiver-clause way a struct's own methods already are - `func (Shape) Area() f64 { ... }` - with `this` inside resolving to a pointer to the enum value, same as a struct receiver. This needed zero parser grammar changes: a receiver clause was already just an identifier token naming *some* declared type, struct or enum alike.
+
+```go
+func (Shape) Area() f64 {
+    match this {
+        Shape.Circle(r) => {
+            return 3.14159 * r * r
+        }
+        Shape.Rectangle(w, h) => {
+            return w * h
+        }
+        Shape.Point => {
+            return 0.0
+        }
+    }
+}
+```
+
+A method value (`shape.Area`, referenced without a call) remains out of scope for the same reason it is for a struct - see "First-class functions" below.
+
+### Destructors
+
+An enum may also declare **at most one** `destructor() { body }` block, nested directly inside the enum declaration - the exact same syntax and "at most one, checked at declaration time" rule a struct's own destructor already has (see "Destructors" above). It fires **once**, regardless of which variant is actually active, at every one of the same control-flow scope-exit points a struct's destructor already fires at (falling off the end of its declaring block, an early `return`, or a `break`/`continue` exiting an enclosing loop) - there is no per-variant destructor concept, and no way to run different cleanup logic depending on which variant happens to be live.
+
+Declaring a destructor makes the enum **non-copyable**, exactly like a struct - the identical rule from "Destructors" above (`b := a` of an existing non-copyable value is rejected; a fresh construction is not a copy; a return by value allows no exception) applies verbatim, substituting "enum" for "struct" throughout.
+
+### Non-copyable propagation
+
+If **any** variant's **any** associated-data type is itself non-copyable (recursively, using the same rules a struct's own field-based propagation already uses), the whole enum becomes non-copyable too - mirroring exactly how a single non-copyable struct field already taints the whole struct (see "Transitive propagation" above). A unit variant trivially contributes nothing, having no associated data to check.
+
+```go
+struct Handle {
+    id int
+    destructor() { }
+}
+
+enum Wrapper {
+    Wrap(Handle)   // Handle has a destructor - Wrapper is non-copyable too
+}
+```
+
+### Recursive and self-referential variants
+
+A variant holding a pointer to the same enum type it's declared inside just works, falling out for free from the general rule that a variant's associated-data types are ordinary type-position types, and pointers are ordinary types:
+
+```go
+enum List {
+    Cons(i32, *List),
+    Nil
+}
+```
+
+### Comparability and printability
+
+An enum is comparable (`==`/`!=`) and printable (`print()`) iff **every** variant's **every** associated-data type is itself comparable/printable, recursively - not just whichever variant happens to be constructed on either side of a particular comparison/print call: this is a compile-time property that must hold across every possible runtime variant, the same way a struct's fields are all checked regardless of which code path actually sets them. The same allowlist a struct's own fields are checked against applies here (see "Maps" above and "Operators"/"The `print` builtin" below): a dynamic array, function type, or map, anywhere nested inside any variant's associated data, makes the whole enum uncomparable (a function/map also makes it unprintable; a dynamic array remains printable but not comparable, exactly like the struct case).
+
+Two enum values compare equal iff they hold the same variant **and** that variant's own associated data compares equal, recursively (a unit variant compares equal to another of the same variant unconditionally, having no data to differ on) - genuinely a runtime property, unlike a struct's own equality (whose every field is always present): comparing/printing an enum value requires first checking which variant is actually active at runtime, then only proceeding into that variant's own data.
+
+```go
+a := Shape.Circle(2.0)
+b := Shape.Circle(2.0)
+c := Shape.Circle(9.0)
+d := Shape.Point
+
+a == b   // true - same variant, same data
+a == c   // false - same variant, different data
+a == d   // false - different variant
+
+print(a)   // Circle(2.000000)
+print(d)   // Point
+```
+
+## match
+
+A new **statement** (not an expression this round - see "Explicitly deferred" below) for exhaustively dispatching on an enum value's own active variant, destructuring its associated data (if any) into fresh local names scoped to the matching arm alone:
+
+```go
+match shape {
+    Shape.Circle(r) => {
+        print(r)
+    }
+    Shape.Rectangle(w, h) => {
+        print(w * h)
+    }
+    Shape.Point => {
+        print(0)
+    }
+    _ => {
+        print(-1)
+    }
+}
+```
+
+Each arm's **pattern** is one of:
+
+- `EnumName.Variant` (unit) - matches that variant, binding nothing.
+- `EnumName.Variant(binding0, binding1, ...)` (tuple) - matches that variant, binding each fresh local name positionally to the variant's own declared associated-data types, scoped to that arm's body only.
+- `EnumName.Variant{field0: binding0, ...}` (struct-style) - matches that variant, binding each named field to a fresh local name via an explicit `field: newLocalName` mapping, reusing the same keyed-composite-literal-style syntax construction uses.
+- the wildcard `_` - matches anything not otherwise covered by an earlier arm, binding nothing.
+
+Each arm's body is an ordinary `Block` (braces). Control simply exits the whole `match` after one arm's body finishes running - **no fallthrough, no explicit `break` needed**, unlike C's `switch`.
+
+### Exhaustiveness checking
+
+A real, hard compile-time check - this is the entire point of building `match` as its own construct rather than an unchecked switch:
+
+- Every arm's pattern must name one of the *matched* enum's own declared variants - a pattern naming a variant belonging to some **other** enum type, or a nonexistent variant name, is a clean diagnostic, never a panic.
+- No variant may be matched by more than one arm - a duplicate is a clean diagnostic.
+- Either **every** variant must be covered by some arm, **or** a `_` wildcard arm must be present. Missing this is a clean "match is not exhaustive: missing variant(s) ..." diagnostic naming exactly which variants are uncovered.
+
+```go
+enum Shape { Circle(f64), Point }
+
+match shape {
+    Shape.Circle(r) => { }
+}
+// error: match is not exhaustive: missing variant(s) Point
+
+match shape {
+    Shape.Circle(r) => { }
+    Shape.Circle(r2) => { }   // error: variant Shape.Circle already matched
+    Shape.Point => { }
+}
+```
+
+A fully-exhaustive `match` (every arm ending in a terminating statement, with no wildcard needed because every variant is explicitly covered - or a wildcard arm present) counts as a terminating statement in its own right for this language's "Missing return" flow analysis (see below), the same way a fully-covered `if`/`else` already does - a function whose body ends in such a `match` needs no further `return` after it.
+
+### Explicitly deferred (Round B, a separate future extension) - not built this round
+
+- **`match` supporting plain-value patterns** (ints, strings, bools - a general Go-`switch`-style value-equality dispatch, not just enum-variant destructuring). This round is enum-variant patterns only.
+- **`match` as an expression producing a value** (`x := match shape { ... }`). This round is a `match` *statement* only, each arm's body an ordinary side-effecting `Block`, not something that yields a value back to an enclosing expression.
 
 ## Pointers
 
@@ -1112,9 +1280,10 @@ A function declaring a return type must be guaranteed to return a value on
 every possible execution path - `sema.Check` runs a full flow analysis for
 this (`isTerminatingStmt`, `src/sema/typecheck.go`), modeled directly on Go's
 own spec ("Terminating statements"), cut down to this language's smaller
-statement grammar (no goto/labels/switch/select/panic exist here). A
-statement list ends in a terminating statement if its last statement does,
-where a terminating statement is one of:
+statement grammar (no goto/labels/switch/select/panic exist here - `match` is
+the one exception, see below). A statement list ends in a terminating
+statement if its last statement does, where a terminating statement is one
+of:
 
 - a `return`.
 - an infinite `for {}` (no `cond` clause) with no `break` that targets it
@@ -1126,6 +1295,14 @@ where a terminating statement is one of:
   one-line `if cond: stmt` form, which is grammatically identical (see
   ast.Node's IfStmt doc comment) - can never be terminating: there's always
   a path where the condition is false and control falls straight through.
+- a `match` (see "match" above) that is both exhaustive (every one of the
+  matched enum's own variants covered by an arm, or a wildcard `_` arm
+  present) and whose every arm's own body is itself terminating - mirroring
+  an `if`/`else`'s identical "every branch present and terminating" rule,
+  generalized from two branches to N. A `match` missing either property (an
+  arm that falls through, or a variant left uncovered with no wildcard) is
+  never terminating, the same "there's always a path that falls straight
+  through" reasoning an incomplete `if`/`else` already has.
 - a `Block` whose own last statement is terminating.
 
 A function declaring a return type whose body isn't terminating gets a real

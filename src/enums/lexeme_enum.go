@@ -44,16 +44,17 @@ const (
 	LexemeRightBrace       Lexeme = 28
 	LexemeColonEqual       Lexeme = 29
 	LexemeEqualEqual       Lexeme = 30
-	LexemePlusPlus         Lexeme = 31
-	LexemeMinusMinus       Lexeme = 32
-	LexemePlusEqual        Lexeme = 33
-	LexemeMinusEqual       Lexeme = 34
-	LexemeAsteriskEqual    Lexeme = 35
-	LexemeSlashEqual       Lexeme = 36
-	LexemeAmpersand        Lexeme = 37
-	LexemePipe             Lexeme = 38
-	LexemeEOF              Lexeme = 39
-	LexemeIllegal          Lexeme = 40
+	LexemeFatArrow         Lexeme = 31
+	LexemePlusPlus         Lexeme = 32
+	LexemeMinusMinus       Lexeme = 33
+	LexemePlusEqual        Lexeme = 34
+	LexemeMinusEqual       Lexeme = 35
+	LexemeAsteriskEqual    Lexeme = 36
+	LexemeSlashEqual       Lexeme = 37
+	LexemeAmpersand        Lexeme = 38
+	LexemePipe             Lexeme = 39
+	LexemeEOF              Lexeme = 40
+	LexemeIllegal          Lexeme = 41
 )
 
 type LexemeContainer struct {
@@ -88,6 +89,7 @@ type LexemeContainer struct {
 	RightBrace       Lexeme
 	ColonEqual       Lexeme
 	EqualEqual       Lexeme
+	FatArrow         Lexeme
 	PlusPlus         Lexeme
 	MinusMinus       Lexeme
 	PlusEqual        Lexeme
@@ -133,6 +135,7 @@ var Lexemes = LexemeContainer{
 	RightBrace:       LexemeRightBrace,
 	ColonEqual:       LexemeColonEqual,
 	EqualEqual:       LexemeEqualEqual,
+	FatArrow:         LexemeFatArrow,
 	PlusPlus:         LexemePlusPlus,
 	MinusMinus:       LexemeMinusMinus,
 	PlusEqual:        LexemePlusEqual,
@@ -308,6 +311,11 @@ var lexemeInfos = map[Lexeme]LexemeInfo{
 		Name:   "EqualEqual",
 		Char:   "==",
 	},
+	LexemeFatArrow: {
+		Lexeme: LexemeFatArrow,
+		Name:   "FatArrow",
+		Char:   "=>",
+	},
 	LexemePlusPlus: {
 		Lexeme: LexemePlusPlus,
 		Name:   "PlusPlus",
@@ -392,6 +400,7 @@ var lexemeValues = []Lexeme{
 	LexemeRightBrace,
 	LexemeColonEqual,
 	LexemeEqualEqual,
+	LexemeFatArrow,
 	LexemePlusPlus,
 	LexemeMinusMinus,
 	LexemePlusEqual,
@@ -436,6 +445,7 @@ var lexemeByName = map[string]Lexeme{
 	"rightbrace":       LexemeRightBrace,
 	"colonequal":       LexemeColonEqual,
 	"equalequal":       LexemeEqualEqual,
+	"fatarrow":         LexemeFatArrow,
 	"plusplus":         LexemePlusPlus,
 	"minusminus":       LexemeMinusMinus,
 	"plusequal":        LexemePlusEqual,

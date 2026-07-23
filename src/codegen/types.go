@@ -34,6 +34,18 @@ import (
 //     computes an address into the backing buffer (genMakeCall/genAppendCall/
 //     genAddr's IndexExpr case, expr.go), never in the struct's own shape.
 //     See CODEGEN.md's "Dynamic arrays" section.
+//   - an enum value (sema.Type{Kind: TypeEnum}) is the literal (unnamed)
+//     struct {i32, ptr} - a discriminant (the active variant's own
+//     declaration-order index) plus an opaque payload pointer, arena-
+//     allocated the moment a non-unit variant is actually constructed (null
+//     for a unit variant, which carries no associated data at all) - see
+//     CODEGEN.md's "Enums" section and enum.go. One shared LLVM struct type
+//     serves every enum type, exactly like dynArrTy/funcValTy above: the
+//     payload is always just an opaque address regardless of which enum (or
+//     which of its variants) is active, so there's nothing enum-specific
+//     for the outer struct's own shape to encode - only the *payload's own*
+//     type (built per-variant in enum.go's declareEnumLayouts) ever depends
+//     on a specific enum's own declared variants.
 func (g *Generator) setupTypes() {
 	g.i8Ty = g.ctx.Int8Type()
 	g.i16Ty = g.ctx.Int16Type()
@@ -47,6 +59,7 @@ func (g *Generator) setupTypes() {
 	g.stringTy = g.ctx.StructType([]llvm.Type{g.ptrTy, g.i32Ty}, false)
 	g.funcValTy = g.ctx.StructType([]llvm.Type{g.ptrTy, g.ptrTy}, false)
 	g.dynArrTy = g.ctx.StructType([]llvm.Type{g.ptrTy, g.i32Ty, g.i32Ty}, false)
+	g.enumValTy = g.ctx.StructType([]llvm.Type{g.i32Ty, g.ptrTy}, false)
 }
 
 // llvmType maps a sema.Type (the output of type-checking) to the LLVM type
@@ -78,6 +91,8 @@ func (g *Generator) llvmType(t sema.Type) llvm.Type {
 		return g.voidTy
 	case sema.TypeStruct:
 		return g.structLayouts[t.Struct].llvmType
+	case sema.TypeEnum:
+		return g.enumValTy
 	case sema.TypeArray:
 		if t.Dynamic {
 			return g.dynArrTy

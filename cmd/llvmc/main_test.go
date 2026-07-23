@@ -310,6 +310,50 @@ func TestBinary_MultiReturnExample(t *testing.T) {
 	}
 }
 
+// TestBinary_EnumsExample runs examples/enums/enums.llx end to end via the
+// real binary - the worked dogfooding demo for this round's Rust-style enums
+// plus `match` feature (see LANGUAGE.md's "Enums"/"match" sections): a
+// Shape enum's own Area() method dispatching via match, ==/!= across every
+// combination (same-variant-same-data, same-variant-different-data,
+// different-variant), print() of each variant, and a recursive List enum
+// summed via recursive match - proving the pointer-based self-reference
+// genuinely works. Its own `main() int` returns the list's own sum (6),
+// which becomes the exit code, exactly like every other int-returning
+// example already does.
+func TestBinary_EnumsExample(t *testing.T) {
+	cmd := exec.Command(llvmcPath, "../../examples/enums/enums.llx")
+	out, err := cmd.Output()
+
+	if err != nil {
+		ee, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("running llvmc: %v", err)
+		}
+		if ee.ExitCode() != 6 {
+			t.Fatalf("exit code = %d, want 6, stderr:\n%s", ee.ExitCode(), ee.Stderr)
+		}
+	} else {
+		t.Fatal("expected llvmc to exit 6, got exit 0")
+	}
+
+	normalized := strings.ReplaceAll(string(out), "\r\n", "\n")
+	normalized = strings.TrimRight(normalized, "\n")
+	want := "12.566360\n" +
+		"12.000000\n" +
+		"0.000000\n" +
+		"Circle(2.000000)\n" +
+		"Rectangle(3.000000 4.000000)\n" +
+		"Point\n" +
+		"true\n" +
+		"false\n" +
+		"false\n" +
+		"false\n" +
+		"6"
+	if normalized != want {
+		t.Errorf("stdout = %q, want %q", normalized, want)
+	}
+}
+
 // TestBinary_MainExitCode covers examples/features/features.llx end to end: its
 // three print calls' real stdout, and its `func main() int` return value
 // coming back as the child process's own exit code.
@@ -450,6 +494,48 @@ func TestBinary_AOT_MultiReturn(t *testing.T) {
 	normalized := strings.ReplaceAll(string(out), "\r\n", "\n")
 	normalized = strings.TrimRight(normalized, "\n")
 	want := "5\ndivision by zero\n2\nnot found"
+	if normalized != want {
+		t.Errorf("stdout = %q, want %q", normalized, want)
+	}
+}
+
+// TestBinary_AOT_Enums AOT-compiles examples/enums and confirms identical
+// output/exit code to its JIT-executed behavior (TestBinary_EnumsExample) -
+// proving the enum tagged-union representation, its real discriminant-switch
+// `==`/print/`match` codegen, and the arena-allocated variant payload all
+// round-trip correctly through a real, standalone linked executable, not
+// just under JIT execution (the payload in particular must genuinely
+// survive independent of any JIT-specific memory management).
+func TestBinary_AOT_Enums(t *testing.T) {
+	exePath := aotCompile(t, "../../examples/enums/enums.llx")
+
+	cmd := exec.Command(exePath)
+	out, err := cmd.Output()
+	if err != nil {
+		ee, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("running %s: %v", exePath, err)
+		}
+		if ee.ExitCode() != 6 {
+			t.Fatalf("%s exit code = %d, want 6, stderr:\n%s", exePath, ee.ExitCode(), ee.Stderr)
+		}
+	} else {
+		t.Fatalf("expected %s to exit 6, got exit 0", exePath)
+	}
+
+	normalized := strings.ReplaceAll(string(out), "\r\n", "\n")
+	normalized = strings.TrimRight(normalized, "\n")
+	want := "12.566360\n" +
+		"12.000000\n" +
+		"0.000000\n" +
+		"Circle(2.000000)\n" +
+		"Rectangle(3.000000 4.000000)\n" +
+		"Point\n" +
+		"true\n" +
+		"false\n" +
+		"false\n" +
+		"false\n" +
+		"6"
 	if normalized != want {
 		t.Errorf("stdout = %q, want %q", normalized, want)
 	}

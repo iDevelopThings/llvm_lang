@@ -60,19 +60,18 @@ func (g *Generator) genBlock(block ast.NodeIndex) bool {
 func (g *Generator) unwindDestructorsTo(target int) {
 	for i := len(g.destructors) - 1; i >= target; i-- {
 		e := g.destructors[i]
-		g.genDestructorCall(g.locals[e.sym], e.info)
+		g.genDestructorCall(g.locals[e.sym], e.fn, e.fnTy)
 	}
 	g.destructors = g.destructors[:target]
 }
 
-// genDestructorCall calls info's own destructor (declared by
-// declareDestructorSignature, func.go) against addr as its implicit `this` -
-// the same implicit-first-pointer-parameter convention an ordinary method or
-// constructor call already uses (see CODEGEN.md's "Method receivers"
-// section).
-func (g *Generator) genDestructorCall(addr llvm.Value, info *sema.StructInfo) {
-	entry := g.dtors[info]
-	g.builder.CreateCall(entry.fnType, entry.fn, []llvm.Value{addr}, "")
+// genDestructorCall calls the destructor function fn/fnTy (a struct's or an
+// enum's - see destructorFuncFor, func.go) against addr as its implicit
+// `this` - the same implicit-first-pointer-parameter convention an ordinary
+// method or constructor call already uses (see CODEGEN.md's "Method
+// receivers" section).
+func (g *Generator) genDestructorCall(addr, fn llvm.Value, fnTy llvm.Type) {
+	g.builder.CreateCall(fnTy, fn, []llvm.Value{addr}, "")
 }
 
 // genStmt lowers one statement, reporting whether it terminated the current
@@ -118,6 +117,8 @@ func (g *Generator) genStmt(n ast.NodeIndex) bool {
 		return g.genIfStmt(n)
 	case enums.NodeKinds.ForStmt:
 		return g.genForStmt(n)
+	case enums.NodeKinds.MatchStmt:
+		return g.genMatchStmt(n)
 	default:
 		return false
 	}
@@ -249,8 +250,8 @@ func (g *Generator) genDeleteStmt(n ast.NodeIndex) {
 	operand := g.tree.Child(n, 0)
 	ptr := g.genExpr(operand)
 
-	if info, ok := g.destructorInfoForPointee(operand); ok {
-		g.genDestructorCall(ptr, info)
+	if entry, ok := g.destructorFuncForPointee(operand); ok {
+		g.genDestructorCall(ptr, entry.fn, entry.fnType)
 	}
 
 	g.builder.CreateCall(g.freeType, g.freeFn, []llvm.Value{ptr}, "")
@@ -260,22 +261,19 @@ func (g *Generator) genDeleteStmt(n ast.NodeIndex) {
 	}
 }
 
-// destructorInfoForPointee reports whether operand's own pointer type (see
+// destructorFuncForPointee reports whether operand's own pointer type (see
 // LANGUAGE.md's "Pointers" section - operand must already be pointer-typed,
-// sema.checkDeleteStmt guarantees this) points to a struct that declares its
-// own destructor() - the delete-specific counterpart to pushDestructorEntry
-// (func.go), which asks the identical question about a plain local/
-// parameter's own declared type instead of a pointer's pointee.
-func (g *Generator) destructorInfoForPointee(operand ast.NodeIndex) (*sema.StructInfo, bool) {
+// sema.checkDeleteStmt guarantees this) points to a struct or enum that
+// declares its own destructor() - the delete-specific counterpart to
+// pushDestructorEntry (func.go), which asks the identical question about a
+// plain local/parameter's own declared type instead of a pointer's pointee -
+// both now share destructorFuncFor's own struct-vs-enum dispatch.
+func (g *Generator) destructorFuncForPointee(operand ast.NodeIndex) (funcEntry, bool) {
 	t := g.info.Types[operand]
 	if t.Kind != sema.TypePointer || t.Elem == nil {
-		return nil, false
+		return funcEntry{}, false
 	}
-	elem := *t.Elem
-	if elem.Kind != sema.TypeStruct || elem.Struct == nil || elem.Struct.Destructor == nil {
-		return nil, false
-	}
-	return elem.Struct, true
+	return g.destructorFuncFor(*t.Elem)
 }
 
 // deleteLocalSlot reports whether operand (delete's own operand expression,

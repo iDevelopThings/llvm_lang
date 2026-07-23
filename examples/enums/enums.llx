@@ -1,0 +1,84 @@
+// enums.llx - Rust-style tagged-union enums plus `match` (see LANGUAGE.md's
+// "Enums" and "match" sections): all three construction shapes a variant can
+// take (unit/tuple - Shape's own three variants; a struct-style variant is
+// covered separately, by src/sema and src/codegen's own dedicated tests, not
+// duplicated here), a method with an enum receiver using `match` internally,
+// `==`/`!=`, print(), and a small recursive enum (List) proving a
+// pointer-based self-reference genuinely works, summed via recursive match.
+//
+// Run with:
+//   .\llvmc.exe examples\enums\enums.llx
+//   echo $LASTEXITCODE   # (PowerShell) -> 6
+
+enum Shape {
+    Circle(f64),
+    Rectangle(f64, f64),
+    Point,
+}
+
+// Area is exhaustive with no wildcard arm needed - every one of Shape's own
+// three variants is covered by its own arm (see LANGUAGE.md's "match"
+// section).
+func (Shape) Area() f64 {
+    match this {
+        Shape.Circle(r) => {
+            return 3.14159 * r * r
+        }
+        Shape.Rectangle(w, h) => {
+            return w * h
+        }
+        Shape.Point => {
+            return 0.0
+        }
+    }
+}
+
+enum List {
+    Cons(i32, *List),
+    Nil,
+}
+
+// Sum walks the whole list recursively via match - proving the recursive/
+// self-referential variant (`Cons`'s own `*List` field) genuinely works: a
+// pointer to the same enum type it's declared inside.
+func (List) Sum() i32 {
+    match this {
+        List.Cons(v, next) => {
+            return v + next.Sum()
+        }
+        List.Nil => {
+            return 0
+        }
+    }
+}
+
+func main() int {
+    circle := Shape.Circle(2.0)
+    rect := Shape.Rectangle(3.0, 4.0)
+    point := Shape.Point
+
+    print(circle.Area())   // 12.566360
+    print(rect.Area())     // 12.000000
+    print(point.Area())    // 0.000000
+
+    print(circle)   // Circle(2.000000)
+    print(rect)      // Rectangle(3.000000 4.000000)
+    print(point)     // Point
+
+    sameCircle := Shape.Circle(2.0)
+    diffData := Shape.Circle(9.0)
+    diffVariant := Shape.Point
+
+    print(circle == sameCircle)     // true - same variant, same data
+    print(circle != sameCircle)     // false
+    print(circle == diffData)       // false - same variant, different data
+    print(circle == diffVariant)    // false - different variant
+
+    n3 := List.Nil
+    n2 := List.Cons(3, &n3)
+    n1 := List.Cons(2, &n2)
+    n0 := List.Cons(1, &n1)
+    print(n0.Sum())   // 6
+
+    return n0.Sum()
+}

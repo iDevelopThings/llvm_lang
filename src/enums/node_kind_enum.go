@@ -61,6 +61,10 @@ const (
 	NodeKindMultiShortVarDecl NodeKind = 45
 	NodeKindMultiAssignStmt   NodeKind = 46
 	NodeKindMapType           NodeKind = 47
+	NodeKindEnumDecl          NodeKind = 48
+	NodeKindEnumVariant       NodeKind = 49
+	NodeKindMatchStmt         NodeKind = 50
+	NodeKindMatchArm          NodeKind = 51
 )
 
 type NodeKindContainer struct {
@@ -112,6 +116,10 @@ type NodeKindContainer struct {
 	MultiShortVarDecl NodeKind
 	MultiAssignStmt   NodeKind
 	MapType           NodeKind
+	EnumDecl          NodeKind
+	EnumVariant       NodeKind
+	MatchStmt         NodeKind
+	MatchArm          NodeKind
 }
 
 // NodeKinds is the entry point for the NodeKind enum.
@@ -164,6 +172,10 @@ var NodeKinds = NodeKindContainer{
 	MultiShortVarDecl: NodeKindMultiShortVarDecl,
 	MultiAssignStmt:   NodeKindMultiAssignStmt,
 	MapType:           NodeKindMapType,
+	EnumDecl:          NodeKindEnumDecl,
+	EnumVariant:       NodeKindEnumVariant,
+	MatchStmt:         NodeKindMatchStmt,
+	MatchArm:          NodeKindMatchArm,
 }
 
 // NodeKindInfo is the static metadata attached to a NodeKind.
@@ -365,6 +377,22 @@ var nodeKindInfos = map[NodeKind]NodeKindInfo{
 		NodeKind: NodeKindMapType,
 		Name:     "MapType",
 	},
+	NodeKindEnumDecl: {
+		NodeKind: NodeKindEnumDecl,
+		Name:     "EnumDecl",
+	},
+	NodeKindEnumVariant: {
+		NodeKind: NodeKindEnumVariant,
+		Name:     "EnumVariant",
+	},
+	NodeKindMatchStmt: {
+		NodeKind: NodeKindMatchStmt,
+		Name:     "MatchStmt",
+	},
+	NodeKindMatchArm: {
+		NodeKind: NodeKindMatchArm,
+		Name:     "MatchArm",
+	},
 }
 
 var nodeKindValues = []NodeKind{
@@ -416,6 +444,10 @@ var nodeKindValues = []NodeKind{
 	NodeKindMultiShortVarDecl,
 	NodeKindMultiAssignStmt,
 	NodeKindMapType,
+	NodeKindEnumDecl,
+	NodeKindEnumVariant,
+	NodeKindMatchStmt,
+	NodeKindMatchArm,
 }
 
 var nodeKindByName = map[string]NodeKind{
@@ -467,6 +499,10 @@ var nodeKindByName = map[string]NodeKind{
 	"multishortvardecl": NodeKindMultiShortVarDecl,
 	"multiassignstmt":   NodeKindMultiAssignStmt,
 	"maptype":           NodeKindMapType,
+	"enumdecl":          NodeKindEnumDecl,
+	"enumvariant":       NodeKindEnumVariant,
+	"matchstmt":         NodeKindMatchStmt,
+	"matcharm":          NodeKindMatchArm,
 }
 
 // Values returns every declared value in declaration order.

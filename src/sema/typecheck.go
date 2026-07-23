@@ -146,6 +146,11 @@ type checker struct {
 	// instead of nodeRef, since copyability is a fact about the struct type
 	// itself, not about any one declaration node.
 	computingCopyable map[*StructInfo]bool
+
+	// computingEnumCopyable is enumCopyable's own identical cycle guard, one
+	// type kind over - see structCopyable/computingCopyable's own doc
+	// comments.
+	computingEnumCopyable map[*EnumInfo]bool
 }
 
 // enter switches the checker's current-file bookkeeping to tree
@@ -236,14 +241,15 @@ func CheckPackage(trees []*ast.Tree, infos map[*ast.Tree]*Info) map[*ast.Tree]*d
 // packages" section for the identical reasoning one layer down.
 func CheckProgram(trees []*ast.Tree, infos map[*ast.Tree]*Info, treePackage map[*ast.Tree]*Scope) map[*ast.Tree]*diag.Bag {
 	c := &checker{
-		infos:             infos,
-		allDiags:          make(map[*ast.Tree]*diag.Bag, len(trees)),
-		treePackage:       treePackage,
-		declTypes:         make(map[nodeRef]Type),
-		computingDecl:     make(map[nodeRef]bool),
-		typeNodeCache:     make(map[nodeRef]Type),
-		funcSigs:          make(map[nodeRef]funcSignature),
-		computingCopyable: make(map[*StructInfo]bool),
+		infos:                 infos,
+		allDiags:              make(map[*ast.Tree]*diag.Bag, len(trees)),
+		treePackage:           treePackage,
+		declTypes:             make(map[nodeRef]Type),
+		computingDecl:         make(map[nodeRef]bool),
+		typeNodeCache:         make(map[nodeRef]Type),
+		funcSigs:              make(map[nodeRef]funcSignature),
+		computingCopyable:     make(map[*StructInfo]bool),
+		computingEnumCopyable: make(map[*EnumInfo]bool),
 	}
 	for _, tree := range trees {
 		c.allDiags[tree] = diag.NewBag()
@@ -299,6 +305,9 @@ func (c *checker) checkPackage(trees []*ast.Tree) {
 		for decl := range tree.TopLevelDeclsOfKind(enums.NodeKinds.StructDecl) {
 			c.checkStructDecl(decl)
 		}
+		for decl := range tree.TopLevelDeclsOfKind(enums.NodeKinds.EnumDecl) {
+			c.checkEnumDecl(decl)
+		}
 	}
 	for _, tree := range trees {
 		c.enter(tree)
@@ -325,6 +334,82 @@ func (c *checker) checkStructDecl(decl ast.NodeIndex) {
 	for dtor := range c.tree.StructDestructors(decl) {
 		c.checkDestructorDecl(dtor)
 	}
+}
+
+// checkEnumDecl type-checks decl's (an EnumDecl's) own variants - populating
+// each variant's own EnumVariant.Tuple/Fields (associated-data Types),
+// deliberately computed here rather than by Resolve, mirroring how a struct
+// field's own Type is likewise computed lazily via typeFromNode - and its
+// own (at most one) destructor, mirroring checkStructDecl one type kind
+// over. No constructors to check - see EnumInfo's own doc comment for why
+// there's nothing to catalog there.
+func (c *checker) checkEnumDecl(decl ast.NodeIndex) {
+	nameNode := c.tree.Child(decl, 0)
+	info, ok := c.info.Enums[c.tree.Text(nameNode)]
+	if !ok {
+		return
+	}
+
+	for _, variantNode := range c.tree.EnumVariants(decl) {
+		variant := info.Variants[c.tree.Text(variantNode)]
+		if variant == nil {
+			continue // a redeclared variant name - already reported by Resolve
+		}
+		switch c.tree.ClassifyEnumVariant(variantNode) {
+		case ast.EnumVariantTuple:
+			typeNodes := c.tree.Children(variantNode)
+			variant.Tuple = make([]Type, len(typeNodes))
+			for i, tn := range typeNodes {
+				variant.Tuple[i] = c.typeFromNode(tn)
+			}
+		case ast.EnumVariantStruct:
+			fieldNodes := c.tree.Children(variantNode)
+			variant.Fields = make([]EnumField, len(fieldNodes))
+			for i, fieldNode := range fieldNodes {
+				fieldNameNode := c.tree.Child(fieldNode, 0)
+				fieldName := c.tree.Text(fieldNameNode)
+				fieldType := c.typeFromNode(c.tree.Child(fieldNode, 1))
+				fieldSym := &Symbol{
+					Name:     fieldName,
+					Kind:     SymField,
+					Decl:     fieldNode,
+					Tree:     c.tree,
+					Scope:    info.Symbol.Scope,
+					Exported: isExportedName(fieldName),
+				}
+				c.info.Refs[fieldNameNode] = fieldSym
+				variant.Fields[i] = EnumField{
+					Name: fieldName,
+					Type: fieldType,
+					Sym:  fieldSym,
+				}
+			}
+		}
+	}
+
+	for dtor := range c.tree.EnumDestructors(decl) {
+		c.checkEnumDestructorDecl(dtor)
+	}
+}
+
+// checkEnumDestructorDecl type-checks one enum `destructor() {...}` block -
+// mirroring checkDestructorDecl exactly, one type kind over.
+func (c *checker) checkEnumDestructorDecl(dtor ast.NodeIndex) {
+	paramList := c.tree.DestructorParamList(dtor)
+	body := c.tree.DestructorBody(dtor)
+
+	paramNodes := c.tree.Children(paramList)
+	for _, param := range paramNodes {
+		c.declType(param)
+	}
+	if len(paramNodes) > 0 {
+		c.errorAt(paramList, "destructor must take no parameters, got %d", len(paramNodes))
+	}
+
+	prevFunc := c.curFunc
+	c.curFunc = &enclosingFunc{hasReturn: false}
+	c.checkBlock(body)
+	c.curFunc = prevFunc
 }
 
 // checkConstructorDecl type-checks one constructor's params and body -
@@ -420,7 +505,7 @@ func (c *checker) checkFuncDecl(decl ast.NodeIndex) {
 		ret:       sig.Return,
 	}
 	c.checkBlock(body)
-	if c.curFunc.hasReturn && !isTerminatingStmt(c.tree, body) {
+	if c.curFunc.hasReturn && !isTerminatingStmt(c.tree, c.info, body) {
 		c.errorAt(decl, "missing return")
 	}
 	c.curFunc = prevFunc
@@ -627,7 +712,7 @@ func (c *checker) checkFuncLit(n ast.NodeIndex) Type {
 		ret:       ret,
 	}
 	c.checkBlock(body)
-	if c.curFunc.hasReturn && !isTerminatingStmt(c.tree, body) {
+	if c.curFunc.hasReturn && !isTerminatingStmt(c.tree, c.info, body) {
 		c.errorAt(n, "missing return")
 	}
 	c.curFunc = prevFunc
@@ -1014,6 +1099,58 @@ func (c *checker) structCopyable(info *StructInfo) bool {
 	return copyable
 }
 
+// enumCopyable computes (and memoizes onto info.Copyable) whether info's
+// enum type may be freely copied - the enum-kind counterpart to
+// structCopyable, mirroring it exactly: non-copyable iff this enum declares
+// its own Destructor, or (transitively) any variant's any associated-data
+// type is itself non-copyable - unit variants trivially contribute nothing
+// (see LANGUAGE.md's "Enums" section, non-copyable propagation).
+func (c *checker) enumCopyable(info *EnumInfo) bool {
+	if info.copyableComputed {
+		return info.Copyable
+	}
+	if c.computingEnumCopyable[info] {
+		return true
+	}
+	c.computingEnumCopyable[info] = true
+	defer delete(c.computingEnumCopyable, info)
+
+	copyable := info.Destructor == nil
+	if copyable {
+		restore := c.pushTree(info.Symbol.Tree)
+		for _, variantNode := range c.tree.EnumVariants(info.Symbol.Decl) {
+			variant := info.Variants[c.tree.Text(variantNode)]
+			if variant == nil {
+				continue
+			}
+			switch variant.Kind {
+			case EnumVariantTuple:
+				for _, t := range variant.Tuple {
+					if c.typeIsNonCopyable(t) {
+						copyable = false
+						break
+					}
+				}
+			case EnumVariantStruct:
+				for _, f := range variant.Fields {
+					if c.typeIsNonCopyable(f.Type) {
+						copyable = false
+						break
+					}
+				}
+			}
+			if !copyable {
+				break
+			}
+		}
+		restore()
+	}
+
+	info.Copyable = copyable
+	info.copyableComputed = true
+	return copyable
+}
+
 // typeIsNonCopyable reports whether a value of type t can never be freely
 // duplicated (see LANGUAGE.md's "Destructors" section) - a struct that isn't
 // StructInfo.Copyable, or a fixed-size array of a non-copyable element type.
@@ -1030,6 +1167,10 @@ func (c *checker) typeIsNonCopyable(t Type) bool {
 	case TypeStruct:
 		if t.Struct != nil {
 			c.structCopyable(t.Struct) // force Copyable to be memoized
+		}
+	case TypeEnum:
+		if t.Enum != nil {
+			c.enumCopyable(t.Enum) // force Copyable to be memoized
 		}
 	case TypeArray:
 		if !t.Dynamic && t.Elem != nil {
@@ -1053,6 +1194,11 @@ func IsNonCopyable(t Type) bool {
 			return false
 		}
 		return !t.Struct.Copyable
+	case TypeEnum:
+		if t.Enum == nil {
+			return false
+		}
+		return !t.Enum.Copyable
 	case TypeArray:
 		if t.Dynamic || t.Elem == nil {
 			return false
@@ -1080,11 +1226,28 @@ func (c *checker) isFreshConstruction(n ast.NodeIndex) bool {
 	}
 	switch c.tree.Nodes[n].Kind {
 	case enums.NodeKinds.CompositeLit:
+		// Also covers a struct-variant construction literal
+		// (`Shape.Triangle{...}` - see LANGUAGE.md's "Enums" section) - the
+		// identical "building the one instance, not duplicating an existing
+		// one" reasoning applies there exactly as it does for a struct's own
+		// composite literal.
 		return true
 	case enums.NodeKinds.CallExpr:
 		callee := c.tree.Child(n, 0)
 		sym, ok := c.info.Refs[callee]
-		return ok && sym.Kind == SymConstructor
+		// A tuple-variant construction call (`Shape.Circle(5.0)`) is exactly
+		// as fresh as a struct constructor call - see LANGUAGE.md's "Enums"
+		// section.
+		return ok && (sym.Kind == SymConstructor || sym.Kind == SymEnumVariant)
+	case enums.NodeKinds.MemberExpr:
+		// A bare unit-variant reference (`Shape.Point`) - the enum-kind
+		// counterpart to the two cases above, for the one variant kind with
+		// no call/literal syntax of its own at all: there's no "existing
+		// value" here to duplicate, only a fresh, dataless value being named
+		// directly (see LANGUAGE.md's "Enums" section, unit variant
+		// construction).
+		sym, ok := c.info.Refs[n]
+		return ok && sym.Kind == SymEnumVariant
 	default:
 		return false
 	}
@@ -1259,6 +1422,21 @@ func (c *checker) typeFromSymbol(sym *Symbol) Type {
 			Kind:   TypeStruct,
 			Struct: sym.StructInfo,
 		}
+	case SymEnum:
+		if sym.EnumInfo == nil {
+			return invalidType
+		}
+		return Type{
+			Kind: TypeEnum,
+			Enum: sym.EnumInfo,
+		}
+	case SymEnumVariant:
+		// A bare EnumName.Variant reached ordinary type position (not a
+		// composite-literal's own type-expr slot, which checkCompositeLit
+		// intercepts before ever reaching here) - e.g. `var x Shape.Circle` -
+		// a variant is never itself a standalone type, only its owning enum
+		// is.
+		return invalidType
 	default:
 		return invalidType // "not a type"; already reported by Resolve
 	}
@@ -1440,9 +1618,49 @@ func (c *checker) typeIsComparable(t Type) bool {
 			}
 		}
 		return true
+	case TypeEnum:
+		return c.enumAssociatedTypesAll(t.Enum, c.typeIsComparable)
 	default:
 		return true
 	}
+}
+
+// enumAssociatedTypesAll reports whether pred holds for every associated-data
+// type of every variant of info - not just one variant, since comparability/
+// printability is a compile-time property that must hold across every
+// possible runtime variant, exactly like a struct's fields all being checked
+// regardless of which code path actually sets them (see LANGUAGE.md's
+// "Enums" section). Shared by typeIsComparable/typeIsPrintable's own
+// TypeEnum case - the two allowlists genuinely differ (a dynamic array is
+// printable but never comparable - see typeIsPrintable's own doc comment),
+// but both walk every variant's every associated type the identical way, so
+// only the leaf predicate itself differs between the two callers. A nil info
+// (an enum type reached before its own EnumInfo could be resolved) is
+// vacuously true, the same recovery every other nil-catalog case in this
+// file already uses.
+func (c *checker) enumAssociatedTypesAll(info *EnumInfo, pred func(Type) bool) bool {
+	if info == nil {
+		return true
+	}
+	restore := c.pushTree(info.Symbol.Tree)
+	defer restore()
+	for _, variant := range info.Order {
+		switch variant.Kind {
+		case EnumVariantTuple:
+			for _, t := range variant.Tuple {
+				if !pred(t) {
+					return false
+				}
+			}
+		case EnumVariantStruct:
+			for _, f := range variant.Fields {
+				if !pred(f.Type) {
+					return false
+				}
+			}
+		}
+	}
+	return true
 }
 
 // typeIsPrintable reports whether t is a type `print` can actually lower
@@ -1476,6 +1694,8 @@ func (c *checker) typeIsPrintable(t Type) bool {
 			}
 		}
 		return true
+	case TypeEnum:
+		return c.enumAssociatedTypesAll(t.Enum, c.typeIsPrintable)
 	default:
 		return true
 	}
@@ -1524,6 +1744,8 @@ func (c *checker) checkStmt(n ast.NodeIndex) {
 		c.checkIfStmt(n)
 	case enums.NodeKinds.ForStmt:
 		c.checkForStmt(n)
+	case enums.NodeKinds.MatchStmt:
+		c.checkMatchStmt(n)
 	}
 }
 
@@ -1800,6 +2022,261 @@ func (c *checker) checkCondition(n ast.NodeIndex) {
 	}
 }
 
+// checkMatchStmt type-checks a `match subject { pattern => body, ... }`
+// statement (see LANGUAGE.md's "match" section) - the real, hard
+// exhaustiveness check this feature exists to provide: every arm's pattern
+// must name one of the matched enum's own declared variants (a pattern
+// naming some other enum's variant, or a nonexistent one, is a clean
+// diagnostic, not a panic - see checkMatchArmPattern), no variant may be
+// matched by more than one arm, and either every variant is covered by some
+// arm or a wildcard `_` arm is present. The subject may be an enum value
+// directly, or a pointer to one (`this` inside a method - see
+// checkThisExpr) - auto-dereferenced here, the same auto-deref every other
+// struct/enum-receiver access in this language already gets.
+func (c *checker) checkMatchStmt(n ast.NodeIndex) {
+	subjectNode := c.tree.MatchSubject(n)
+	subjType := c.checkValueExpr(subjectNode)
+
+	enumType := subjType
+	if enumType.Kind == TypePointer && enumType.Elem != nil {
+		enumType = *enumType.Elem
+	}
+
+	if enumType.IsInvalid() {
+		for _, arm := range c.tree.MatchArms(n) {
+			c.checkMatchArmFallback(arm)
+		}
+		return
+	}
+	if enumType.Kind != TypeEnum {
+		c.errorAt(subjectNode, "match requires an enum value (or a pointer to one), got %s", subjType)
+		for _, arm := range c.tree.MatchArms(n) {
+			c.checkMatchArmFallback(arm)
+		}
+		return
+	}
+
+	info := enumType.Enum
+	covered := make(map[string]bool, len(info.Order))
+	hasWildcard := false
+
+	for _, arm := range c.tree.MatchArms(n) {
+		pattern := c.tree.MatchArmPattern(arm)
+		body := c.tree.MatchArmBody(arm)
+
+		if c.tree.Nodes[pattern].Kind == enums.NodeKinds.Ident {
+			// Resolve already validated this is "_" (or already reported why
+			// it isn't - see resolve.go's resolvePattern).
+			if hasWildcard {
+				c.errorAt(pattern, "match has more than one wildcard (_) arm")
+			}
+			hasWildcard = true
+			c.checkBlock(body)
+			continue
+		}
+
+		variant, ok := c.checkMatchArmPattern(pattern, info)
+		if ok {
+			if covered[variant.Name] {
+				c.errorAt(pattern, "variant %s.%s already matched by an earlier arm", info.Symbol.Name, variant.Name)
+			}
+			covered[variant.Name] = true
+		}
+		c.checkBlock(body)
+	}
+
+	if hasWildcard {
+		return
+	}
+	var missing []string
+	for _, v := range info.Order {
+		if !covered[v.Name] {
+			missing = append(missing, v.Name)
+		}
+	}
+	if len(missing) > 0 {
+		c.errorAt(n, "match is not exhaustive: missing variant(s) %s of enum %s (add an arm for each, or a wildcard _ arm)", strings.Join(missing, ", "), info.Symbol.Name)
+	}
+}
+
+// checkMatchArmFallback still type-checks one arm's own pattern bindings and
+// body when the match's own subject type couldn't be determined (or wasn't
+// an enum at all) - there's nothing to validate the pattern against, but its
+// fresh bindings and body are still real code worth checking (mirroring
+// checkCompositeLitElemFallback's identical reasoning one construct over).
+func (c *checker) checkMatchArmFallback(arm ast.NodeIndex) {
+	pattern := c.tree.MatchArmPattern(arm)
+	switch c.tree.Nodes[pattern].Kind {
+	case enums.NodeKinds.CallExpr:
+		for _, b := range c.tree.Children(pattern)[1:] {
+			c.checkPatternBindingFallback(b)
+		}
+	case enums.NodeKinds.CompositeLit:
+		_, elems := c.tree.CompositeLitElems(pattern)
+		for _, e := range elems {
+			if c.tree.IsKeyedElement(e) {
+				c.checkPatternBindingFallback(c.tree.Child(e, 1))
+			}
+		}
+	}
+	c.checkBlock(c.tree.MatchArmBody(arm))
+}
+
+// checkMatchArmPattern type-checks one non-wildcard arm's own pattern
+// against info (the matched enum's own catalog): resolves it to one of
+// info's declared variants (checkedPatternVariant - a pattern naming a
+// variant belonging to some *other* enum type, or a nonexistent variant
+// name, is a clean diagnostic here, not a panic), checks its own shape
+// (unit/tuple/struct) actually matches that variant's own declared kind, and
+// - for a tuple/struct pattern - seeds each fresh binding name's own Type
+// directly (seedPatternBinding, mirroring checkMultiShortVarDeclNode's
+// identical "no single declaring node" seeding one level up), so codegen's
+// own g.info.Types lookup for each binding just works like any other checked
+// declaration.
+func (c *checker) checkMatchArmPattern(pattern ast.NodeIndex, info *EnumInfo) (*EnumVariant, bool) {
+	switch c.tree.Nodes[pattern].Kind {
+	case enums.NodeKinds.MemberExpr:
+		variant, ok := c.checkedPatternVariant(pattern, info)
+		if !ok {
+			return nil, false
+		}
+		if variant.Kind != EnumVariantUnit {
+			c.errorAt(pattern, "%s.%s requires a pattern with arguments (it is not a unit variant)", info.Symbol.Name, variant.Name)
+		}
+		return variant, true
+
+	case enums.NodeKinds.CallExpr:
+		children := c.tree.Children(pattern)
+		callee, bindings := children[0], children[1:]
+		variant, ok := c.checkedPatternVariant(callee, info)
+		if !ok {
+			for _, b := range bindings {
+				c.checkPatternBindingFallback(b)
+			}
+			return nil, false
+		}
+		if variant.Kind != EnumVariantTuple {
+			c.errorAt(pattern, "%s.%s is not a tuple variant", info.Symbol.Name, variant.Name)
+			for _, b := range bindings {
+				c.checkPatternBindingFallback(b)
+			}
+			return variant, true
+		}
+		if len(bindings) != len(variant.Tuple) {
+			c.errorAtNodes(bindings, pattern, "%s.%s has %d associated value(s), pattern binds %d", info.Symbol.Name, variant.Name, len(variant.Tuple), len(bindings))
+		}
+		for i, b := range bindings {
+			if c.tree.Nodes[b].Kind != enums.NodeKinds.Ident {
+				c.errorAt(b, "match pattern binding must be a plain identifier")
+				continue
+			}
+			if i >= len(variant.Tuple) {
+				c.seedPatternBinding(b, invalidType)
+				continue
+			}
+			c.seedPatternBinding(b, variant.Tuple[i])
+		}
+		return variant, true
+
+	case enums.NodeKinds.CompositeLit:
+		typeExpr, elems := c.tree.CompositeLitElems(pattern)
+		variant, ok := c.checkedPatternVariant(typeExpr, info)
+		if !ok {
+			for _, e := range elems {
+				if c.tree.IsKeyedElement(e) {
+					c.checkPatternBindingFallback(c.tree.Child(e, 1))
+				}
+			}
+			return nil, false
+		}
+		if variant.Kind != EnumVariantStruct {
+			c.errorAt(pattern, "%s.%s is not a struct variant", info.Symbol.Name, variant.Name)
+			return variant, true
+		}
+		seen := make(map[string]bool)
+		for _, e := range elems {
+			if !c.tree.IsKeyedElement(e) {
+				c.errorAt(e, "a struct-variant pattern requires keyed fields (field: name), not a positional element")
+				continue
+			}
+			key := c.tree.Child(e, 0)
+			value := c.tree.Child(e, 1)
+			if c.tree.Nodes[key].Kind != enums.NodeKinds.Ident {
+				c.errorAt(key, "field name must be an identifier")
+				c.checkPatternBindingFallback(value)
+				continue
+			}
+			name := c.tree.Text(key)
+			field, ok := variant.FieldByName(name)
+			if !ok {
+				c.errorAt(key, "%s.%s has no field %s", info.Symbol.Name, variant.Name, name)
+				c.checkPatternBindingFallback(value)
+				continue
+			}
+			c.info.Refs[key] = field.Sym
+			if seen[name] {
+				c.errorAt(key, "field %s specified twice", name)
+			}
+			seen[name] = true
+
+			if c.tree.Nodes[value].Kind != enums.NodeKinds.Ident {
+				c.errorAt(value, "match pattern binding must be a plain identifier")
+				continue
+			}
+			c.seedPatternBinding(value, field.Type)
+		}
+		return variant, true
+
+	default:
+		c.errorAt(pattern, "invalid match pattern")
+		return nil, false
+	}
+}
+
+// checkedPatternVariant resolves memberNode (a pattern's own EnumName.Variant
+// reference - already resolved by Resolve, resolveEnumVariantRef, to a
+// SymEnumVariant symbol) and requires it to actually belong to info, the
+// enum the enclosing match statement is matching against - a pattern naming
+// a variant of some *other* declared enum is rejected right here with a
+// clean diagnostic, exactly as LANGUAGE.md's "match" section requires.
+func (c *checker) checkedPatternVariant(memberNode ast.NodeIndex, info *EnumInfo) (*EnumVariant, bool) {
+	sym, ok := c.info.Refs[memberNode]
+	if !ok || sym.Kind != SymEnumVariant {
+		return nil, false // already reported by Resolve
+	}
+	if sym.EnumInfo != info {
+		c.errorAt(memberNode, "%s.%s is not a variant of %s", sym.EnumInfo.Symbol.Name, sym.Variant.Name, info.Symbol.Name)
+		return nil, false
+	}
+	return sym.Variant, true
+}
+
+// seedPatternBinding directly seeds n's (a match pattern's own fresh binding
+// Ident's) Type into both declType's memoization cache and info.Types -
+// mirroring checkMultiShortVarDeclNode's identical "no single declaring node
+// of its own" seeding (see that function's own doc comment): a pattern
+// binding's Decl is the same bare Ident node Resolve declared it against
+// (see resolve.go's declarePatternBinding), which computeDeclType's own
+// switch has no case for, so nothing would ever compute its Type lazily on
+// its own - this closes that gap unconditionally, the moment the pattern
+// itself is checked, regardless of whether the binding is ever referenced
+// again inside its arm's own body.
+func (c *checker) seedPatternBinding(n ast.NodeIndex, t Type) {
+	c.declTypes[nodeRef{c.tree, n}] = t
+	c.info.Types[n] = t
+}
+
+// checkPatternBindingFallback seeds n with invalidType when it's at least a
+// plain identifier (so a later reference inside the arm's own body doesn't
+// cascade into a second, unrelated "undefined" diagnostic) - used wherever a
+// pattern's own variant reference itself failed to resolve, so there's
+// nothing real to bind each name's Type against.
+func (c *checker) checkPatternBindingFallback(n ast.NodeIndex) {
+	if c.tree.Nodes[n].Kind == enums.NodeKinds.Ident {
+		c.seedPatternBinding(n, invalidType)
+	}
+}
+
 // checkExpr type-checks n and memoizes its Type into info.Types, so every
 // expression node this pass visits has an entry - no nil/zero-value
 // checking needed downstream (codegen). The one deliberate exception is a
@@ -1974,7 +2451,7 @@ func (c *checker) typeOfSymbolValue(n ast.NodeIndex, sym *Symbol) Type {
 		sig := c.funcSigForDecl(sym.Decl)
 		restore()
 		return funcType(sig)
-	case SymStruct, SymBuiltinType:
+	case SymStruct, SymBuiltinType, SymEnum:
 		c.errorAt(n, "%s is a type, not a value", c.tree.Text(n))
 		return invalidType
 	case SymPackage:
@@ -2007,30 +2484,38 @@ func (c *checker) typeOfSymbolValue(n ast.NodeIndex, sym *Symbol) Type {
 // already goes through) means `this.field`/`this.method(...)` keep working
 // completely unchanged - see checkThisExprRegression-style tests.
 //
-// sym.Decl is that struct's own StructDecl node (see resolve.go's
-// fnScope.Receiver construction), not a variable declaration, so this
-// doesn't go through declType.
+// sym.Decl is that struct's (or enum's - see below) own StructDecl/EnumDecl
+// node (see resolve.go's fnScope.Receiver construction), not a variable
+// declaration, so this doesn't go through declType.
 func (c *checker) checkThisExpr(n ast.NodeIndex) Type {
 	sym, ok := c.info.Refs[n]
 	if !ok {
 		return invalidType // "this outside a method"; already reported by Resolve
 	}
-	// sym.Decl is the receiver struct's own StructDecl node, which may live
-	// in a different file than the method itself (see Symbol.Tree's doc
-	// comment) - read it via sym.Tree, never c.tree, which is this method's
-	// own file and would misinterpret a foreign NodeIndex.
+	// sym.Decl is the receiver struct's/enum's own StructDecl/EnumDecl node,
+	// which may live in a different file than the method itself (see
+	// Symbol.Tree's doc comment) - read it via sym.Tree, never c.tree, which
+	// is this method's own file and would misinterpret a foreign NodeIndex.
 	name := sym.Tree.Text(sym.Tree.Child(sym.Decl, 0))
-	info, ok := c.info.Structs[name]
-	if !ok {
-		return invalidType
+	if info, ok := c.info.Structs[name]; ok {
+		return Type{
+			Kind: TypePointer,
+			Elem: &Type{
+				Kind:   TypeStruct,
+				Struct: info,
+			},
+		}
 	}
-	return Type{
-		Kind: TypePointer,
-		Elem: &Type{
-			Kind:   TypeStruct,
-			Struct: info,
-		},
+	if info, ok := c.info.Enums[name]; ok {
+		return Type{
+			Kind: TypePointer,
+			Elem: &Type{
+				Kind: TypeEnum,
+				Enum: info,
+			},
+		}
 	}
+	return invalidType
 }
 
 // checkUnaryExpr types `-`/`!`/`&`/`*`. Unary `-` works on any numeric type
@@ -2384,10 +2869,10 @@ func (c *checker) checkEqualityOperands(n, lNode, rNode ast.NodeIndex, lt, rt Ty
 		return c.checkNilEquality(n, lNode, rNode, lt, rt, op)
 	}
 	switch {
-	case lt.Kind == TypeStruct, lt.Kind == TypeArray:
+	case lt.Kind == TypeStruct, lt.Kind == TypeArray, lt.Kind == TypeEnum:
 		if lt.Equal(rt) {
 			if !c.typeIsComparable(lt) {
-				c.errorAt(n, "cannot compare values of type %s: %s is not comparable (a dynamic array, function type, or map cannot appear in an equality comparison, even nested inside a struct or array)", lt, lt)
+				c.errorAt(n, "cannot compare values of type %s: %s is not comparable (a dynamic array, function type, or map cannot appear in an equality comparison, even nested inside a struct, array, or enum)", lt, lt)
 				return invalidType
 			}
 			return boolType
@@ -2642,6 +3127,19 @@ func (c *checker) checkMemberExpr(n ast.NodeIndex) Type {
 		// actual struct-value member).
 		return c.typeOfSymbolValue(n, sym)
 	}
+	if sym.Kind == SymEnumVariant {
+		// A bare, uncalled EnumName.Variant reference (see LANGUAGE.md's
+		// "Enums" section: "unit variant: bare value... a MemberExpr naming a
+		// variant with no associated data at all") - only ever legal for a
+		// unit variant; a tuple/struct variant referenced this way (with no
+		// call or composite-literal body) has associated data it never
+		// supplied.
+		if sym.Variant.Kind != EnumVariantUnit {
+			c.errorAt(n, "%s.%s requires arguments to construct (it is not a unit variant)", sym.EnumInfo.Symbol.Name, sym.Variant.Name)
+			return invalidType
+		}
+		return Type{Kind: TypeEnum, Enum: sym.EnumInfo}
+	}
 	if sym.Kind != SymField {
 		c.errorAt(n, "%s is a method, not a field (call it with ())", c.tree.Text(n))
 		return invalidType
@@ -2707,7 +3205,7 @@ func (c *checker) resolveMember(n ast.NodeIndex) (*Symbol, bool) {
 	if objType.IsInvalid() {
 		return nil, false
 	}
-	// A pointer-to-struct object auto-derefs for member access (see
+	// A pointer-to-struct/enum object auto-derefs for member access (see
 	// LANGUAGE.md's "Pointers" section): `p.field`/`p.method(...)` on a `*T`
 	// behaves exactly like `(*p).field`/`(*p).method(...)` would, matching
 	// Go's own automatic pointer-dereference rule for selector expressions.
@@ -2716,19 +3214,32 @@ func (c *checker) resolveMember(n ast.NodeIndex) (*Symbol, bool) {
 	if objType.Kind == TypePointer {
 		objType = *objType.Elem
 	}
-	if objType.Kind != TypeStruct {
-		c.errorAt(n, "%s undefined (%s is not a struct)", name, objType)
-		return nil, false
-	}
 
-	info := objType.Struct
 	var found *Symbol
-	if sym, ok := info.Fields[name]; ok {
-		found = sym
-	} else if sym, ok := info.Methods[name]; ok {
-		found = sym
-	} else {
-		c.errorAt(n, "%s has no field or method %s", info.Symbol.Name, name)
+	switch objType.Kind {
+	case TypeStruct:
+		info := objType.Struct
+		if sym, ok := info.Fields[name]; ok {
+			found = sym
+		} else if sym, ok := info.Methods[name]; ok {
+			found = sym
+		} else {
+			c.errorAt(n, "%s has no field or method %s", info.Symbol.Name, name)
+			return nil, false
+		}
+	case TypeEnum:
+		// An enum value has no exposed fields at all outside `match` (see
+		// LANGUAGE.md's "Enums" section) - only a method call is ever legal
+		// here.
+		info := objType.Enum
+		if sym, ok := info.Methods[name]; ok {
+			found = sym
+		} else {
+			c.errorAt(n, "%s has no method %s", info.Symbol.Name, name)
+			return nil, false
+		}
+	default:
+		c.errorAt(n, "%s undefined (%s is not a struct or enum)", name, objType)
 		return nil, false
 	}
 	if !c.checkExportedAccess(n, found) {
@@ -2827,6 +3338,9 @@ func (c *checker) checkCallExpr(n ast.NodeIndex) Type {
 		return c.checkRemoveCall(n, args)
 	}
 	if t, ok := c.checkConstructorCall(n, callee, args); ok {
+		return t
+	}
+	if t, ok := c.checkEnumVariantCall(n, callee, args); ok {
 		return t
 	}
 	if t, ok := c.checkConversionCall(n, callee, args); ok {
@@ -3160,6 +3674,51 @@ func (c *checker) checkConstructorCall(n, callee ast.NodeIndex, args []ast.NodeI
 	return target, true
 }
 
+// checkEnumVariantCall recognizes and type-checks a tuple-variant
+// construction call (`Shape.Circle(5.0)` - see LANGUAGE.md's "Enums"
+// section) - the enum-kind counterpart to checkConstructorCall, structured
+// identically: callee's Info.Refs entry, already fully resolved by Resolve
+// (resolveEnumVariantRef - this needs no type information at all, unlike a
+// struct constructor call, which is only resolved to a specific overload
+// once the argument count is known), names a SymEnumVariant symbol.
+func (c *checker) checkEnumVariantCall(n, callee ast.NodeIndex, args []ast.NodeIndex) (Type, bool) {
+	switch c.tree.Nodes[callee].Kind {
+	case enums.NodeKinds.Ident, enums.NodeKinds.MemberExpr:
+	default:
+		return invalidType, false
+	}
+	sym, ok := c.info.Refs[callee]
+	if !ok || sym.Kind != SymEnumVariant {
+		return invalidType, false
+	}
+
+	variant := sym.Variant
+	target := Type{Kind: TypeEnum, Enum: sym.EnumInfo}
+	c.info.Types[n] = target
+
+	if variant.Kind != EnumVariantTuple {
+		c.errorAt(n, "%s.%s is not a tuple variant (it takes no call arguments)", sym.EnumInfo.Symbol.Name, variant.Name)
+		for _, a := range args {
+			c.checkValueExpr(a)
+		}
+		return target, true
+	}
+	if len(args) != len(variant.Tuple) {
+		c.errorAtNodes(args, n, "%s.%s has %d associated value(s), got %d argument(s)", sym.EnumInfo.Symbol.Name, variant.Name, len(variant.Tuple), len(args))
+		for _, a := range args {
+			c.checkValueExpr(a)
+		}
+		return target, true
+	}
+	for i, a := range args {
+		at := c.checkValueExpr(a)
+		if c.checkAssignable(a, variant.Tuple[i], at, fmt.Sprintf("argument %d", i+1)) {
+			c.checkNoIllegalCopy(a, variant.Tuple[i], true, fmt.Sprintf("argument %d", i+1))
+		}
+	}
+	return target, true
+}
+
 // checkConversionCall recognizes and type-checks `T(x)` - an explicit
 // conversion, not a call - the moment callee is a plain Ident whose
 // Info.Refs resolution (already populated by Resolve's ordinary lexical
@@ -3404,6 +3963,17 @@ func (c *checker) methodSigForCallee(callee ast.NodeIndex) (sig funcSignature, o
 func (c *checker) checkCompositeLit(n ast.NodeIndex) Type {
 	typeNode, elems := c.tree.CompositeLitElems(n)
 
+	// A struct-variant construction (`Shape.Triangle{base: 3.0, height:
+	// 4.0}` - see LANGUAGE.md's "Enums" section) - typeNode's own Info.Refs
+	// entry, already fully resolved by Resolve (resolveEnumVariantRef),
+	// names a SymEnumVariant symbol; this is checked upfront, entirely
+	// bypassing typeFromNode's own generic struct/array dispatch below (a
+	// variant reference is never itself a standalone type in type position -
+	// only its owning enum is).
+	if sym, ok := c.info.Refs[typeNode]; ok && sym.Kind == SymEnumVariant {
+		return c.checkEnumVariantCompositeLit(n, sym, elems)
+	}
+
 	target := c.typeFromNode(typeNode)
 	if target.IsInvalid() {
 		for _, e := range elems {
@@ -3568,6 +4138,85 @@ func (c *checker) checkKeyedStructElem(elem ast.NodeIndex, info *StructInfo, see
 	}
 }
 
+// checkEnumVariantCompositeLit type-checks a struct-variant construction
+// literal (`Shape.Triangle{base: 3.0, height: 4.0}` - see LANGUAGE.md's
+// "Enums" section) - the enum-kind counterpart to checkStructCompositeLit,
+// supporting both positional and keyed elements the identical way a real
+// struct composite literal does (reusing this project's existing
+// keyed-literal grammar verbatim, per that section's own construction rule).
+func (c *checker) checkEnumVariantCompositeLit(n ast.NodeIndex, sym *Symbol, elems []ast.NodeIndex) Type {
+	variant := sym.Variant
+	target := Type{Kind: TypeEnum, Enum: sym.EnumInfo}
+
+	if variant.Kind != EnumVariantStruct {
+		c.errorAt(n, "%s.%s is not a struct variant (it has no named fields)", sym.EnumInfo.Symbol.Name, variant.Name)
+		for _, e := range elems {
+			c.checkCompositeLitElemFallback(e)
+		}
+		return target
+	}
+	if len(elems) == 0 {
+		return target
+	}
+
+	keyed := c.tree.IsKeyedElement(elems[0])
+	seen := make(map[string]bool)
+	for i, elem := range elems {
+		isKV := c.tree.IsKeyedElement(elem)
+		if isKV != keyed {
+			c.errorAt(elem, "cannot mix keyed and positional elements in a composite literal")
+			c.checkCompositeLitElemFallback(elem)
+			continue
+		}
+		if keyed {
+			c.checkKeyedEnumFieldElem(elem, sym.EnumInfo, variant, seen)
+		} else {
+			c.checkPositionalEnumFieldElem(elem, i, sym.EnumInfo, variant)
+		}
+	}
+	if !keyed && len(elems) != len(variant.Fields) {
+		c.errorAtNodes(elems, n, "%s.%s composite literal has %d fields, want %d", sym.EnumInfo.Symbol.Name, variant.Name, len(elems), len(variant.Fields))
+	}
+	return target
+}
+
+func (c *checker) checkPositionalEnumFieldElem(elem ast.NodeIndex, i int, info *EnumInfo, variant *EnumVariant) {
+	vt := c.checkValueExpr(elem)
+	if i >= len(variant.Fields) {
+		return
+	}
+	field := variant.Fields[i]
+	if c.checkAssignable(elem, field.Type, vt, fmt.Sprintf("field %s", field.Name)) {
+		c.checkNoIllegalCopy(elem, field.Type, true, fmt.Sprintf("field %s", field.Name))
+	}
+}
+
+func (c *checker) checkKeyedEnumFieldElem(elem ast.NodeIndex, info *EnumInfo, variant *EnumVariant, seen map[string]bool) {
+	key := c.tree.Child(elem, 0)
+	value := c.tree.Child(elem, 1)
+	vt := c.checkValueExpr(value)
+
+	if c.tree.Nodes[key].Kind != enums.NodeKinds.Ident {
+		c.errorAt(key, "field name must be an identifier")
+		return
+	}
+	name := c.tree.Text(key)
+	field, ok := variant.FieldByName(name)
+	if !ok {
+		c.errorAt(key, "%s.%s has no field %s", info.Symbol.Name, variant.Name, name)
+		return
+	}
+	c.info.Refs[key] = field.Sym
+	if seen[name] {
+		c.errorAt(key, "field %s specified twice", name)
+	}
+	seen[name] = true
+
+	if c.checkAssignable(value, field.Type, vt, fmt.Sprintf("field %s", name)) {
+		c.checkNoIllegalCopy(value, field.Type, true, fmt.Sprintf("field %s", name))
+	}
+}
+
 // checkArrayCompositeLit only supports positional elements (`[N]T{a, b}`) -
 // Go-style index-keyed array literals (`[5]int{2: 9}`) aren't part of this
 // language's grammar's semantics yet (see BLOCKERS.md).
@@ -3610,7 +4259,7 @@ func (c *checker) checkArrayCompositeLit(n ast.NodeIndex, target Type, elems []a
 //
 // See checkFuncDecl's "missing return" check (the only caller) and
 // AGENTS.md's "Missing return" section for the full rule and examples.
-func isTerminatingStmt(tree *ast.Tree, n ast.NodeIndex) bool {
+func isTerminatingStmt(tree *ast.Tree, info *Info, n ast.NodeIndex) bool {
 	if n == ast.InvalidNode {
 		return false
 	}
@@ -3626,15 +4275,78 @@ func isTerminatingStmt(tree *ast.Tree, n ast.NodeIndex) bool {
 		if elseBranch == ast.InvalidNode {
 			return false
 		}
-		return isTerminatingStmt(tree, tree.Child(n, 1)) && isTerminatingStmt(tree, elseBranch)
+		return isTerminatingStmt(tree, info, tree.Child(n, 1)) && isTerminatingStmt(tree, info, elseBranch)
+	case enums.NodeKinds.MatchStmt:
+		return matchStmtTerminates(tree, info, n)
 	case enums.NodeKinds.Block:
 		stmts := tree.Children(n)
 		if len(stmts) == 0 {
 			return false
 		}
-		return isTerminatingStmt(tree, stmts[len(stmts)-1])
+		return isTerminatingStmt(tree, info, stmts[len(stmts)-1])
 	default:
 		return false
+	}
+}
+
+// matchStmtTerminates reports whether a MatchStmt is a terminating statement
+// in isTerminatingStmt's sense (see its own doc comment and LANGUAGE.md's
+// "Missing return" section): every arm's own body must itself terminate,
+// AND the match itself must be exhaustive (a wildcard `_` arm present, or
+// every one of the subject enum's own variants covered by some arm) - an
+// inexhaustive match always leaves a real fall-through path, exactly like an
+// `if` with no `else` never terminates. This recomputes the identical
+// exhaustiveness fact checkMatchStmt itself already validated (with real
+// diagnostics) - deliberately not cached anywhere: isTerminatingStmt is a
+// pure function of an already-checked tree, with no *checker receiver to
+// memoize onto, mirroring forHasOwnBreak's own identical no-caching
+// precedent one construct over.
+func matchStmtTerminates(tree *ast.Tree, info *Info, n ast.NodeIndex) bool {
+	arms := tree.MatchArms(n)
+	if len(arms) == 0 {
+		return false
+	}
+	for _, arm := range arms {
+		if !isTerminatingStmt(tree, info, tree.MatchArmBody(arm)) {
+			return false
+		}
+	}
+
+	subjType := info.Types[tree.MatchSubject(n)]
+	if subjType.Kind == TypePointer && subjType.Elem != nil {
+		subjType = *subjType.Elem
+	}
+	if subjType.Kind != TypeEnum || subjType.Enum == nil {
+		return false
+	}
+
+	covered := make(map[string]bool, len(subjType.Enum.Order))
+	for _, arm := range arms {
+		pattern := tree.MatchArmPattern(arm)
+		if tree.Nodes[pattern].Kind == enums.NodeKinds.Ident {
+			return true // a wildcard arm alone makes it exhaustive
+		}
+		if sym, ok := patternVariantSym(tree, info, pattern); ok && sym.Variant != nil {
+			covered[sym.Variant.Name] = true
+		}
+	}
+	return len(covered) == len(subjType.Enum.Order)
+}
+
+// patternVariantSym returns the Symbol a match arm's own pattern resolved to
+// (see resolve.go's resolveEnumVariantRef) - the MemberExpr node itself for a
+// unit-variant pattern, or its leading callee/type-expr child for a tuple-/
+// struct-variant one.
+func patternVariantSym(tree *ast.Tree, info *Info, pattern ast.NodeIndex) (*Symbol, bool) {
+	switch tree.Nodes[pattern].Kind {
+	case enums.NodeKinds.MemberExpr:
+		sym, ok := info.Refs[pattern]
+		return sym, ok
+	case enums.NodeKinds.CallExpr, enums.NodeKinds.CompositeLit:
+		sym, ok := info.Refs[tree.Child(pattern, 0)]
+		return sym, ok
+	default:
+		return nil, false
 	}
 }
 
@@ -3664,6 +4376,19 @@ func forHasOwnBreak(tree *ast.Tree, n ast.NodeIndex) bool {
 			return true
 		}
 		return forHasOwnBreak(tree, tree.Child(n, 2))
+	case enums.NodeKinds.MatchStmt:
+		// A match arm's own body can contain a `break` that still targets
+		// *this* enclosing loop directly (match is not itself a loop, so it
+		// introduces no break target of its own - see LANGUAGE.md's "match"
+		// section) - every arm must be checked, the same "recurse into every
+		// nesting branch, not just the first" reasoning IfStmt's own
+		// then/else case already applies, generalized from two branches to N.
+		for _, arm := range tree.MatchArms(n) {
+			if forHasOwnBreak(tree, tree.MatchArmBody(arm)) {
+				return true
+			}
+		}
+		return false
 	default:
 		// ForStmt (its break targets the inner loop, not this one) and
 		// every other non-nesting statement kind: nothing to find here.

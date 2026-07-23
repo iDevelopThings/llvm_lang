@@ -46,3 +46,7 @@ values:
     string: "extern"
   - name: Map
     string: "map"
+  - name: Enum
+    string: "enum"
+  - name: Match
+    string: "match"

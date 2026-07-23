@@ -1164,7 +1164,20 @@ most one, so there's nothing to disambiguate). `Generator.dtors` is
 by an arity lookup or any other call-site resolution at all - every real
 caller of this map (a local/parameter's own declared type, or `delete`'s
 pointee type) already holds the `StructInfo` it wants the destructor for
-directly, so there's no reason to go through the `Symbol` indirection.
+directly, so there's no reason to go through the `Symbol` indirection. An
+enum's own destructor (see "Enums" below) mirrors this exactly one level
+over - `declareEnumDestructorSignature`/`genEnumDestructorBody`, `enum.go` -
+into its own parallel `Generator.enumDtors` map, keyed by `*sema.EnumInfo`.
+
+`destructorFuncFor(t sema.Type) (funcEntry, bool)` (`func.go`) is the one
+shared dispatch both `pushDestructorEntry` (below) and `delete`'s own
+`destructorFuncForPointee` (`stmt.go`) go through to answer "does this type
+have a destructor, and if so, which function do I call" regardless of
+whether `t` is a struct or an enum - each entry point resolves the two
+type-kind-specific maps (`dtors`/`enumDtors`) into one common shape,
+`destructorEntry{sym, fn, fnTy}` (`codegen.go`), so `unwindDestructorsTo`
+itself (below) never needs to know or care which type kind gave a given
+entry its destructor.
 
 ### The destructor stack (`Generator.destructors`)
 
@@ -1175,11 +1188,13 @@ function-scoped stack, `Generator.destructors` (reset at the start of every
 function/constructor/destructor/lambda body, exactly like `locals`/
 `loopStack`), of every still-in-scope local/parameter whose own declared
 type directly declares a destructor (**not** merely non-copyable via a
-field - see `pushDestructorEntry`, `func.go`, which is the single gate every
-one of these entries passes through: `genVarDecl`/`genShortVarDecl` call it
-right after a local's storage is initialized, and
-`genFuncBody`/`genConstructorBody`/`genLambdaFunc`'s own parameter loops
-call it right after storing each incoming parameter).
+field/variant - see `pushDestructorEntry`, `func.go`, which is the single
+gate every one of these entries passes through, via `destructorFuncFor`:
+`genVarDecl`/`genShortVarDecl` call it right after a local's storage is
+initialized, `genFuncBody`/`genConstructorBody`/`genLambdaFunc`'s own
+parameter loops call it right after storing each incoming parameter, and
+`bindPatternName` (`enum.go`) calls it for each of a `match` arm's own fresh
+bound names).
 
 `unwindDestructorsTo(target)` (`stmt.go`) is the one shared primitive every
 real scope-exit trigger uses: it emits a real destructor call - via
@@ -1245,15 +1260,268 @@ own fall-through unwind ran.
 
 ### `delete p`'s destructor-then-free ordering
 
-`genDeleteStmt` (`stmt.go`) checks `destructorInfoForPointee(operand)` - `p`'s
-own pointer type's pointee, the identical "does this struct type declare its
-own destructor" question `pushDestructorEntry` asks about a plain local's
-declared type - and, if it does, calls `genDestructorCall(ptr, info)`
-**before** the existing `free` call, not after: the destructor's own body
-(e.g. reading/nulling a field of `this`, or itself `delete`-ing a further
-pointer it owns) needs the pointee's memory to still be valid when it runs.
-A pointee type with no destructor is entirely unaffected - exactly the plain
-`free` this statement has always lowered to.
+`genDeleteStmt` (`stmt.go`) checks `destructorFuncForPointee(operand)` - `p`'s
+own pointer type's pointee, the identical "does this struct or enum type
+declare its own destructor" question `pushDestructorEntry` asks about a
+plain local's declared type (both now share one dispatch, `destructorFuncFor`,
+`func.go` - see "Enums" below for the enum-kind half of this) - and, if it
+does, calls `genDestructorCall(ptr, entry.fn, entry.fnType)` **before** the
+existing `free` call, not after: the destructor's own body (e.g. reading/
+nulling a field of `this`, or itself `delete`-ing a further pointer it owns)
+needs the pointee's memory to still be valid when it runs. A pointee type
+with no destructor is entirely unaffected - exactly the plain `free` this
+statement has always lowered to.
+
+## Enums
+
+See `LANGUAGE.md`'s "Enums" and "match" sections for the language-level
+feature. Implemented in its own file, `src/codegen/enum.go`, mirroring
+`maps.go`'s own precedent for a self-contained subsystem rather than
+scattering `TypeEnum`-specific cases across `expr.go`/`stmt.go`/`runtime.go`
+alongside every other type kind's own handling (each of those three files
+does still gain one small `case sema.TypeEnum` arm apiece, dispatching
+straight into `enum.go`).
+
+### Representation: one shared `{i32, ptr}`, never a per-enum named struct
+
+Every enum value, regardless of which enum type or which of its variants is
+active, is the identical literal (unnamed) LLVM struct `{i32, ptr}` -
+`g.enumValTy`, computed once in `setupTypes` exactly like `dynArrTy`/
+`funcValTy`/`stringTy` are - a discriminant (the active variant's own
+declaration-order index) plus an opaque payload pointer. This is a
+deliberate design choice, not the only one considered: the alternative (a
+named per-enum struct type sized to its own largest variant, `{i32, [N x
+i8]}`) would need `N` known as a real Go integer at the point the struct
+type is built, which this project's `llvm.SizeOf`-based sizing idiom
+(a constant `getelementptr(null, 1)` expression, resolved by LLVM only once
+the module is actually compiled/JIT'd) can't give without threading a real
+`llvm.TargetData` through this package for the first time - a genuine new
+dependency this round didn't need to take on. The `{i32, ptr}` shape
+sidesteps that entirely, and, as a bonus, is exactly this project's own
+already-established idiom for "a small fixed-size header, real payload
+lives on the heap/arena, referenced via `ptr`" (dynamic arrays, first-class
+functions' capture context, a map's control block all already follow the
+identical shape).
+
+The payload is **always arena-allocated** (`genArenaAlloc`, `runtime.go` -
+never freed individually, the same permanent-leak tradeoff the arena already
+makes everywhere else - see `BLOCKERS.md`), **never a stack address**: an
+enum value is passed/returned by value exactly like a struct/array/string
+elsewhere in this package (see "Structs/arrays/strings are passed and
+returned as real LLVM aggregate types" above), so a constructing function's
+own stack frame must never be what a *returned* enum value's payload
+depends on. Null for a unit variant, which carries no associated data at
+all.
+
+This representation is also what makes a recursive/self-referential variant
+(`Cons(i32, *List)`) or an enum-of-enum field need **zero** special-casing
+at all: a pointer is always just `g.ptrTy` regardless of what it points to,
+so a variant's own payload struct type never needs another enum's (or its
+own) layout to already be complete - there is no forward-reference/self-size
+problem here the way there would be for a real per-enum sized struct.
+
+### `enumLayout` (`enum.go`) - the enum-kind counterpart to `structLayout`
+
+Much smaller than `structLayout`, since the *outer* enum value never needs
+its own named LLVM type: `enumLayout` only caches, per `*sema.EnumVariant`,
+that variant's own unnamed LLVM payload struct type (`variantPayloadType` -
+empty for a unit variant) and each payload field's own `sema.Type` in the
+identical order (`variantPayloadTypes` - needed to recurse correctly for
+equality/print/pattern-binding without re-deriving it from the AST every
+time). Built by `declareEnumLayout`, in **one single pass** - unlike
+`declareStructType`/`defineStructBody`'s own two-pass declare-then-define
+split, an enum never has a forward-reference problem to split around (see
+above), so this runs once, right after every struct body is fully defined
+(a variant's own associated data may itself embed a struct by value,
+needing that struct's own already-complete `llvmType`) and before any
+function/constructor/destructor body is generated.
+
+### Construction
+
+Every construction shape - a bare unit-variant reference
+(`genEnumUnitVariantValue`), a tuple-variant call (`genEnumVariantCall`), or
+a struct-variant composite literal (`genEnumCompositeLitInto`) - funnels
+through one shared `genEnumVariantValue(variant, fieldValues)`: build the
+payload struct value in registers (`llvm.Undef` + one `CreateInsertValue`
+per field, the same pattern this package already uses to build every other
+small aggregate - see `genFuncValue`), arena-allocate exactly
+`llvm.SizeOf(payloadTy)` bytes and store it there (skipped entirely for a
+unit variant - `payloadPtr` stays a null constant), then build the outer
+`{tag, payloadPtr}` value the identical `Undef`+`InsertValue` way.
+
+A bare unit-variant reference (`Shape.Point`) is recognized directly in
+`genExpr`'s own `MemberExpr` case, *before* ever falling through to the
+generic `genLoad`/`genAddr` path every other `MemberExpr` still uses: its
+own object child names the enum *type*, not a value with real storage to
+load from - `sema` never even type-checks it as one for this shape (see
+`resolveMember`, `sema/typecheck.go`) - so this is exactly the same
+`SymFunc`/`SymBuiltinValue` special-casing `genExpr`'s `Ident` case already
+does for a bare function reference or `nil`, one node kind over.
+
+A struct-variant composite literal is recognized in `checkCompositeLit`
+(sema, upfront, by the type-expr's own `Info.Refs` resolving to a
+`SymEnumVariant` symbol - see below) and in `genCompositeLitInto`'s own
+`TypeEnum` case - unlike a real struct's identical-looking case (which fills
+`dst` field-by-field via GEP, since a struct's own storage *is* `dst`
+directly), an enum value is built as a whole aggregate first (its payload
+arena-allocated as part of that) and then stored into `dst` in one go -
+there's no way to GEP "the payload struct living inside `dst`" before that
+payload's own storage even exists.
+
+### Resolution: a variant reference is fully resolved by `Resolve` alone
+
+`EnumName.Variant` (in *any* of its three construction/pattern shapes) needs
+no type information at all to resolve - unlike an ordinary struct-value
+field/method access (which needs the object's own type, and so is
+deliberately deferred to `Check`), an enum's own variant catalog is fully
+built by the time anything references it, exactly like a package's own
+top-level scope already is. `sema.Resolve` (not `Check`) therefore resolves
+every `EnumName.Variant` reference directly into a real `*sema.Symbol`
+(`SymEnumVariant`, carrying `Variant *EnumVariant`/`EnumInfo *EnumInfo`) the
+moment it's encountered - `resolveEnumVariantRef`, shared by
+`resolveExpr`'s `MemberExpr` case (a bare unit-variant value, or a tuple-/
+struct-variant construction's own callee/type-expr), `resolveTypeMemberExpr`
+(a struct-variant composite literal's own type-expr position), and
+`resolvePattern`'s own `resolveMemberPatternRef` (every match-arm pattern
+shape) - the same "record which specific declaration a reference resolved
+to" idea a constructor call's own `Info.Refs` entry already captures for
+`SymConstructor`. `sema.Check`'s own construction-checking functions
+(`checkMemberExpr`/`checkEnumVariantCall`/`checkEnumVariantCompositeLit`)
+and codegen's own dispatch (`isEnumVariantCall`, mirroring `isConstructorCall`
+exactly) all just read that already-resolved `Info.Refs` entry back, rather
+than re-deriving anything.
+
+### `match` patterns: fresh bindings, not references - a dedicated resolution/check path
+
+A match arm's own pattern reuses construction's exact AST shapes
+(`MemberExpr`/`CallExpr`/`CompositeLit`/a bare `Ident` for `_`) verbatim -
+see `LANGUAGE.md`'s own note on why this needed zero new expression-parsing
+grammar at all - but a pattern's own "arguments"/keyed-element values are
+**fresh binding names being declared**, the exact opposite of what
+`resolveExpr`'s ordinary `CallExpr`/`CompositeLit` cases assume. `Resolve`
+therefore routes a match arm's pattern through its own dedicated
+`resolvePattern` (never through `resolveExpr` at all), declaring each fresh
+binding directly into that arm's own child scope (`declarePatternBinding`,
+the same `Scope.Define`-based mechanism an ordinary `ShortVarDecl`'s own name
+already goes through) - and `sema.Check`'s own `checkMatchArmPattern`
+mirrors this split: it resolves the pattern against the matched enum's own
+`EnumInfo` (rejecting a nonexistent variant, a variant belonging to some
+*other* enum, or a pattern shape that doesn't match that variant's own
+declared kind), then seeds each binding's own `Type` **directly** into both
+`declType`'s memoization cache and `Info.Types` (`seedPatternBinding`) -
+mirroring `checkMultiShortVarDeclNode`'s identical "no single declaring node
+of its own" seeding one construct over (a `:=`/`ShortVarDecl` node has an
+initializer child whose type flows naturally; a bare pattern-bound `Ident`
+has nothing else that would ever compute its `Type` lazily on its own).
+
+### Exhaustiveness checking (`checkMatchStmt`, `sema/typecheck.go`)
+
+The real, hard compile-time check this feature exists to provide - see
+`LANGUAGE.md`'s own "match" section for the exact three rules enforced
+(every pattern names a real variant of the *matched* enum, no variant
+matched twice, every variant covered or a wildcard present). Implemented as
+a single pass over the match's own arms, building a `map[string]bool` of
+covered variant names against `EnumInfo.Order` - deliberately a plain map
+keyed by name, not a bitset or anything cleverer, since a real enum's own
+variant count is always small enough that this never remotely matters for
+performance, and clarity here is worth more than micro-optimizing a
+compile-time-only pass.
+
+`isTerminatingStmt` (the same flow-analysis function backing "Missing
+return" - see that section above) gained its own `MatchStmt` case
+(`matchStmtTerminates`) for exactly this reason: a fully-exhaustive `match`
+whose every arm terminates is itself terminating, mirroring an `if`/`else`'s
+identical two-branches-generalized-to-N rule. This deliberately
+**recomputes** the same exhaustiveness fact `checkMatchStmt` itself already
+validated (with real diagnostics) rather than caching it anywhere -
+`isTerminatingStmt` is a pure function of an already-checked tree, with no
+`*checker` receiver to memoize onto, the same no-caching precedent
+`forHasOwnBreak` already sets one construct over.
+
+### `match` codegen: a real LLVM `switch`, not a chain of `br`
+
+`genMatchStmt` (`enum.go`) loads the subject's own discriminant (auto-
+dereferencing a pointer-typed subject first - `this` inside a method, most
+commonly - the same auto-deref every other struct/enum-receiver access in
+this language already gets) and lowers to a genuine LLVM `switch`
+instruction (`CreateSwitch`/`AddCase`), one case per variant the match
+covers, rather than a chain of `br`s the way an `if`/`else` if/else ladder
+would: this is a real multi-way branch on a single discriminant value, and
+LLVM's own `switch` is the direct, idiomatic lowering for exactly that
+shape - not a stylistic preference, the language's own spec explicitly asks
+for this instruction. Each case's own block extracts/loads the payload into
+its bound local names (if any - `bindMatchArmPattern`/`bindPatternName`,
+which allocate a fresh local slot per binding exactly like an ordinary
+`:=` declaration would, registering it into `g.locals` so an ordinary
+reference inside the arm's own body works completely unchanged), runs the
+arm's own body, then branches to the match's own single merge block (unless
+the arm's own body already terminated - `return`/`break`/`continue`/a
+nested exhaustive `match`, in which case nothing branches there at all).
+
+The wildcard arm (if present) becomes the `switch`'s own default
+destination. **If no wildcard exists** - `sema.checkMatchStmt` already
+guarantees every variant is then explicitly covered by its own case - the
+default destination is a real `unreachable` block, matching this project's
+own established "genuinely impossible per sema's own guarantee, so
+`unreachable` documents it directly in the IR" convention (see
+`emitFallbackTerminator`, `func.go`, and "Missing return" above) rather than
+a silently-do-nothing fallthrough. The match's own merge block gets the
+identical treatment for the same reason: when every arm (wildcard included)
+always terminates, nothing ever branches into it, but LLVM still requires
+every basic block that exists at all to end in a real terminator, so it
+gets its own `unreachable` there too - exactly mirroring `matchStmtTerminates`'s
+own sema-side verdict.
+
+### `==`/`!=` and `print()`: a real runtime discriminant dispatch
+
+Unlike a struct (whose every field is always present, so `genValueEqual`/
+`genPrintStructValue` can simply walk every field unconditionally at
+codegen time), an enum's active variant isn't known until the program
+actually runs - both `genEnumEqual` and `genPrintEnumValue` therefore build
+their own small runtime `switch` on the discriminant, the identical
+`CreateSwitch`/`AddCase` shape `genMatchStmt` uses one section up (this is
+the concrete meaning of `LANGUAGE.md`'s "this needs a real conditional/
+switch in the generated IR, not a compile-time-resolved path" for these two
+operations specifically):
+
+- **`genEnumEqual`** (`genValueEqual`'s own `TypeEnum` case) first compares
+  the two operands' discriminants directly (`CreateICmp`) - only when they
+  match does control reach a runtime `switch` on that shared discriminant,
+  each case recursively comparing the active variant's own payload
+  (`genVariantPayloadEqual` - trivially `true` for a unit variant, otherwise
+  loading both sides' payload structs and recursing field-by-field through
+  `genValueEqual` exactly like a struct's own fields already do). A
+  discriminant mismatch short-circuits straight to `false` via a `PHI` at
+  the shared merge block, without ever touching either side's payload at
+  all.
+- **`genPrintEnumValue`** switches directly on the discriminant (no
+  preliminary comparison needed - there's only one operand), each case
+  rendering that variant's own name (`genPrintStringValueBare` over
+  `constStringValue(variant.Name)` - reusing this project's own existing
+  string-literal deduplication) followed by its associated data, if any:
+  parens for a tuple variant (`Circle(5.000000)`) or braces for a struct
+  variant (`Triangle{3.000000 4.000000}` - deliberately reusing
+  `genPrintStructValue`'s own established "field values only, no names"
+  convention, for the identical reason a real struct's own `print` already
+  omits them), each field rendered via the same recursive `genPrintValueBare`
+  a struct's own fields already use. A unit variant prints as its bare name
+  alone, no punctuation at all.
+
+### Destructors
+
+An enum's own `destructor()` (see `LANGUAGE.md`'s "Enums" section: fires
+once, regardless of which variant is actually active) reuses the exact same
+`declareDestructorSignature`/`genDestructorBody`-style two-pass split a
+struct's own destructor already has - `declareEnumDestructorSignature`/
+`genEnumDestructorBody` (`enum.go`) - into its own parallel
+`Generator.enumDtors` map (see "Destructors" above for the shared
+`destructorFuncFor` dispatch both type kinds now go through). No per-variant
+dispatch of any kind is needed here: the destructor's own implicit `this`
+parameter is simply a pointer to the shared `g.enumValTy`, exactly like a
+struct receiver is a pointer to that struct's own named type - whatever the
+destructor's body actually does with it (most commonly nothing variant-
+specific at all) is ordinary generated code, no different from any other
+method body.
 
 ## Pointers: real `*T`, `&`/`*`, `new`/`delete`, auto-deref, and `nil`
 

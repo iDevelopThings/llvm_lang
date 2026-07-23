@@ -1523,3 +1523,99 @@ before being reverted - confirming the suite doesn't just pass vacuously.
 **Status:** shipped. See `CODEGEN.md`'s "The arena allocator" section for the
 updated design and `src/codegen/runtime.go`'s `arenaChunkSize`/
 `arenaChunkMaxSize`/`setupArena` doc comments for the exact mechanics.
+
+---
+
+## 2026-07-23 - Rust-style enums + `match`: comprehensive from day one, `{i32, ptr}` representation, statement-only/enum-only scope for `match`
+
+**Decision:** build the full feature in one round rather than a narrower
+first cut - unit/tuple/struct variants, methods, destructors with the exact
+same non-copyable propagation rule structs already have, recursive/self-
+referential variants, `==`/`!=`/`print()` with a real runtime discriminant
+dispatch, and an exhaustive `match` statement - all landing together,
+instead of (say) unit-and-tuple variants first and struct-style/destructors/
+match exhaustiveness in a later round.
+
+**Why comprehensive, not narrow, this time:** every previous feature in this
+project's history started narrow specifically because there wasn't much
+existing language surface for it to sit consistently alongside yet (the
+first pass at structs had no constructors; the first pass at pointers had no
+`new`/`delete`). Enums are the opposite case: by the time this round landed,
+the project already had a mature, load-bearing precedent for every piece
+this feature needed to reuse - a real non-copyable/destructor system
+(structs), a real keyed-composite-literal grammar (structs), a real
+receiver-method mechanism (structs), and a real arena-allocation idiom for
+"small fixed header, real payload on the heap" (dynamic arrays, closures,
+maps). Landing enums narrow and adding struct-style variants/destructors/
+exhaustiveness in a *third* round later would have meant redoing the same
+integration work twice for no real benefit - unlike the earlier features,
+there was no open design question here forcing a narrower first cut.
+
+**Why variant construction needs no separate `constructor(){}` block (unlike
+a struct):** a struct constructor exists specifically to run custom logic a
+bare composite literal can't (arbitrary computation, invariants, side
+effects) - a struct's own composite literal is deliberately "raw structural
+construction, bypassing constructors entirely" (see `LANGUAGE.md`'s
+"Constructors" section), so the two coexist as genuinely different things.
+A variant's own construction (unit/tuple/struct-literal) *is* the value - there
+is no second, "raw" way to build the identical value that a constructor
+could meaningfully differ from, so there's nothing for a constructor
+concept to add here that construction doesn't already fully cover.
+
+**Why `{i32, ptr}` - one shared LLVM type for every enum - rather than a
+named per-enum struct sized to its largest variant:** the natural
+alternative, `{i32, [N x i8]}` with `N` = the largest variant's own
+byte size, needs `N` as a real Go integer at struct-type-construction time.
+This project's existing `llvm.SizeOf`-based sizing idiom is a lazy LLVM
+constant expression (`getelementptr(null, 1)` + `ptrtoint`), only ever
+resolved once the module is compiled/JIT'd - getting a real Go-side integer
+out of it before that point would need a genuine `llvm.TargetData` threaded
+through this package for the first time, a new dependency with its own
+surface area, purely to serve one type kind's own struct layout. The
+`{i32, ptr}` shape needs none of that, and is exactly this project's own
+already-established idiom elsewhere (a dynamic array, a closure's capture
+context, a map's control block are all "small fixed header, real payload
+referenced via `ptr`") - reusing it here cost nothing new to build and, as a
+direct consequence, made every genuinely hard case (a recursive/self-
+referential variant, an enum-of-enum field) fall out for free with zero
+special-casing: a pointer is always just `g.ptrTy` regardless of what it
+points to, so no variant's own payload type ever needs another enum's (or
+its own) layout to already exist. The real cost is the one already
+documented in `LANGUAGE.md`/`CODEGEN.md`: every non-unit variant construction
+is a real arena allocation, never a stack value the way a struct's own
+fields are - judged an acceptable, well-precedented tradeoff (see the
+arena-allocator entries above) rather than a genuine regression, since every
+comparable "small header + heap payload" value in this project already pays
+the identical cost.
+
+**Why `match` is a statement, not an expression, this round:** the
+motivating use case (dispatching on an enum's active variant, running
+different logic per case) doesn't need a value handed back to an enclosing
+expression - every arm in the worked example (`Shape.Area`, `List.Sum`)
+already `return`s directly, needing nothing more than an ordinary
+side-effecting `Block` per arm. Building `match` as an expression too would
+mean deciding a whole second set of rules this round didn't actually need
+answered yet (every arm's result type must unify to one common type; what a
+non-exhaustive match-expression with no covering value even means) - a
+real, separable feature addition for a later round, not a gap in this one.
+Go itself draws an analogous line (`switch` is a statement, not an
+expression) for the same underlying reason.
+
+**Why `match` is scoped to enum-variant patterns only, not a general
+value-switch:** the exhaustiveness check - genuinely the entire value
+proposition of building `match` as its own construct rather than an
+unchecked switch - only has real, checkable meaning against a *closed* set
+(an enum's own declared variants). A general `switch` over arbitrary values
+(ints, strings, bools) has no such closed set to check exhaustiveness
+against at all (Go's own `switch` has no exhaustiveness checking for
+exactly this reason) - conflating the two into one construct this round
+would have diluted the one thing that makes enum-variant `match` worth
+building in the first place. The general value-switch capability remains a
+clean, separable extension of the identical `match` keyword/statement shape,
+deferred to a later round rather than an oversight here.
+
+**Status:** shipped. See `LANGUAGE.md`'s "Enums"/"match" sections for the
+full language-level rules (including both deferred-to-a-later-round
+boundaries called out above, documented there as deliberate scope, not
+gaps) and `CODEGEN.md`'s "Enums" section for the representation and
+codegen this entry describes.

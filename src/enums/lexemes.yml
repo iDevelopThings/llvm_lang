@@ -67,6 +67,8 @@ values:
     char: ":="
   - name: EqualEqual
     char: "=="
+  - name: FatArrow
+    char: "=>"
   - name: PlusPlus
     char: "++"
   - name: MinusMinus

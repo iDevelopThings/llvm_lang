@@ -643,6 +643,16 @@ func (g *Generator) genExpr(n ast.NodeIndex) llvm.Value {
 		}
 		return g.genLoad(n)
 	case enums.NodeKinds.MemberExpr:
+		// A bare, uncalled EnumName.Variant reference (see LANGUAGE.md's
+		// "Enums" section: a unit variant's own construction syntax) has no
+		// storage to load from at all - its own object child names the enum
+		// *type*, not a value (see sema's resolveMember, which never even
+		// type-checks it as one for this shape) - so, exactly like a bare
+		// function reference above, this is built directly rather than
+		// falling through to genLoad/genAddr's generic struct-field path.
+		if sym, ok := g.info.Refs[n]; ok && sym.Kind == sema.SymEnumVariant {
+			return g.genEnumUnitVariantValue(sym)
+		}
 		return g.genLoad(n)
 	case enums.NodeKinds.IndexExpr:
 		// A map index (`m[k]`) never goes through genAddr/genLoad's generic
@@ -835,7 +845,7 @@ func (g *Generator) genBinaryExpr(n ast.NodeIndex) llvm.Value {
 		switch {
 		case lt.Kind == sema.TypeString:
 			return g.genStringEqual(lv, rv, true)
-		case lt.Kind == sema.TypeStruct, lt.Kind == sema.TypeArray:
+		case lt.Kind == sema.TypeStruct, lt.Kind == sema.TypeArray, lt.Kind == sema.TypeEnum:
 			return g.genValueEqual(lt, lv, rv)
 		case isFloat:
 			return g.builder.CreateFCmp(llvm.FloatOEQ, lv, rv, "")
@@ -846,7 +856,7 @@ func (g *Generator) genBinaryExpr(n ast.NodeIndex) llvm.Value {
 		switch {
 		case lt.Kind == sema.TypeString:
 			return g.genStringEqual(lv, rv, false)
-		case lt.Kind == sema.TypeStruct, lt.Kind == sema.TypeArray:
+		case lt.Kind == sema.TypeStruct, lt.Kind == sema.TypeArray, lt.Kind == sema.TypeEnum:
 			return g.builder.CreateNot(g.genValueEqual(lt, lv, rv), "")
 		case isFloat:
 			return g.builder.CreateFCmp(llvm.FloatUNE, lv, rv, "")
@@ -992,6 +1002,8 @@ func (g *Generator) genValueEqual(t sema.Type, lv, rv llvm.Value) llvm.Value {
 			result = g.builder.CreateAnd(result, g.genValueEqual(*t.Elem, le, re), "")
 		}
 		return result
+	case sema.TypeEnum:
+		return g.genEnumEqual(t, lv, rv)
 	default:
 		// checkEqualityOperands (sema/typecheck.go) now runs typeIsComparable
 		// over the whole aggregate type before ever admitting == between two
@@ -1068,6 +1080,9 @@ func (g *Generator) genCallExpr(n ast.NodeIndex) llvm.Value {
 	}
 	if g.isConstructorCall(calleeNode) {
 		return g.genConstructorCall(calleeNode, argNodes)
+	}
+	if g.isEnumVariantCall(calleeNode) {
+		return g.genEnumVariantCall(calleeNode, argNodes)
 	}
 	if g.isConversionCall(calleeNode) {
 		return g.genConversion(n, argNodes[0])
@@ -1399,6 +1414,9 @@ func (g *Generator) genCompositeLitInto(dst llvm.Value, n ast.NodeIndex) {
 			addr := g.builder.CreateStructGEP(layout.llvmType, dst, idx, "")
 			g.storeValueInto(addr, valueNode)
 		}
+
+	case sema.TypeEnum:
+		g.genEnumCompositeLitInto(dst, n)
 
 	case sema.TypeArray:
 		if t.Dynamic {

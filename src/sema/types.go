@@ -96,6 +96,7 @@ const (
 	TypeFunc
 	TypePointer
 	TypeMap
+	TypeEnum
 
 	TypeUntypedInt
 	TypeUntypedFloat
@@ -132,6 +133,13 @@ type Type struct {
 	// Struct is set when Kind == TypeStruct: the struct's catalog, as
 	// already built by Resolve.
 	Struct *StructInfo
+
+	// Enum is set when Kind == TypeEnum: the enum's catalog, as already built
+	// by Resolve - EnumInfo mirrors StructInfo's own "identified by pointer,
+	// not name" reasoning exactly (see Equal below) - two Types both naming
+	// enum Shape always point at the exact same EnumInfo. See LANGUAGE.md's
+	// "Enums" section.
+	Enum *EnumInfo
 
 	// Elem, Size, and Dynamic are set when Kind == TypeArray.
 	// Dynamic distinguishes `[]T` (parsed, but semantically rejected for
@@ -268,6 +276,8 @@ func (t Type) Equal(u Type) bool {
 	switch t.Kind {
 	case TypeStruct:
 		return t.Struct == u.Struct
+	case TypeEnum:
+		return t.Enum == u.Enum
 	case TypeArray:
 		if t.Dynamic != u.Dynamic {
 			return false
@@ -338,6 +348,11 @@ func (t Type) String() string {
 			return "<struct>"
 		}
 		return t.Struct.Symbol.Name
+	case TypeEnum:
+		if t.Enum == nil {
+			return "<enum>"
+		}
+		return t.Enum.Symbol.Name
 	case TypeArray:
 		if t.Dynamic {
 			return "[]" + t.Elem.String()

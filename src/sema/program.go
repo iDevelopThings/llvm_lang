@@ -22,6 +22,7 @@ type PackageResult struct {
 	Name    string
 	Scope   *Scope
 	Structs map[string]*StructInfo
+	Enums   map[string]*EnumInfo
 }
 
 // FileImport is one file's own `import "path"` binding, as a PackageUnit

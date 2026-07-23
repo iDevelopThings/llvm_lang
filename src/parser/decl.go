@@ -25,9 +25,11 @@ func (p *Parser) parseTopLevelItem() ast.NodeIndex {
 		return p.parseStructDecl()
 	case p.atKeyword(enums.Keywords.Extern):
 		return p.parseExternFuncDecl()
+	case p.atKeyword(enums.Keywords.Enum):
+		return p.parseEnumDecl()
 	default:
 		tok := p.tok
-		p.errorAtSpan(tok.Start, tok.End, "expected a top-level declaration (import, var, func, struct, or extern), found %s", p.describe(tok))
+		p.errorAtSpan(tok.Start, tok.End, "expected a top-level declaration (import, var, func, struct, enum, or extern), found %s", p.describe(tok))
 		p.sync(enums.Lexemes.Semicolon)
 		return p.badNode(tok)
 	}
@@ -313,4 +315,121 @@ func (p *Parser) parseDestructorDecl() ast.NodeIndex {
 		End:   p.tree.SpanOf(body).End,
 	}
 	return p.tree.NewNode(enums.NodeKinds.DestructorDecl, kwTok, span, params, body)
+}
+
+// parseEnumDecl parses `enum Name { Variant1, Variant2(T1, T2), Variant3 {
+// f Type }, destructor() {...} }` - see LANGUAGE.md's "Enums" section.
+func (p *Parser) parseEnumDecl() ast.NodeIndex {
+	kwTok := p.expectKeyword(enums.Keywords.Enum)
+	nameTok := p.expectIdent()
+	name := p.tree.NewNode(enums.NodeKinds.Ident, nameTok, tokenSpan(nameTok))
+
+	p.expect(enums.Lexemes.LeftBrace)
+	members := append([]ast.NodeIndex{name}, p.parseEnumMemberList()...)
+	closeTok := p.expect(enums.Lexemes.RightBrace)
+
+	span := ast.Span{
+		Start: kwTok.Start,
+		End:   closeTok.End,
+	}
+	return p.tree.NewNode(enums.NodeKinds.EnumDecl, kwTok, span, members...)
+}
+
+// parseEnumMemberList parses every member of an enum body (see
+// parseEnumMember) up to the closing `}` - members are comma-separated
+// (matching the worked syntax, `Variant1, Variant2(T1, T2), ...`), but
+// deliberately NOT via the shared parseCommaList helper every other
+// comma-separated grammar rule in this package uses: a bare unit variant
+// name, or a tuple/struct variant's own trailing `)`/`}`, is exactly the
+// kind of token the lexer's own ASI rule (asiEligible) already treats as
+// "a newline here ends the statement" - writing each variant on its own
+// line with no trailing comma at all (the natural Rust-style layout this
+// example's own worked syntax doesn't literally show, but obviously implies
+// is fine too) would otherwise insert a stray semicolon between one member
+// and the next that a strict comma-only list has no way to tolerate. This
+// loop instead consumes any run of commas and/or semicolons (explicit or
+// ASI-inserted) between members - covering a trailing Rust-style comma, a
+// bare ASI-only line break, or any mix of the two - uniformly.
+func (p *Parser) parseEnumMemberList() []ast.NodeIndex {
+	var members []ast.NodeIndex
+	for !p.at(enums.Lexemes.RightBrace) && !p.at(enums.Lexemes.EOF) {
+		members = append(members, p.parseEnumMember())
+		for {
+			if _, ok := p.accept(enums.Lexemes.Comma); ok {
+				continue
+			}
+			if _, ok := p.accept(enums.Lexemes.Semicolon); ok {
+				continue
+			}
+			break
+		}
+	}
+	return members
+}
+
+// parseEnumMember parses one element of an enum body - either an ordinary
+// variant (see parseEnumVariant) or (the same narrow exception a struct
+// already carries - see parseStructMember) a destructor block, disambiguated
+// by whether the element starts with the `destructor` keyword.
+func (p *Parser) parseEnumMember() ast.NodeIndex {
+	if p.atKeyword(enums.Keywords.Destructor) {
+		return p.parseDestructorDecl()
+	}
+	return p.parseEnumVariant()
+}
+
+// parseEnumVariant parses one variant - a bare name (a unit variant,
+// `Point`), a name followed by a parenthesized comma-separated type list (a
+// tuple variant, `Circle(f64)`), or a name followed by a braced
+// comma-separated field list (a struct variant, `Triangle { base f64, height
+// f64 }`, reusing parseField - this project's existing `name Type`
+// field-declaration shape - verbatim, just comma- rather than
+// semicolon-separated here). See ast.Node's own EnumVariant doc comment for
+// the three resulting shapes.
+func (p *Parser) parseEnumVariant() ast.NodeIndex {
+	nameTok := p.expectIdent()
+	end := nameTok.End
+
+	var children []ast.NodeIndex
+	switch {
+	case p.at(enums.Lexemes.LeftParen):
+		p.advance()
+		children = p.parseCommaList(enums.Lexemes.RightParen, p.parseTypeExpr)
+		closeTok := p.expect(enums.Lexemes.RightParen)
+		end = closeTok.End
+	case p.at(enums.Lexemes.LeftBrace):
+		p.advance()
+		children = p.parseEnumFieldList()
+		closeTok := p.expect(enums.Lexemes.RightBrace)
+		end = closeTok.End
+	}
+
+	span := ast.Span{
+		Start: nameTok.Start,
+		End:   end,
+	}
+	return p.tree.NewNode(enums.NodeKinds.EnumVariant, nameTok, span, children...)
+}
+
+// parseEnumFieldList parses a struct-variant's own braced field list
+// (`{ base f64, height f64 }`) - the same tolerant-separator shape
+// parseEnumMemberList uses one level up, for the identical reason: a
+// field's own type is frequently a bare identifier (ASI-eligible), so a
+// multi-line, one-field-per-line layout with no trailing comma needs the
+// same comma-and/or-semicolon tolerance a strict parseCommaList can't give.
+func (p *Parser) parseEnumFieldList() []ast.NodeIndex {
+	var fields []ast.NodeIndex
+	for !p.at(enums.Lexemes.RightBrace) && !p.at(enums.Lexemes.EOF) {
+		fields = append(fields, p.parseField())
+		for {
+			if _, ok := p.accept(enums.Lexemes.Comma); ok {
+				continue
+			}
+			if _, ok := p.accept(enums.Lexemes.Semicolon); ok {
+				continue
+			}
+			break
+		}
+	}
+	return fields
 }

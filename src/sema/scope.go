@@ -188,6 +188,21 @@ const (
 	// signature handling, just a Type of its own (typeOfSymbolValue,
 	// typecheck.go).
 	SymBuiltinValue
+	// SymEnum names a top-level `enum Name { ... }` declaration (see
+	// LANGUAGE.md's "Enums" section) - the enum-kind counterpart to
+	// SymStruct, IsType() included: a bare enum name is legal in type
+	// position exactly like a struct's.
+	SymEnum
+	// SymEnumVariant names one specific variant of some enum
+	// (`Shape.Circle`) - never bound into any lexical Scope by its own bare
+	// name (only reachable through EnumName.Variant, exactly like
+	// SymConstructor is only ever reachable through Name(args)): once
+	// Resolve resolves a MemberExpr/CallExpr-callee/CompositeLit-type-expr
+	// naming EnumName.Variant, Info.Refs for that node is set to point at
+	// this Symbol, the same "record which specific declaration a reference
+	// resolved to" idea SymConstructor's own Info.Refs entry already
+	// captures - see resolve.go's resolveEnumVariantRef.
+	SymEnumVariant
 )
 
 func (k SymbolKind) String() string {
@@ -214,6 +229,10 @@ func (k SymbolKind) String() string {
 		return "destructor"
 	case SymBuiltinValue:
 		return "builtin value"
+	case SymEnum:
+		return "enum"
+	case SymEnumVariant:
+		return "enum variant"
 	default:
 		return "symbol"
 	}
@@ -222,7 +241,7 @@ func (k SymbolKind) String() string {
 // IsType reports whether a symbol of this kind can be used in a type
 // position (`var a Kind`, an array element type, a method receiver clause).
 func (k SymbolKind) IsType() bool {
-	return k == SymStruct || k == SymBuiltinType
+	return k == SymStruct || k == SymBuiltinType || k == SymEnum
 }
 
 // Symbol is one declared (or compiler-predeclared) name.
@@ -306,6 +325,21 @@ type Symbol struct {
 	// every non-captured local still gets.
 	Captured bool
 
+	// EnumInfo is set for a SymEnum symbol (the enum type's own catalog,
+	// mirroring StructInfo's identical role for SymStruct) and for a
+	// SymEnumVariant symbol (the enum that variant belongs to) - the same
+	// direct-back-pointer reasoning StructInfo already documents: a consumer
+	// holding a resolved variant Symbol (e.g. a match arm's own pattern, or a
+	// package-qualified enum reference) can reach the whole Variants/Methods/
+	// Destructor catalog directly, with no name-based lookup into some
+	// package's own Info.Enums needed.
+	EnumInfo *EnumInfo
+
+	// Variant is set only for a SymEnumVariant symbol - which specific
+	// variant (name, discriminant index, kind, associated-data shape) this
+	// Symbol names, within EnumInfo above.
+	Variant *EnumVariant
+
 	// Package is set only for a SymPackage symbol (an import binding) - the
 	// imported package's own resolved surface (its shared top-level Scope
 	// and struct catalog), already built by the time this binding is
@@ -378,6 +412,115 @@ type StructInfo struct {
 	// computed answer - distinct from Copyable's own zero value (false)
 	// specifically so "not computed yet" and "computed, and it's false" are
 	// never confused (see checker.structCopyable).
+	copyableComputed bool
+}
+
+// EnumVariantKind classifies one EnumVariant - unit (no associated data),
+// tuple (positional associated data), or struct (named associated data) -
+// see LANGUAGE.md's "Enums" section. A small hand-rolled enum, not
+// enum_codegen: it needs zero supporting code beyond the three bare
+// constants (no String()/Parse()/iteration helper any caller actually
+// needs - every diagnostic that names a variant's kind already has its own
+// wording to pick), the exact bar AGENTS.md's enum_codegen criterion sets for
+// when a plain const block remains the right call.
+type EnumVariantKind int
+
+const (
+	EnumVariantUnit EnumVariantKind = iota
+	EnumVariantTuple
+	EnumVariantStruct
+)
+
+// EnumField is one named associated-data field of a struct-style variant
+// (`Triangle { base f64, height f64 }`'s own `base`/`height`) - the
+// enum-variant counterpart to a struct's own field, in declaration order.
+type EnumField struct {
+	Name string
+	Type Type
+	// Sym is this field's own Symbol (SymField, mirroring an ordinary
+	// struct field's) - set so a match arm's keyed pattern element
+	// (`{base: b}`) can resolve `base` into Info.Refs exactly like a real
+	// struct composite literal's own keyed element already does
+	// (checkKeyedStructElem, typecheck.go).
+	Sym *Symbol
+}
+
+// EnumVariant is one variant of an EnumInfo - its own name, discriminant
+// index (declaration order, 0-based - the same "declaration order is the
+// natural index" convention this project's struct field layout already
+// uses), kind, and associated-data shape. Tuple/Fields are populated by
+// Check (checkEnumDecl, typecheck.go), not Resolve - mirroring how a struct
+// field's own Type is likewise computed lazily via typeFromNode, never by
+// Resolve itself (see StructInfo's own doc comment).
+type EnumVariant struct {
+	Name  string
+	Index int
+	Kind  EnumVariantKind
+
+	// Decl is this variant's own EnumVariant ast.NodeIndex.
+	Decl ast.NodeIndex
+
+	// Tuple holds each associated type, positional, when Kind ==
+	// EnumVariantTuple - nil otherwise.
+	Tuple []Type
+
+	// Fields holds each associated field, in declaration order, when Kind ==
+	// EnumVariantStruct - nil otherwise.
+	Fields []EnumField
+
+	// Sym is this variant's own Symbol (SymEnumVariant) - see
+	// SymEnumVariant's own doc comment for why a variant is never bound into
+	// any lexical Scope by its bare name.
+	Sym *Symbol
+
+	// Enum is the EnumInfo this variant belongs to.
+	Enum *EnumInfo
+}
+
+// FieldByName returns the associated field named name (only meaningful when
+// Kind == EnumVariantStruct), and whether one was found at all - a small
+// linear scan rather than a parallel name->index map, since a real variant's
+// field count is always small (a handful of named fields at most).
+func (v *EnumVariant) FieldByName(name string) (EnumField, bool) {
+	for _, f := range v.Fields {
+		if f.Name == name {
+			return f, true
+		}
+	}
+	return EnumField{}, false
+}
+
+// EnumInfo catalogs one enum type's variants, methods, and destructor, built
+// directly from its declaration - the enum-kind counterpart to StructInfo
+// (see LANGUAGE.md's "Enums" section). No Constructors field - deliberately
+// not applicable here: variant construction (a bare unit-variant reference,
+// a tuple-variant call, or a struct-variant composite literal) already fully
+// serves the role a struct constructor exists for, so there's no separate
+// constructor concept to catalog.
+type EnumInfo struct {
+	Symbol *Symbol
+
+	// Variants is keyed by variant name, for a name-based lookup (a pattern
+	// or a construction reference resolving `EnumName.Variant`).
+	Variants map[string]*EnumVariant
+
+	// Order holds every variant in declaration order - the same order
+	// Index above assigns - needed wherever declaration order itself matters
+	// (exhaustiveness diagnostics listing every uncovered variant, codegen's
+	// own discriminant-switch construction), not just name-based lookup.
+	Order []*EnumVariant
+
+	Methods    map[string]*Symbol
+	Destructor *Symbol
+
+	// Copyable/copyableComputed mirror StructInfo's own identical fields
+	// exactly - see LANGUAGE.md's "Enums" section (non-copyable propagation):
+	// false iff this enum declares its own Destructor, or any variant's any
+	// associated-data type is itself non-copyable, transitively - computed
+	// lazily and memoized on first use, same reasoning as structCopyable
+	// (an enum's own variant types may name a struct declared later in the
+	// package, or in a different file/package entirely).
+	Copyable         bool
 	copyableComputed bool
 }
 

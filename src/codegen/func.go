@@ -31,8 +31,19 @@ func (g *Generator) declareFuncSignature(decl ast.NodeIndex) {
 
 	var paramTypes []llvm.Type
 	if receiver != ast.InvalidNode {
-		structInfo := g.info.Structs[g.tree.Text(receiver)]
-		paramTypes = append(paramTypes, llvm.PointerType(g.structLayouts[structInfo].llvmType, 0))
+		// The receiver names either a declared struct or a declared enum
+		// (see LANGUAGE.md's "Enums" section: methods reuse the exact same
+		// receiver-clause syntax, needing zero parser grammar changes) - an
+		// enum receiver's own implicit pointer parameter always points at
+		// the one shared g.enumValTy, exactly like a pointer's own pointee
+		// type never affects its LLVM representation elsewhere in this
+		// package.
+		receiverName := g.tree.Text(receiver)
+		if structInfo, ok := g.info.Structs[receiverName]; ok {
+			paramTypes = append(paramTypes, llvm.PointerType(g.structLayouts[structInfo].llvmType, 0))
+		} else {
+			paramTypes = append(paramTypes, llvm.PointerType(g.enumValTy, 0))
+		}
 	}
 	for _, paramNode := range g.tree.Children(paramListNode) {
 		paramTypes = append(paramTypes, g.llvmType(g.info.Types[g.tree.Child(paramNode, 1)]))
@@ -263,18 +274,43 @@ func (g *Generator) finishBody(body ast.NodeIndex) {
 // pushDestructorEntry records sym (a local var/short-var-decl/parameter
 // declaration whose storage - g.locals[sym] - was just initialized) onto the
 // current function's destructor stack if, and only if, its own declared
-// type t is a struct that declares its own destructor() directly - see
-// LANGUAGE.md's "Destructors" section: a type that's merely non-copyable
-// via a field never cascades into an automatic call by itself, only a
-// type's own destructor ever does.
+// type t is a struct or enum that declares its own destructor() directly -
+// see LANGUAGE.md's "Destructors" section: a type that's merely non-copyable
+// via a field/variant never cascades into an automatic call by itself, only
+// a type's own destructor ever does.
 func (g *Generator) pushDestructorEntry(sym *sema.Symbol, t sema.Type) {
-	if t.Kind != sema.TypeStruct || t.Struct == nil || t.Struct.Destructor == nil {
+	entry, ok := g.destructorFuncFor(t)
+	if !ok {
 		return
 	}
 	g.destructors = append(g.destructors, destructorEntry{
 		sym:  sym,
-		info: t.Struct,
+		fn:   entry.fn,
+		fnTy: entry.fnType,
 	})
+}
+
+// destructorFuncFor reports the destructor function to call for a value of
+// type t - a struct's or enum's own declareDestructorSignature/
+// declareEnumDestructorSignature entry - and whether t actually has one at
+// all (false for any other type, or a struct/enum declaring no destructor of
+// its own). Shared by pushDestructorEntry above and destructorFuncForPointee
+// (stmt.go, delete's own identical question about a pointer's pointee type).
+func (g *Generator) destructorFuncFor(t sema.Type) (funcEntry, bool) {
+	switch t.Kind {
+	case sema.TypeStruct:
+		if t.Struct == nil || t.Struct.Destructor == nil {
+			return funcEntry{}, false
+		}
+		return g.dtors[t.Struct], true
+	case sema.TypeEnum:
+		if t.Enum == nil || t.Enum.Destructor == nil {
+			return funcEntry{}, false
+		}
+		return g.enumDtors[t.Enum], true
+	default:
+		return funcEntry{}, false
+	}
 }
 
 // declareConstructorSignature declares ctor's (a ConstructorDecl's) LLVM

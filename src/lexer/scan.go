@@ -195,6 +195,10 @@ func (l *Lexer) matchOperator(c byte) (enums.Lexeme, bool) {
 	case ';':
 		return enums.Lexemes.Semicolon, true
 	case '=':
+		if l.peek() == '>' {
+			l.pos++
+			return enums.Lexemes.FatArrow, true
+		}
 		return two('=', enums.Lexemes.EqualEqual, enums.Lexemes.Equal), true
 	case '<':
 		return two('=', enums.Lexemes.LessThanEqual, enums.Lexemes.LessThan), true

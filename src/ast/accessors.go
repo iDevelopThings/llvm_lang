@@ -222,6 +222,104 @@ func (t *Tree) MultiShortVarDeclValue(decl NodeIndex) NodeIndex {
 	return children[len(children)-1]
 }
 
+// EnumVariants returns decl's (an EnumDecl's) EnumVariant children, skipping
+// its leading name child and filtering out its own (at most one)
+// DestructorDecl child - the enum-kind counterpart to StructFields. A plain
+// slice, not iter.Seq: real callers (cataloging every variant's discriminant
+// index during resolve, checking exhaustiveness against the full variant
+// set during Check) need the full set, indexed by declaration order, not
+// just a single forward pass.
+func (t *Tree) EnumVariants(decl NodeIndex) []NodeIndex {
+	children := t.Children(decl)[1:]
+	variants := make([]NodeIndex, 0, len(children))
+	for _, c := range children {
+		if t.Nodes[c].Kind == enums.NodeKinds.EnumVariant {
+			variants = append(variants, c)
+		}
+	}
+	return variants
+}
+
+// EnumDestructors yields decl's (an EnumDecl's) DestructorDecl children, in
+// declaration order - the enum-kind counterpart to StructDestructors (see
+// LANGUAGE.md's "Enums"/"Destructors" sections: an enum's destructor fires
+// once, regardless of which variant is actually active, exactly like a
+// struct's). An enum is meant to declare at most one, same "duplicate is
+// still visited, not silently dropped" reasoning StructDestructors already
+// documents.
+func (t *Tree) EnumDestructors(decl NodeIndex) iter.Seq[NodeIndex] {
+	return func(yield func(NodeIndex) bool) {
+		for _, c := range t.Children(decl)[1:] {
+			if t.Nodes[c].Kind != enums.NodeKinds.DestructorDecl {
+				continue
+			}
+			if !yield(c) {
+				return
+			}
+		}
+	}
+}
+
+// EnumVariantKind classifies an EnumVariant node's own shape - unit, tuple,
+// or struct-style (see ast.Node's own EnumVariant doc comment for exactly
+// what distinguishes each). A small, package-local result type rather than a
+// generated enum: nothing here needs a String()/Parse()/iteration helper
+// beyond the three bare constants themselves (see AGENTS.md's enum_codegen
+// criterion) - every caller already has its own reason to name the kind in
+// a diagnostic, so there's nothing generic to hand-maintain in parallel.
+type EnumVariantKind int
+
+const (
+	EnumVariantUnit EnumVariantKind = iota
+	EnumVariantTuple
+	EnumVariantStruct
+)
+
+// ClassifyEnumVariant reports variant's (an EnumVariant node's) own kind,
+// purely from its children's shape - no children at all means a unit
+// variant; children present but the first one isn't a Field node means a
+// tuple variant (every child is a bare type-position node); a first child
+// that IS a Field node means a struct variant (every child is a
+// [name, type] pair) - a type-position node is never itself Kind == Field,
+// so this is unambiguous.
+func (t *Tree) ClassifyEnumVariant(variant NodeIndex) EnumVariantKind {
+	children := t.Children(variant)
+	if len(children) == 0 {
+		return EnumVariantUnit
+	}
+	if t.Nodes[children[0]].Kind == enums.NodeKinds.Field {
+		return EnumVariantStruct
+	}
+	return EnumVariantTuple
+}
+
+// MatchSubject returns n's (a MatchStmt's) subject child - the value being
+// matched (see ast.Node's own MatchStmt doc comment for the
+// [subject, arm0, arm1, ...] shape).
+func (t *Tree) MatchSubject(n NodeIndex) NodeIndex {
+	return t.Child(n, 0)
+}
+
+// MatchArms returns n's (a MatchStmt's) MatchArm children, in source order -
+// every child except the leading subject. A plain slice, not iter.Seq: real
+// callers (exhaustiveness checking, codegen's own switch-arm construction)
+// need the full set together, not just a single forward pass.
+func (t *Tree) MatchArms(n NodeIndex) []NodeIndex {
+	return t.Children(n)[1:]
+}
+
+// MatchArmPattern returns arm's (a MatchArm's) pattern child - see ast.Node's
+// own MatchArm doc comment for the [pattern, body] shape these two accessors
+// index into.
+func (t *Tree) MatchArmPattern(arm NodeIndex) NodeIndex {
+	return t.Child(arm, 0)
+}
+
+// MatchArmBody returns arm's (a MatchArm's) body child.
+func (t *Tree) MatchArmBody(arm NodeIndex) NodeIndex {
+	return t.Child(arm, 1)
+}
+
 // MultiAssignStmtTargets returns n's (a MultiAssignStmt's) leading lvalue
 // target children - every child except the last (see Node's own
 // MultiAssignStmt doc comment for the [target0, ..., targetN, call] shape

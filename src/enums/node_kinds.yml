@@ -56,3 +56,7 @@ values:
   - name: MultiShortVarDecl
   - name: MultiAssignStmt
   - name: MapType
+  - name: EnumDecl
+  - name: EnumVariant
+  - name: MatchStmt
+  - name: MatchArm

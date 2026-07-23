@@ -608,6 +608,18 @@ func (g *Generator) genMapKeyEqual(t sema.Type, lv, rv llvm.Value) llvm.Value {
 			result = g.builder.CreateAnd(result, g.genMapKeyEqual(*t.Elem, le, re), "")
 		}
 		return result
+	case sema.TypeEnum:
+		// An enum key (see LANGUAGE.md's "Enums" section: comparable iff
+		// every variant's own associated data is) needs the identical real
+		// runtime discriminant dispatch `==`/`!=` already do - genEnumEqual
+		// (enum.go) is reused directly rather than hand-rolling a second
+		// switch/PHI here: it already recurses through genValueEqual for
+		// each variant's own associated fields, which - unlike when this
+		// function's own doc comment was first written - now implements
+		// every Kind sema's typeIsComparable accepts (every integer/float
+		// width and a pointer included), so there's no gap left for this
+		// case to work around.
+		return g.genEnumEqual(t, lv, rv)
 	default:
 		// sema's typeIsComparable (typecheck.go) rejects every other
 		// Kind (a dynamic array, a function type, another map) as a map key
@@ -688,6 +700,8 @@ func (g *Generator) genHashInto(t sema.Type, v, seed llvm.Value) llvm.Value {
 			seed = g.genHashInto(*t.Elem, ev, seed)
 		}
 		return seed
+	case sema.TypeEnum:
+		return g.genHashEnumInto(t, v, seed)
 	default:
 		// Unreachable on a tree that already passed sema.Check - see
 		// genMapKeyEqual's own identical closing remark.

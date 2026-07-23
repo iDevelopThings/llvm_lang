@@ -45,6 +45,8 @@ func (p *Parser) parseStmt() ast.NodeIndex {
 		return p.parseContinueStmt()
 	case p.atKeyword(enums.Keywords.Delete):
 		return p.parseDeleteStmt()
+	case p.atKeyword(enums.Keywords.Match):
+		return p.parseMatchStmt()
 	default:
 		return p.parseSimpleStmt()
 	}
@@ -549,4 +551,53 @@ func (p *Parser) parseDeleteStmt() ast.NodeIndex {
 		End:   p.tree.SpanOf(expr).End,
 	}
 	return p.tree.NewNode(enums.NodeKinds.DeleteStmt, kwTok, span, expr)
+}
+
+// parseMatchStmt parses `match subject { pattern => { ... } ... }` - see
+// LANGUAGE.md's "match" section. subject is parsed with composite literals
+// disabled at its top level (exprLev = -1), exactly the same escape-hatch
+// if/for's own header already uses - a bare `match shape {` would otherwise
+// be ambiguous with a composite literal `shape{...}`. Arms are separated the
+// same way a Block's own statement list is (ASI already covers the common
+// case, since every arm's body ends in `}`).
+func (p *Parser) parseMatchStmt() ast.NodeIndex {
+	kwTok := p.expectKeyword(enums.Keywords.Match)
+
+	savedLev := p.exprLev
+	p.exprLev = -1
+	subject := p.parseExpr(precLowest)
+	p.exprLev = savedLev
+
+	p.expect(enums.Lexemes.LeftBrace)
+	arms := p.parseSemiList(enums.Lexemes.RightBrace, p.parseMatchArm)
+	closeTok := p.expect(enums.Lexemes.RightBrace)
+
+	span := ast.Span{
+		Start: kwTok.Start,
+		End:   closeTok.End,
+	}
+	children := append([]ast.NodeIndex{subject}, arms...)
+	return p.tree.NewNode(enums.NodeKinds.MatchStmt, kwTok, span, children...)
+}
+
+// parseMatchArm parses one `pattern => { body }` arm. The pattern is parsed
+// with the ordinary expression grammar (parseExpr) - a wildcard `_` (a bare
+// Ident), a unit-variant pattern (a MemberExpr), a tuple-variant pattern (a
+// CallExpr whose "arguments" are fresh binding names), or a struct-variant
+// pattern (a CompositeLit whose keyed elements' values are fresh binding
+// names) - see ast.Node's own MatchArm doc comment for why this needs no new
+// expression-parsing grammar at all: every one of these shapes already
+// parses via CallExpr/CompositeLit/MemberExpr's own existing grammar, since
+// a pattern's own shape is deliberately identical to a variant's own
+// construction expression.
+func (p *Parser) parseMatchArm() ast.NodeIndex {
+	pattern := p.parseExpr(precLowest)
+	p.expect(enums.Lexemes.FatArrow)
+	body := p.parseBlock()
+
+	span := ast.Span{
+		Start: p.tree.SpanOf(pattern).Start,
+		End:   p.tree.SpanOf(body).End,
+	}
+	return p.tree.NewNode(enums.NodeKinds.MatchArm, lexer.Token{}, span, pattern, body)
 }

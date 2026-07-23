@@ -61,7 +61,10 @@ type loopCtx struct {
 }
 
 // destructorEntry is one local variable's or parameter's own symbol, plus
-// the struct type that gave it a destructor - pushed onto
+// the already-resolved destructor function to call for it (fn/fnTy - see
+// destructorFuncFor, func.go, which resolves either a struct's or an enum's
+// own destructor entry into this same shape, so this struct itself never
+// needs to know which type kind gave it a destructor) - pushed onto
 // Generator.destructors (see pushDestructorEntry, func.go) the moment such a
 // local/parameter's storage is initialized, and popped (with a real
 // destructor call emitted for each entry popped) by unwindDestructorsTo
@@ -70,7 +73,8 @@ type loopCtx struct {
 // break/continue exiting an enclosing loop.
 type destructorEntry struct {
 	sym  *sema.Symbol
-	info *sema.StructInfo
+	fn   llvm.Value
+	fnTy llvm.Type
 }
 
 // funcCtx is pushed once per function body being generated - the state
@@ -182,6 +186,11 @@ type Generator struct {
 	// serves every element type.
 	dynArrTy llvm.Type
 
+	// enumValTy is an enum value's (`sema.TypeEnum`) LLVM representation: the
+	// literal struct {i32, ptr} = {discriminant, payload} - see setupTypes'
+	// own doc comment and CODEGEN.md's "Enums" section.
+	enumValTy llvm.Type
+
 	// mapCtrlTy is a map's (`map[K]V`) control-block LLVM representation:
 	// the literal struct {ptr, i32, i32, i32} = {bucketsPtr, count,
 	// bucketCount, tombstoneCount} - see maps.go's own top-of-file doc
@@ -200,7 +209,14 @@ type Generator struct {
 	fmtMapNilTrap llvm.Value
 
 	structLayouts map[*sema.StructInfo]*structLayout
-	globals       map[*sema.Symbol]llvm.Value
+
+	// enumLayouts is structLayouts' enum-kind counterpart - see enum.go's own
+	// enumLayout doc comment for exactly what it caches per enum (each
+	// variant's own payload LLVM struct type, and each payload field's own
+	// sema.Type in the same order).
+	enumLayouts map[*sema.EnumInfo]*enumLayout
+
+	globals map[*sema.Symbol]llvm.Value
 
 	// globalInits queues every non-constant top-level `var`'s initializer -
 	// appended by genGlobalVarDecl, in source declaration order across every
@@ -247,6 +263,12 @@ type Generator struct {
 	// go through the Symbol indirection at all. Populated by
 	// declareDestructorSignature, read by genDestructorCall - see func.go.
 	dtors map[*sema.StructInfo]funcEntry
+
+	// enumDtors is dtors' enum-kind counterpart - keyed by *sema.EnumInfo
+	// rather than *sema.StructInfo, identical reasoning. Populated by
+	// declareEnumDestructorSignature, read by pushDestructorEntry/
+	// destructorFuncForPointee (func.go/stmt.go) - see enum.go.
+	enumDtors map[*sema.EnumInfo]funcEntry
 
 	// destructors is the current function's flat, function-scoped stack of
 	// still-in-scope locals/parameters whose own declared type has its own
@@ -399,6 +421,12 @@ type Generator struct {
 	fmtPtr     llvm.Value
 	fmtPtrBare llvm.Value
 
+	// fmtLParen/fmtRParen are a tuple-variant's own print-time punctuation
+	// (see genPrintEnumVariant, enum.go) - the enum-specific counterpart to
+	// fmtLBrace/fmtRBrace above (a struct variant reuses those two directly).
+	fmtLParen llvm.Value
+	fmtRParen llvm.Value
+
 	// argsGlobal is the private llvm_lang.args global genArgsCall reads from
 	// and buildArgsInitFn (args.go) populates once, at startup - see that
 	// file's own doc comment for the full args() builtin design. argsUsed is
@@ -455,10 +483,12 @@ func GeneratePackage(trees []*ast.Tree, infos map[*ast.Tree]*sema.Info, moduleNa
 		mod:           mod,
 		builder:       builder,
 		structLayouts: make(map[*sema.StructInfo]*structLayout),
+		enumLayouts:   make(map[*sema.EnumInfo]*enumLayout),
 		globals:       make(map[*sema.Symbol]llvm.Value),
 		funcs:         make(map[*sema.Symbol]funcEntry),
 		ctors:         make(map[*sema.Symbol]funcEntry),
 		dtors:         make(map[*sema.StructInfo]funcEntry),
+		enumDtors:     make(map[*sema.EnumInfo]funcEntry),
 		strLiterals:   make(map[string]llvm.Value),
 		thunks:        make(map[*sema.Symbol]llvm.Value),
 	}
@@ -517,6 +547,22 @@ func (g *Generator) genPackage(trees []*ast.Tree) {
 			g.defineStructBody(d)
 		}
 	}
+	// Every enum's own layout (its shared {i32, ptr} outer value plus each
+	// variant's own payload struct type) is built in one single pass, right
+	// after every struct body is fully defined - a variant's own associated
+	// data may itself embed a struct by value (needing that struct's own
+	// already-complete llvmType), but never needs another enum's own layout
+	// at all (a recursive/self-referential or enum-in-enum variant only ever
+	// holds a *pointer*, g.ptrTy, never the pointee's own full layout - see
+	// enum.go's declareEnumLayouts) - so, unlike structs, there's no
+	// forward-reference problem here needing its own separate
+	// declare-then-define split.
+	for _, tree := range trees {
+		g.enter(tree)
+		for d := range tree.TopLevelDeclsOfKind(enums.NodeKinds.EnumDecl) {
+			g.declareEnumLayout(d)
+		}
+	}
 	for _, tree := range trees {
 		g.enter(tree)
 		for d := range tree.TopLevelDeclsOfKind(enums.NodeKinds.VarDecl) {
@@ -543,6 +589,11 @@ func (g *Generator) genPackage(trees []*ast.Tree) {
 				g.declareDestructorSignature(dtor)
 			}
 		}
+		for d := range tree.TopLevelDeclsOfKind(enums.NodeKinds.EnumDecl) {
+			for dtor := range tree.EnumDestructors(d) {
+				g.declareEnumDestructorSignature(dtor)
+			}
+		}
 	}
 	for _, tree := range trees {
 		g.enter(tree)
@@ -555,6 +606,11 @@ func (g *Generator) genPackage(trees []*ast.Tree) {
 			}
 			for dtor := range tree.StructDestructors(d) {
 				g.genDestructorBody(dtor)
+			}
+		}
+		for d := range tree.TopLevelDeclsOfKind(enums.NodeKinds.EnumDecl) {
+			for dtor := range tree.EnumDestructors(d) {
+				g.genEnumDestructorBody(dtor)
 			}
 		}
 	}
