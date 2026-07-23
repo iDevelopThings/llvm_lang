@@ -142,6 +142,24 @@ func TestMultiShortVarDeclShape(t *testing.T) {
 				"    NumberLit \"1\"\n" +
 				"    NumberLit \"2\"\n",
 		},
+		{
+			// Map two-result indexing (`v, ok := m[k]` - see LANGUAGE.md's
+			// "Maps" section) parses into the exact same MultiShortVarDecl
+			// shape as the ordinary multi-return call case above, just with
+			// an IndexExpr (not a CallExpr) as the trailing value child -
+			// see ast.Node's own MultiShortVarDecl doc comment and
+			// sema.checkDestructureSource, which branches on this same
+			// IndexExpr-vs-CallExpr distinction one layer down.
+			name: "two-name map-index destructuring :=",
+			src:  "v, ok := m[k]",
+			want: "" +
+				"MultiShortVarDecl \":=\"\n" +
+				"  Ident \"v\"\n" +
+				"  Ident \"ok\"\n" +
+				"  IndexExpr\n" +
+				"    Ident \"m\"\n" +
+				"    Ident \"k\"\n",
+		},
 	}
 
 	for _, tt := range tests {

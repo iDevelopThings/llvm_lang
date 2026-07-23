@@ -38,32 +38,33 @@ type Span struct {
 //     LANGUAGE.md's "Imports" section - so there's no separate name node)
 //   - BinaryExpr, UnaryExpr: the operator token (Tok.Lexeme says which)
 //   - MemberExpr: the field-name identifier token (`a.b` - Tok is `b`)
-//   - AssignStmt, IncDecStmt: the assignment/inc-dec operator token
-//     (=, +=, -=, *=, /=, ++, --)
-//   - ShortVarDecl: the `:=` token
+//   - AssignStmt, IncDecStmt, MultiAssignStmt: the assignment/inc-dec
+//     operator token (=, +=, -=, *=, /=, ++, --; MultiAssignStmt only ever
+//     carries plain `=` - see its own doc comment below)
+//   - ShortVarDecl, MultiShortVarDecl: the `:=` token
 //   - VarDecl, FuncDecl, StructDecl, IfStmt, ForStmt, ReturnStmt, BreakStmt,
 //     ContinueStmt, FuncType, ConstructorDecl, DestructorDecl, FuncLit,
 //     NewExpr, DeleteStmt, ExternFuncDecl: the leading keyword token
 //     (ExternFuncDecl's is the `extern` keyword, not the `func` that follows
 //     it - see LANGUAGE.md's "External functions (FFI)" section; FuncType's
-//     is the `func`
-//     that introduces a function-type expression, e.g. `func(int) int`, see
-//     LANGUAGE.md's Types section; FuncLit's is the `func` that introduces a
-//     function-literal expression, e.g. `func(x int) int { return x }`, see
-//     LANGUAGE.md's "Lambdas" section - the same keyword, disambiguated from
-//     FuncType purely by whether a `{` body follows the parameter list/return
-//     type, exactly the same way FuncDecl's own body already disambiguates it
-//     from a bare declaration; NewExpr's is the `new` keyword, DeleteStmt's
-//     the `delete` keyword - see LANGUAGE.md's "Pointers" section;
-//     DestructorDecl's is the `destructor` keyword - see LANGUAGE.md's
-//     "Destructors" section)
+//     is the `func` that introduces a function-type expression, e.g.
+//     `func(int) int`, see LANGUAGE.md's Types section; FuncLit's is the
+//     `func` that introduces a function-literal expression, e.g.
+//     `func(x int) int { return x }`, see LANGUAGE.md's "Lambdas" section -
+//     the same keyword, disambiguated from FuncType purely by whether a `{`
+//     body follows the parameter list/return type, exactly the same way
+//     FuncDecl's own body already disambiguates it from a bare declaration;
+//     NewExpr's is the `new` keyword, DeleteStmt's the `delete` keyword -
+//     see LANGUAGE.md's "Pointers" section; DestructorDecl's is the
+//     `destructor` keyword - see LANGUAGE.md's "Destructors" section)
 //   - `&`/`*` address-of/dereference are ordinary UnaryExpr nodes - Tok is
 //     the operator token exactly like unary `-`/`!`, distinguished purely by
 //     Tok.Lexeme, no new node kind needed for either (see LANGUAGE.md's
 //     "Pointers" section)
 //   - everything else (File, Block, ParamList, Param, Field, CallExpr,
 //     ParenExpr, IndexExpr, ArrayType, PointerType, CompositeLit,
-//     KeyValueExpr, ExprStmt, ParamTypeList): unused, left as the zero Token
+//     KeyValueExpr, ExprStmt, ParamTypeList, MapType, MultiReturnType,
+//     MultiValueExpr): unused, left as the zero Token
 //
 // Children shapes, by kind:
 //   - CallExpr: [callee, arg0, arg1, ...] - variable arity, callee always first
@@ -223,23 +224,29 @@ type Span struct {
 //     above uses - a plain single-value `return expr` is a completely
 //     unchanged ReturnStmt whose expr child is simply that one expression
 //     directly, never this wrapper.
-//   - MultiShortVarDecl: [name0, name1, ..., nameN, call] - variable arity;
+//   - MultiShortVarDecl: [name0, name1, ..., nameN, value] - variable arity;
 //     every child except the last is a freshly-declared Ident name, the last
-//     is the sole right-hand-side call expression being destructured (see
-//     LANGUAGE.md's "Go-style multi-return values" section) - `a, b := f()`.
-//     At least two names (a single-name `x := f()` is the existing,
-//     completely unchanged ShortVarDecl). Use ast.Tree's
-//     MultiShortVarDeclNames/MultiShortVarDeclValue accessors rather than
-//     indexing directly - the split point (last child vs. everything before
-//     it) isn't a fixed position the way most other variable-arity node's
-//     "special" slot is.
-//   - MultiAssignStmt: [target0, target1, ..., targetN, call] - the
+//     is the sole right-hand-side value being destructured - either an
+//     ordinary call expression (the multi-return case, `a, b := f()` - see
+//     LANGUAGE.md's "Go-style multi-return values" section) or an IndexExpr
+//     naming a map (the two-result-index case, `v, ok := m[k]` - see
+//     LANGUAGE.md's "Maps" section and sema.checkDestructureSource, which
+//     branches on the two shapes). At least two names (a single-name
+//     `x := f()`/`x := m[k]` is the existing, completely unchanged
+//     ShortVarDecl). Use ast.Tree's MultiShortVarDeclNames/
+//     MultiShortVarDeclValue accessors rather than indexing directly - the
+//     split point (last child vs. everything before it) isn't a fixed
+//     position the way most other variable-arity node's "special" slot is.
+//   - MultiAssignStmt: [target0, target1, ..., targetN, value] - the
 //     assignment-form counterpart to MultiShortVarDecl, identical shape:
 //     every child except the last is an already-existing lvalue target
 //     (Ident, MemberExpr, IndexExpr, or a `*p` UnaryExpr dereference - exactly
 //     the same shapes plain AssignStmt's own single target already allows),
-//     the last is the sole right-hand-side call expression - `a, b = f()`. At
-//     least two targets (a single-target `x = f()` is the existing,
+//     the last is the sole right-hand-side value being destructured - either
+//     an ordinary call expression (the multi-return case, `a, b = f()`) or an
+//     IndexExpr naming a map (the two-result-index case, `v, ok = m[k]` -
+//     same two shapes MultiShortVarDecl's own doc comment above describes).
+//     At least two targets (a single-target `x = f()` is the existing,
 //     completely unchanged AssignStmt). Use MultiAssignStmtTargets/
 //     MultiAssignStmtValue, same reasoning as MultiShortVarDecl above.
 //   - a fixed-arity kind may reserve a positional slot as InvalidNode for an

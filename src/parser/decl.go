@@ -165,9 +165,13 @@ func (p *Parser) parseFuncDeclReturnType() ast.NodeIndex {
 // parseExternFuncDecl parses `extern func Name(params) RetType` - a top-level
 // FFI declaration binding an external C symbol, with no body at all (see
 // ast.Node's own ExternFuncDecl doc comment and LANGUAGE.md's "External
-// functions (FFI)" section). Reuses parseFuncDecl's own param-list/return-type
-// parsing verbatim, just skipping the receiver-clause parsing (an extern func
-// can never be a method) and skipping a `{ ... }` body entirely - the
+// functions (FFI)" section). Reuses parseFuncDecl's own param-list parsing
+// verbatim, but deliberately not its return-type parsing: the return type
+// here is a plain parseTypeExpr(), not parseFuncDeclReturnType(), so an
+// extern func can never declare a parenthesized multi-return list - matching
+// the FFI's own ABI restriction that an external function can't return
+// multiple values. Also skips the receiver-clause parsing (an extern func
+// can never be a method) and skips a `{ ... }` body entirely - the
 // declaration simply ends right after the optional return type, exactly like
 // a type-less `var` already does for statement termination (parseFile's own
 // semicolon-separator loop handles that, same as every other top-level item).
