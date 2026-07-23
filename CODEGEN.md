@@ -372,6 +372,54 @@ original (and vice versa) - and `TestSliceRangeCheckTraps` (same file) for
 the range-check's own actual trap behavior, using the same re-exec-as-a-
 child-process pattern `TestOutOfBoundsIndexTraps` above already established.
 
+## Runtime trap diagnostics
+
+Every runtime safety trap this package emits - `genBoundsCheck`/
+`genSliceRangeCheck` (`src/codegen/expr.go`) and `genMakeSizeCheck`
+(`src/codegen/runtime.go`) - now prints a real, informative diagnostic to
+stdout via a plain `printf` call (the exact same `g.printfType`/`g.printfFn`
+extern `print`'s own codegen already uses - see "The `print` builtin,
+concretely" below) *immediately before* the existing `llvm.trap` +
+`unreachable` sequence, not instead of it: the abort mechanism itself is
+completely unchanged, a genuine illegal-instruction process crash, not a
+graceful `exit(1)` or any kind of recoverable panic - there is still no
+exception-handling concept anywhere in this language (see "Array bounds
+checking" above). This mirrors Go's own runtime-panic convention exactly (a
+message, then a hard crash), chosen deliberately as the rough model rather
+than inventing a softer recovery mechanism.
+
+Each message is built from the exact same runtime `llvm.Value`s the check
+itself already computed - no extra loads/computation needed, since the
+trap block is reached with `idx`/`size` (`genBoundsCheck`), `low`/`high`/
+`max` (`genSliceRangeCheck`), or `nVal`/`capVal` (`genMakeSizeCheck`)
+already in hand as real SSA values:
+
+- `genBoundsCheck`: `"runtime error: index %d out of range [0:%d)\n"`
+  (`fmtBoundsTrap`) with `idx`/`size`.
+- `genSliceRangeCheck`: `"runtime error: slice bounds out of range [%d:%d]
+  with capacity %d\n"` (`fmtSliceRangeTrap`) with `low`/`high`/`max`.
+- `genMakeSizeCheck`: `"runtime error: makeslice: len %d, cap %d out of
+  range\n"` (`fmtMakeSizeTrap`) with `nVal`/`capVal` - covering all three of
+  that check's own combined conditions (`n < 0`, `cap < 0`, `cap < n`) with
+  one message, matching that function's own existing "one trap block for
+  every violation, since the process is about to abort regardless of which
+  one fired" reasoning.
+
+Each format string is its own new cached global, built via `defineCString`
+in `setupRuntime` exactly like every other format-string global there
+(`fmtInt`/`fmtStr`/etc. - see "`print`'s printf format specifiers" above) -
+no new mechanism, just three more entries in the same table.
+
+```
+$ llvmc.exe program.llx
+runtime error: index 5 out of range [0:5)
+```
+(followed by the real process crash, unchanged - see `TestOutOfBoundsIndexTraps`,
+`TestSliceRangeCheckTraps`, `TestMakeCapLessThanLenTraps`, and
+`TestMakeNegativeSizeTraps`, all now additionally asserting the printed
+message text via `exec.Command.CombinedOutput()`, on top of the abnormal-exit
+assertion each already had.)
+
 ## Global `var` initializers
 
 A top-level `var`'s initializer can be any well-typed expression now -
@@ -1192,6 +1240,120 @@ any of those four unsupported shapes reaching an `ExternFuncDecl`'s
 `llvmType` translation, since a tree with one already failed `sema.Check`
 (see this package's own doc comment: `Generate` assumes fully valid input).
 
+## The `args()` builtin, concretely
+
+See `LANGUAGE.md`'s "The `args()` builtin" section for the language-level
+feature (a predeclared, zero-argument builtin returning `[]string`, callable
+from anywhere - see `sema.checkArgsCall`, `sema/typecheck.go`, dispatched
+from `checkCallExpr` exactly like `make`/`append`/`len` already are).
+`src/codegen/args.go` is this feature's own dedicated file, mirroring
+`globalinit.go`'s "one feature, one file" precedent.
+
+**Storage: one private, always-present global, populated once.**
+`setupArgsGlobal` declares `llvm_lang.args` - a private, zero-initialized
+`{ptr, i32, i32}` (`g.dynArrTy`) global - unconditionally, for every module,
+regardless of whether the compiled program ever actually calls `args()`
+anywhere: it's cheap and entirely self-contained (no external symbol
+dependency at all), the same "always set up, never conditional on use"
+convention every other cached global in `setupRuntime` already follows.
+`genArgsCall` (the call's own codegen, dispatched from `genCallExpr` exactly
+like `make`/`append`/`len`) is just a load of this global's current value -
+no per-call marshaling work at all, matching the language's own "constructed
+once, at program startup" promise. It also sets `Generator.argsUsed`, read
+once by `genCtors` (see below) after every function body in the whole
+program has been generated.
+
+**Real argc/argv, without touching `main`'s own signature.** The obvious
+design - give `main` a real `(argc, argv)` parameter pair, matching a
+standard C entry point - was deliberately rejected: `main`'s LLVM signature
+is looked up and called with **zero** arguments by both `cmd/llvmc`'s
+`jitRunMain` and dozens of this package's own `jm.runInt32(t, "main")` test
+call sites (`extern_test.go`, `globals_test.go`, `imports_test.go`,
+`multifile_test.go`, `control_flow_test.go`, ... - a real, wide blast radius,
+not a hypothetical one), every one of them a raw `syscall.SyscallN` call that
+would suddenly need to pass two real, meaningful register arguments instead
+of none. Changing what `main` itself takes was a real, unnecessary
+regression risk this round explicitly avoided once a working alternative
+existed. Instead, `buildArgsInitFn` reads two plain **extern globals**,
+`__argc` (`i32`) and `__argv` (`ptr`) - the exact same well-established
+MSVCRT/mingw64 C-runtime extension a real, hand-written C/C++ program on
+this platform already relies on (`extern int __argc; extern char **__argv;`
+from `<stdlib.h>`), populated by the CRT's own startup sequence before
+`@llvm.global_ctors` or `main` itself ever run - so `main`'s own signature
+and every existing call site (JIT or not) needed **zero** changes.
+
+**Marshaling**: `buildArgsInitFn` builds a small, private, parameterless
+function (`llvm_lang.args_init`) whose body: loads `__argc`/`__argv`, asks
+the arena allocator (`genArenaAllocElems`, the same primitive
+`make`/`append`/a slice composite literal already use) for a buffer of
+`argc` `{ptr, i32}` string headers, then a real `CreateCondBr`/`AddBasicBlock`
+runtime loop (the same shape `genPrintDynArrayValue`/`genForStmt` already
+use) over `0..argc`: for each index, load `argv[i]` (a `char*`), call a
+plain libc `strlen` extern (declared here, the same "declare a libc extern,
+call it directly" convention `malloc`/`memcpy`/`memcmp`/`memset` already
+use, rather than hand-rolling a `while (argv[i][j] != 0) j++` byte-scanning
+loop as generated IR) to get its length, build the `{ptr, i32}` header, and
+store it into the backing buffer at that index. The final `{buf, argc,
+argc}` value is stored into `llvm_lang.args` once the loop completes.
+
+**Registered into `@llvm.global_ctors`, and *only* when actually needed.**
+`genCtors` (`globalinit.go`, renamed/refactored from the old
+`genGlobalCtors` - see `DECISIONS.md`'s dated entry) now runs *after* every
+function/constructor/destructor body has been generated, not before: it
+needs to know whether `g.argsUsed` ended up true, which `genArgsCall` only
+sets while generating some function's body, so the answer isn't known for
+certain until every body has already been generated. `buildArgsInitFn` (and
+its own `__argc`/`__argv`/`strlen` externs) is built - and registered into
+`@llvm.global_ctors`, at a lower priority number than `llvm_lang.global_init`
+so it runs *first* (a non-constant global's own initializer might itself
+call `args()`) - **only when `g.argsUsed` is true**. A program that never
+calls `args()` anywhere gets none of this: no `__argc`/`__argv` declared, no
+`llvm_lang.args_init`, no `@llvm.global_ctors` entry for it - only the
+always-present, fully self-contained `llvm_lang.args` global itself. This is
+not just a minor optimization: `__argc`/`__argv` are real external symbols
+this package has no control over the resolvability of under JIT execution
+(unlike `malloc`/`printf`/`memcpy`, already proven resolvable by this
+project's entire existing test suite) - keeping them out of every other
+program's module entirely means the vast majority of existing/future
+programs carry zero new external-symbol risk at all from this feature's
+mere existence. See `TestArgsUnusedProgramHasNoArgsMachinery`/
+`TestArgsUsedProgramHasArgsMachinery` (`src/codegen/args_test.go`) for this
+asserted directly against the generated IR text.
+
+**The JIT-execution fallback: an empty slice, by deliberate design, not an
+oversight.** `cmd/llvmc`'s `jitRunMain` never looks up or calls
+`llvm_lang.args_init` - unlike `llvm_lang.global_init`, which it explicitly
+does look up and call. So under JIT execution, `llvm_lang.args` simply stays
+at its zero-initialized value for the whole run: `args()` returns a real,
+valid, but always-empty `[]string` (`len(args()) == 0`) every time a program
+is JIT-executed via `llvmc program.llx`, regardless of any trailing
+arguments typed after the path on the command line - `llvmc` does not
+capture or forward trailing positional arguments at all this round (`run`,
+`cmd/llvmc/main.go`, still requires exactly one positional argument - a
+trailing `foo`/`bar` after the path is a usage error, not something forwarded
+to the JIT'd program). See `DECISIONS.md`'s dated "args() builtin" entry for
+why this specific fallback (over real trailing-arg-forwarding through the
+raw-syscall JIT invocation mechanism) was chosen, and
+`TestArgsCallUnderJITReturnsEmptySlice`/`TestBinary_AOT_Args`
+(`src/codegen/args_test.go`/`cmd/llvmc/main_test.go`) for this contrasted
+directly against a real AOT-compiled binary's own genuinely marshaled argv
+(see "`-o`: AOT compilation to a native executable" below) - the same
+program, same source, deliberately different (and clearly documented)
+behavior depending on which of the two ways it's actually run.
+
+**Why `bindMinGWMainThunk` also binds `__argc`/`__argv` under JIT, if
+`args_init` is never called.** LLJIT's default per-module materialization
+means merely looking up (and JIT-compiling) *any* symbol in a module that
+happens to contain `llvm_lang.args_init` could, in principle, need every
+symbol *that function* references to already resolve to something - even
+though this driver deliberately never calls it. `cmd/llvmc/main.go`'s (and
+`src/codegen/codegen_test.go`'s mirrored copy of) `bindMinGWMainThunk` binds
+both to harmless, always-valid process-local memory via the identical
+`AbsoluteSymbols` mechanism already used for the unrelated `__main` MinGW/GCC
+ABI quirk (see "A MinGW/GCC ABI quirk" below) - removing any uncertainty
+about this up front rather than relying on an assumption about exactly how
+LLJIT partitions a module for compilation.
+
 ## Multi-file packages: one shared Module per package
 
 See `LANGUAGE.md`'s "Multi-file packages" section for the language-level
@@ -1420,6 +1582,89 @@ Since this path never reaches `llvm.NewLLJIT`, disposal is a plain
 not the JIT path's own ownership-transfer teardown (see "A non-obvious
 disposal detail" below).
 
+## `-o`: AOT compilation to a native executable
+
+```powershell
+.\llvmc.exe -o myprogram.exe path\to\program.llx
+.\myprogram.exe    # a real, standalone .exe - no llvmc, no Go, no LLVM
+                    # toolchain present at all, anywhere in the loop
+```
+
+The single biggest gap this round closes (see `DECISIONS.md`'s dated entry
+for the full "why now"): before this, `llvmc` could only JIT-execute a
+program in its own process, or dump textual IR that nothing could actually
+run - there was no way to hand someone a program compiled with this language
+as a file they could just double-click or `./run`. `-o` runs the exact same
+pipeline as every other mode (lex/parse/resolve/check/codegen/verify -
+reusing `src/compiler`'s own `Result`, exactly like `-emit-llvm` and plain
+JIT execution both already do) and, on success, produces a real `.exe` at the
+given path instead.
+
+**The tail, concretely** (`compileToExecutable`, `cmd/llvmc/main.go`):
+
+1. **Emit a native object file** via LLVM's own target-machine backend
+   (`third_party/go-llvm`'s `target.go` - `llvm.DefaultTargetTriple()`,
+   `llvm.GetTargetFromTriple`, `Target.CreateTargetMachine`,
+   `TargetMachine.EmitToMemoryBuffer(mod, llvm.ObjectFile)`) - zero vendored-
+   binding changes were needed for this at all, full target-machine/object-
+   emission support was already there, unused until now. The exact same
+   native-target initialization the JIT path already performs
+   (`InitializeNativeTarget`/`InitializeNativeAsmPrinter`, `initJIT`) turned
+   out to already be sufficient - `LLVMInitializeNativeTarget`'s own C
+   implementation (`llvm-c/Target.h`) already initializes TargetInfo+Target+
+   TargetMC together for the host's native target, and
+   `InitializeNativeAsmPrinter` the AsmPrinter needed to actually emit real
+   machine code - confirmed concretely by this round's own AOT tests
+   succeeding, not assumed.
+2. **Write the resulting object bytes to a temporary `.o` file** via a plain
+   `os.CreateTemp`/`os.Remove` - not this project's own `afero.Fs` convention
+   (see `AGENTS.md`'s "Standards" section): that convention exists so
+   `src/loader`'s own tests can fake a package's *input* file layout on
+   `afero.NewMemMapFs()` instead of real temp directories; this is a
+   single, ephemeral, write-only scratch file for a CLI-only link step, with
+   no test needing to fake its contents, immediately removed once `gcc` has
+   read it - a narrow, deliberate exception, not a quiet departure from that
+   standing convention.
+3. **Link it into a real `.exe`** by shelling out to `gcc <temp.o> -o
+   <output>` (a plain `os/exec.Command` call) - reusing the exact same
+   mingw64 toolchain this project already requires on `PATH` for cgo/dev work
+   (see `AGENTS.md`'s "Compiling" section), rather than reimplementing or
+   vendoring a linker of this project's own. `gcc` already resolves ordinary
+   libc symbols (this package's own `printf`/`malloc`/`free`/`memcpy`/
+   `memcmp`/`memset` externs - see `setupRuntime` above) and any
+   user-declared `extern func` binding to a real Win32 API export
+   (`kernel32.dll`, etc. - see LANGUAGE.md's "External functions (FFI)"
+   section) automatically via mingw64's standard import libraries - **no
+   special linking flags are needed for either case**, confirmed concretely
+   (not assumed): `TestBinary_AOT_ExternFuncScopeTimer`
+   (`cmd/llvmc/main_test.go`) AOT-compiles `examples/scope_timer` (which
+   binds `QueryPerformanceCounter`/`QueryPerformanceFrequency` from
+   `kernel32.dll`) and runs the resulting standalone `.exe` directly,
+   proving link-time symbol resolution works - a genuinely different code
+   path from the JIT's own runtime process-symbol generator, not just the
+   same mechanism running earlier.
+
+**`main`'s own LLVM signature needed no change at all** - a real, empirically
+verified finding, not speculation (see `DECISIONS.md`'s dated entry for the
+full reasoning this round worked through): `main` still lowers to the exact
+same parameterless `i32 @main()` this project has always generated (see "
+`main` is the real entry point" above), for both the JIT and the AOT path
+alike. mingw64's own CRT startup calling `main()` with (internally tracked,
+but never passed as real parameters to a zero-parameter callee) argc/argv/
+envp is completely ordinary, valid C-ABI behavior - a callee simply
+ignoring arguments a caller's calling convention happens to also carry costs
+nothing and breaks nothing, confirmed directly by `TestBinary_AOT_HelloWorld`
+et al. actually running correctly. Real argc/argv access for the `args()`
+builtin instead goes through `__argc`/`__argv`, two separate mingw64-CRT-
+populated globals - see "The `args()` builtin, concretely" above for why,
+and for confirmation that this was verified end to end
+(`TestBinary_AOT_Args`), not just assumed to work from the CRT's own
+documented behavior.
+
+**Mutually exclusive with `-emit-llvm`** - `run` (`cmd/llvmc/main.go`)
+rejects both flags given together as a usage error (`exitUsage`) before ever
+compiling anything, rather than silently letting one win.
+
 ## Source file extension: `.llx`
 
 This project's source files use the extension `.llx`, not `.ll` - `.ll` is
@@ -1442,11 +1687,12 @@ directory's own doc comments).
 
 ## Exit codes
 
-- **2** - a usage error: no path argument, an unrecognized flag, the path
-  couldn't be resolved to a real file/directory, its resolved directory has
-  zero `.llx` files in it, an imported package directory couldn't be found,
-  or a real import cycle was detected (see `src/loader`'s `Load`/
-  `LoadProgram`). A short message goes to stderr; nothing is compiled.
+- **2** - a usage error: no path argument, an unrecognized flag, both `-o`
+  and `-emit-llvm` given together, the path couldn't be resolved to a real
+  file/directory, its resolved directory has zero `.llx` files in it, an
+  imported package directory couldn't be found, or a real import cycle was
+  detected (see `src/loader`'s `Load`/`LoadProgram`). A short message goes to
+  stderr; nothing is compiled.
 - **1** - a compile-time diagnostic from the lexer, parser stage, or from
   `src/compiler`'s `finishPipeline` (see this file's own "`src/compiler`:
   pipeline orchestration" section above): `sema.ResolveProgram` (or
@@ -1463,7 +1709,12 @@ directory's own doc comments).
   `file:line:col: severity: message` header plus the offending source line
   and a caret). With `-emit-llvm`, this is the only non-zero exit code
   reachable at all - a verified module's IR is always printed and the
-  process always exits 0 afterward (see below).
+  process always exits 0 afterward (see below). With `-o`, this also covers
+  every failure mode specific to that path's own tail (`compileToExecutable`)
+  - the target machine failing to resolve/emit, a temporary-object-file I/O
+  error, or the `gcc` link step itself failing/returning non-zero (its own
+  combined stdout+stderr output is included in the printed message) - see
+  "`-o`: AOT compilation to a native executable" above.
 - **otherwise** - the language program's own exit code. `func main()` always
   lowers to a real, parameterless `i32 @main()` regardless of whether the
   source declares a return type for it (see the "`main` is the real entry
@@ -1474,7 +1725,12 @@ directory's own doc comments).
   exit code, so `func main() int { return 2 + 3 }` really does exit the
   `llvmc` process with code 5. This doesn't apply with `-emit-llvm`: `main`
   is never executed, so its return value never becomes the process's exit
-  code - see the "`-emit-llvm` flag" section above.
+  code - see the "`-emit-llvm` flag" section above. Nor does it apply with
+  `-o`: `llvmc` itself never executes the compiled program at all with that
+  flag - a successful AOT compilation always exits `llvmc` with code `0`
+  regardless of what the *produced* `.exe`'s own `main` would return; that
+  exit code only ever appears later, whenever someone actually runs the
+  resulting standalone binary as its own, separate process.
 
 ## A non-obvious disposal detail
 

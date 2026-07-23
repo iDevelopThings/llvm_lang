@@ -2,9 +2,11 @@ package codegen
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -251,6 +253,13 @@ func trap(i int) int {
 			if exitErr.ExitCode() == 0 {
 				t.Fatalf("index %s: expected an abnormal (crash) exit, got a clean exit code 0 - output:\n%s", idx, out)
 			}
+			// See CODEGEN.md's "Runtime trap diagnostics" section: the same
+			// informative message a fixed-size array's own out-of-range index
+			// prints (genBoundsCheck is shared by both).
+			want := fmt.Sprintf("runtime error: index %s out of range [0:3)", idx)
+			if !strings.Contains(string(out), want) {
+				t.Errorf("index %s: expected trap message to contain %q, got:\n%s", idx, want, out)
+			}
 		})
 	}
 }
@@ -286,6 +295,10 @@ func trap() int {
 	}
 	if exitErr.ExitCode() == 0 {
 		t.Fatalf("expected an abnormal (crash) exit, got a clean exit code 0 - output:\n%s", out)
+	}
+	// See CODEGEN.md's "Runtime trap diagnostics" section.
+	if want := "runtime error: makeslice: len 5, cap 2 out of range"; !strings.Contains(string(out), want) {
+		t.Errorf("expected trap message to contain %q, got:\n%s", want, out)
 	}
 }
 
@@ -330,5 +343,9 @@ func trap() int {
 	}
 	if exitErr.ExitCode() == 0 {
 		t.Fatalf("expected an abnormal (crash) exit, got a clean exit code 0 - output:\n%s", out)
+	}
+	// See CODEGEN.md's "Runtime trap diagnostics" section.
+	if want := "runtime error: makeslice: len -1, cap -1 out of range"; !strings.Contains(string(out), want) {
+		t.Errorf("expected trap message to contain %q, got:\n%s", want, out)
 	}
 }

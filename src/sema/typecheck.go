@@ -2367,6 +2367,9 @@ func (c *checker) checkCallExpr(n ast.NodeIndex) Type {
 	if c.isBuiltinCall(callee, "len") {
 		return c.checkLenCall(n, args)
 	}
+	if c.isBuiltinCall(callee, "args") {
+		return c.checkArgsCall(n, args)
+	}
 	if t, ok := c.checkConstructorCall(n, callee, args); ok {
 		return t
 	}
@@ -2564,6 +2567,23 @@ func (c *checker) checkLenCall(n ast.NodeIndex, args []ast.NodeIndex) Type {
 	}
 	c.errorAt(args[0], "len is not defined for %s", t)
 	return invalidType
+}
+
+// checkArgsCall type-checks `args()` - the predeclared builtin returning the
+// program's own command-line arguments as a []string (see LANGUAGE.md's "The
+// args() builtin" section). Takes no arguments at all, unlike every other
+// predeclared builtin here - there's nothing to type-check against, so any
+// argument at all is a real error. Always returns the same []string type
+// (Elem always &stringType - see codegen's genArgsCall for the runtime value
+// this actually returns, marshaled once at program startup, not per call).
+func (c *checker) checkArgsCall(n ast.NodeIndex, args []ast.NodeIndex) Type {
+	if len(args) != 0 {
+		c.errorAtNodes(args, n, "args takes no arguments, got %d", len(args))
+		for _, a := range args {
+			c.checkValueExpr(a)
+		}
+	}
+	return Type{Kind: TypeArray, Dynamic: true, Elem: &stringType}
 }
 
 // checkConstructorCall recognizes and type-checks `Name(args)` where Name

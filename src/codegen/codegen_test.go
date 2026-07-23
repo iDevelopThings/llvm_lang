@@ -4,6 +4,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"unsafe"
 
 	"llvm_lang/src/diag"
 	"llvm_lang/src/lexer"
@@ -97,6 +98,12 @@ func compileSrcExpectCodegenError(t *testing.T, src string) *diag.Bag {
 // this exactly once per LLJIT instance, since every test source compiled
 // through this package's own test helpers always declares a `func main()`
 // of its own, per the language's top-level rules.
+// Also binds __argc/__argv to harmless, always-valid process-local memory
+// (testJITArgcSink/testJITArgvSink below) - see cmd/llvmc/main.go's own
+// bindMinGWMainThunk (mirrored here) for the full "why": a test source
+// calling args() declares these two as real extern globals (src/codegen/
+// args.go), and this avoids ever needing them to resolve to anything
+// meaningful, since no test here calls llvm_lang.args_init either.
 func bindMinGWMainThunk(jit llvm.LLJIT) error {
 	dg, err := llvm.NewDynamicLibrarySearchGeneratorForProcess(jit.GlobalPrefix())
 	if err != nil {
@@ -109,19 +116,46 @@ func bindMinGWMainThunk(jit llvm.LLJIT) error {
 		return err
 	}
 
-	name := jit.ExecutionSession().Intern("__main")
-	defer name.Release()
+	mainName := jit.ExecutionSession().Intern("__main")
+	defer mainName.Release()
+	argcName := jit.ExecutionSession().Intern("__argc")
+	defer argcName.Release()
+	argvName := jit.ExecutionSession().Intern("__argv")
+	defer argvName.Release()
+
 	mu := llvm.AbsoluteSymbols([]llvm.AbsoluteSymbol{
 		{
-			Name: name,
+			Name: mainName,
 			Value: llvm.EvaluatedSymbol{
 				Address: randAddr,
 				Flags:   llvm.SymbolFlags{Generic: llvm.SymbolFlagExported | llvm.SymbolFlagCallable},
 			},
 		},
+		{
+			Name: argcName,
+			Value: llvm.EvaluatedSymbol{
+				Address: uint64(uintptr(unsafe.Pointer(&testJITArgcSink))),
+				Flags:   llvm.SymbolFlags{Generic: llvm.SymbolFlagExported},
+			},
+		},
+		{
+			Name: argvName,
+			Value: llvm.EvaluatedSymbol{
+				Address: uint64(uintptr(unsafe.Pointer(&testJITArgvSink))),
+				Flags:   llvm.SymbolFlags{Generic: llvm.SymbolFlagExported},
+			},
+		},
 	})
 	return jit.MainJITDylib().Define(mu)
 }
+
+// testJITArgcSink/testJITArgvSink are the harmless, always-valid backing
+// memory __argc/__argv are bound to under this file's own JIT test helpers -
+// see bindMinGWMainThunk above.
+var (
+	testJITArgcSink int32
+	testJITArgvSink uintptr
+)
 
 // jitModule is a compiled Module already added to a live LLJIT instance -
 // see compileAndJIT.

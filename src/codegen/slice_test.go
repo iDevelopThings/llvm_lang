@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 )
 
@@ -361,6 +362,12 @@ func trap() int {
 			}
 			if exitErr.ExitCode() == 0 {
 				t.Fatalf("%s: expected an abnormal (crash) exit, got a clean exit code 0 - output:\n%s", tc.name, out)
+			}
+			// See CODEGEN.md's "Runtime trap diagnostics" section: an
+			// informative message must print before the abort, not just a
+			// bare crash.
+			if !strings.Contains(string(out), "runtime error: slice bounds out of range") {
+				t.Errorf("%s: expected an informative trap message, got:\n%s", tc.name, out)
 			}
 		})
 	}

@@ -310,6 +310,17 @@ type Generator struct {
 	fmtFloat   llvm.Value
 	fmtStr     llvm.Value
 
+	// Runtime trap diagnostic messages (see CODEGEN.md's "Runtime trap
+	// diagnostics" section) - printed via printf immediately before every
+	// llvm.trap+unreachable site (genBoundsCheck/genSliceRangeCheck, expr.go;
+	// genMakeSizeCheck, runtime.go), each with the actual runtime values
+	// already in hand at that point substituted in, exactly like Go's own
+	// runtime panic messages: informative output, then a genuine hard abort -
+	// never a softer recovery mechanism.
+	fmtBoundsTrap     llvm.Value
+	fmtSliceRangeTrap llvm.Value
+	fmtMakeSizeTrap   llvm.Value
+
 	// The bump-allocator arena (see setupArena in runtime.go): a generated
 	// LLVM function every heap-needing string operation calls into instead of
 	// malloc directly, plus the two mutable globals backing its state (the
@@ -335,6 +346,17 @@ type Generator struct {
 	fmtLBracket  llvm.Value
 	fmtRBracket  llvm.Value
 	fmtNewline   llvm.Value
+
+	// argsGlobal is the private llvm_lang.args global genArgsCall reads from
+	// and buildArgsInitFn (args.go) populates once, at startup - see that
+	// file's own doc comment for the full args() builtin design. argsUsed is
+	// set the first time genArgsCall actually runs anywhere in the whole
+	// program; genCtors (globalinit.go) only builds buildArgsInitFn (and its
+	// own __argc/__argv extern globals) when this ends up true, deliberately
+	// keeping every other program's module free of that extra external-symbol
+	// surface.
+	argsGlobal llvm.Value
+	argsUsed   bool
 }
 
 // Generate lowers tree (with its resolved/checked info) into a fresh LLVM
@@ -393,6 +415,7 @@ func GeneratePackage(trees []*ast.Tree, infos map[*ast.Tree]*sema.Info, moduleNa
 	}
 	g.setupTypes()
 	g.setupRuntime()
+	g.setupArgsGlobal()
 	g.genPackage(trees)
 
 	builder.Dispose()
@@ -468,15 +491,6 @@ func (g *Generator) genPackage(trees []*ast.Tree) {
 			}
 		}
 	}
-	// genGlobalCtors (globalinit.go) needs every function/constructor
-	// signature already declared (a non-constant global initializer may call
-	// one - see LANGUAGE.md's "Global var initializers" section) but runs
-	// before any function/constructor body is generated below - its own
-	// synthesized init function is just one more function as far as the rest
-	// of this package is concerned, and ordering it here keeps every one of
-	// genPackage's own passes in the same "declare everything, then generate
-	// every body" shape.
-	g.genGlobalCtors()
 	for _, tree := range trees {
 		g.enter(tree)
 		for d := range tree.TopLevelDeclsOfKind(enums.NodeKinds.FuncDecl) {
@@ -491,6 +505,23 @@ func (g *Generator) genPackage(trees []*ast.Tree) {
 			}
 		}
 	}
+	// genCtors (globalinit.go) builds and registers every @llvm.global_ctors
+	// entry this package itself synthesizes - llvm_lang.global_init (a
+	// non-constant global's real initializer, if the package has any) and
+	// llvm_lang.args_init (args()'s own startup marshaling, if the program
+	// actually calls args() anywhere - see args.go). Deliberately run *after*
+	// every function/constructor/destructor body above, unlike this pass's
+	// own signature-declaration passes further up (which all still run
+	// before any body, since a body can call any of them) - genCtors needs to
+	// know whether g.argsUsed ended up true, which genArgsCall only sets while
+	// generating some function's body, so it can only be decided once every
+	// body has already been generated. Neither synthesized ctor function's
+	// own body generation actually depends on any *other* function's body
+	// existing first - only on every global/function/constructor signature
+	// already existing (true well before this point either way) - so moving
+	// this to the end changes nothing about correctness, only about when
+	// g.argsUsed's final value becomes known.
+	g.genCtors()
 }
 
 // errorAt records a codegen-level diagnostic at n's position - see the

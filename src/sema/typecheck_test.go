@@ -566,6 +566,48 @@ func TestLenWrongArgCountIsError(t *testing.T) {
 	expectCheckErrors(t, "func f() {\n\tvar a int = 1\n\tvar b int = 2\n\tvar n int = len(a, b)\n}\n", 1)
 }
 
+// --- args ---
+
+// TestArgsCallOk covers the happy path: args() takes no arguments and
+// returns []string, assignable to a []string-typed var exactly like any
+// other value-producing expression.
+func TestArgsCallOk(t *testing.T) {
+	checkSrc(t, "func f() {\n\tvar a []string = args()\n}\n")
+}
+
+// TestArgsCallableFromAnywhere covers checkArgsCall's own claim (see
+// LANGUAGE.md's "The args() builtin" section) that args() is callable from
+// any function, not just main - a plain helper function works exactly the
+// same as main would.
+func TestArgsCallableFromAnywhere(t *testing.T) {
+	checkSrc(t, "func helper() int {\n\treturn len(args())\n}\n\nfunc main() int {\n\treturn helper()\n}\n")
+}
+
+// TestArgsRejectsArguments covers checkArgsCall's own argument-count gate:
+// args takes no arguments at all, unlike make/append/len.
+func TestArgsRejectsArguments(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\tvar a []string = args(1)\n}\n", 1)
+}
+
+// TestArgsResultElementIsString covers the exact result type args() returns
+// - []string specifically, not just "some dynamic array" - indexing it must
+// type-check as a string, and assigning that to a non-string var must fail.
+func TestArgsResultElementIsString(t *testing.T) {
+	checkSrc(t, "func f() {\n\tvar s string = args()[0]\n}\n")
+	expectCheckErrors(t, "func f() {\n\tvar n int = args()[0]\n}\n", 1)
+}
+
+// TestArgsShadowedAsOrdinaryFunctionStillTypeChecks covers shadowing (legal
+// - see scope.go's universeScope) the predeclared args with an ordinary
+// same-named function: isBuiltinCall must correctly see through the
+// shadowing (args resolves to the user's own SymFunc, with a real Decl, not
+// the predeclared no-Decl one) and fall through to the ordinary-call path,
+// checking the call against the shadowing function's own declared signature
+// instead of args' own zero-argument rule.
+func TestArgsShadowedAsOrdinaryFunctionStillTypeChecks(t *testing.T) {
+	checkSrc(t, "func args(x int) int {\n\treturn x\n}\n\nfunc main() int {\n\treturn args(5)\n}\n")
+}
+
 func TestSliceCompositeLitOk(t *testing.T) {
 	checkSrc(t, "func f() {\n\tvar a []int = []int{1, 2, 3}\n}\n")
 }

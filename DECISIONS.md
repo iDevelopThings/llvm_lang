@@ -850,3 +850,210 @@ exact same `Generator.funcs` map an ordinary `FuncDecl` does, so every
 existing direct-call codegen path needed zero changes), plus the new
 `examples/scope_timer` worked example and test coverage across
 `src/parser`/`src/sema`/`src/codegen`.
+
+---
+
+## 2026-07-23 - AOT compilation (`-o`): shelling out to `gcc`, not a vendored/hand-written linker
+
+**Decision:** `llvmc -o <output> <program>` emits a native object file via
+the vendored `go-llvm` bindings' already-present target-machine support
+(`Target.CreateTargetMachine`/`TargetMachine.EmitToMemoryBuffer(mod,
+llvm.ObjectFile)` - `third_party/go-llvm/target.go`, zero vendored-binding
+changes needed), writes it to a temporary file, and links it into a real
+`.exe` by shelling out to `gcc` (`os/exec.Command("gcc", objPath, "-o",
+outputPath)`) - the same mingw64 toolchain this project already requires on
+`PATH` for cgo/dev work (see `AGENTS.md`'s "Compiling" section) - rather than
+reimplementing a linker of this project's own, or vendoring one (e.g.
+LLVM's own `lld`).
+
+**Why:** this project's entire toolchain story already depends on mingw64
+being present on `PATH` for an unrelated reason (cgo needs `gcc`/`g++` to
+build against `libLLVM-22.dll` itself) - requiring it again for the one new
+purpose an AOT output mode needs (turning an object file into a real
+executable) adds no new environmental dependency at all, just a new use for
+one already required. Writing a linker (even a minimal one, understanding
+just enough of PE/COFF object format and mingw64's own CRT startup/import-
+library conventions to produce a working `.exe`) is a substantial, genuinely
+separate engineering effort with its own large surface of platform-specific
+correctness questions this round had no reason to take on, when `gcc`
+already solves it completely, for free, using infrastructure this project's
+own build already assumes exists. This also gets the two "does an extern
+symbol actually resolve" cases correct automatically and for free: ordinary
+libc symbols (`printf`/`malloc`/etc., already declared via `AddFunction` in
+`runtime.go`) and any user-declared `extern func` binding to a real Win32 API
+export (`kernel32.dll`, etc.) both resolve through mingw64's own standard
+import libraries exactly the way a hand-written C program calling the same
+APIs already would - no special linking flags needed for either, confirmed
+concretely (`TestBinary_AOT_ExternFuncScopeTimer`,
+`cmd/llvmc/main_test.go`), not assumed just because the JIT's own separate
+runtime process-symbol generator already handles this case a different way.
+
+**The temporary object file goes through a plain `os.CreateTemp`/`os.Remove`,
+not this project's own `afero.Fs` convention** (see `AGENTS.md`'s "Standards"
+section, and its own dated `DECISIONS.md` entry): that convention exists
+specifically so `src/loader`'s own tests can fake a package's *input* file
+layout on `afero.NewMemMapFs()` instead of real temp directories - a concern
+that doesn't apply here at all. This is a single, ephemeral, write-only
+scratch file for a CLI-only link step, with no test needing to fake its
+contents, immediately removed once `gcc` has read it - a narrow, deliberate,
+explicitly-documented exception, not a quiet, unexplained departure from a
+standing convention.
+
+**`main`'s own LLVM signature needed no change at all - verified concretely,
+not assumed.** The instinctive design (mirroring a standard C entry point)
+would give `main` a real `(argc, argv)` parameter pair for the AOT path.
+This was deliberately *not* done: `main`'s LLVM signature is looked up and
+called with zero arguments by both `cmd/llvmc`'s own `jitRunMain` and dozens
+of this package's own `jm.runInt32(t, "main")` test call sites across
+`src/codegen` (a real, wide blast radius, not a hypothetical one) - changing
+what `main` itself takes would have forced every one of those raw
+`syscall.SyscallN` call sites to suddenly pass two real, meaningful
+arguments instead of none, a real regression risk explicitly avoided once a
+working alternative existed (see the `args()` entry immediately below for
+what that alternative is, and why). Confirmed directly, not just reasoned
+about: `TestBinary_AOT_HelloWorld` et al. AOT-compile and run real, standalone
+executables successfully with `main`'s signature completely unchanged -
+mingw64's own CRT calling a zero-parameter `main()` with argc/argv/envp it
+simply never reads is ordinary, valid C-ABI behavior, not a hazard.
+
+**The `-o` flag itself** was named to mirror gcc/clang's own long-established
+convention for exactly this purpose (`gcc foo.c -o foo`), consistent with
+this project's own existing `-emit-llvm` flag precedent (a long, descriptive
+name for a less common, debugging-oriented flag; a short, conventional one
+for the everyday "compile to a file" case).
+
+**Status:** shipped. See `CODEGEN.md`'s new "`-o`: AOT compilation to a
+native executable" section for the full mechanism
+(`compileToExecutable`, `cmd/llvmc/main.go`) and its exit-code table update,
+and `cmd/llvmc/main_test.go`'s `TestBinary_AOT_HelloWorld`/
+`TestBinary_AOT_Features`/`TestBinary_AOT_ExternFuncScopeTimer`/
+`TestBinary_AOT_Args` for the real, standalone-process acceptance tests this
+round's own verification leaned on.
+
+---
+
+## 2026-07-23 - `args()` builtin: `__argc`/`__argv` CRT globals instead of changing `main`'s ABI, and an empty slice under JIT
+
+**Decision:** the predeclared `args() []string` builtin does **not** read
+real argc/argv through `main`'s own parameters (`main`'s LLVM signature stays
+the exact same parameterless `i32 @main()` it always was - see the `-o`
+entry above for why changing it was rejected). Instead, `buildArgsInitFn`
+(`src/codegen/args.go`) reads two plain extern globals, `__argc`/`__argv` -
+the same well-established MSVCRT/mingw64 C-runtime extension a real,
+hand-written C/C++ program on this platform already relies on
+(`extern int __argc; extern char **__argv;`, from `<stdlib.h>`), populated
+by the CRT's own startup sequence before `@llvm.global_ctors` or `main`
+itself ever run - and marshals them into a freshly arena-allocated
+`[]string`, stored into a private `llvm_lang.args` global once, via a
+synthesized ctor function (`llvm_lang.args_init`) registered into
+`@llvm.global_ctors` at a lower priority than `llvm_lang.global_init` (so it
+runs first - a non-constant global's own initializer might itself call
+`args()`).
+
+**Built (and its own `__argc`/`__argv`/`strlen` externs declared) only for a
+program that actually calls `args()` somewhere** (`Generator.argsUsed`,
+set by `genArgsCall`) - not unconditionally for every module the way
+`printf`/`malloc`/etc. already are. This forced `genPackage`'s own final
+pass (renamed `genCtors`, `globalinit.go`) to move from running *before*
+every function/constructor/destructor body is generated to running *after*
+- `g.argsUsed`'s final value isn't known for certain until every body has
+already been generated. This reordering changes nothing about correctness
+(neither synthesized ctor's own body-generation actually depends on any
+*other* function's body existing first, only on every global/function/
+constructor *signature* already existing, true well before either ordering
+point) - confirmed by this project's full existing test suite passing
+unchanged.
+
+**Why not build this unconditionally, the way every other runtime extern in
+`setupRuntime` already is?** `__argc`/`__argv` are real external symbols
+this package has no control over the resolvability of under JIT execution -
+genuinely unlike `malloc`/`printf`/`memcpy`/etc., already proven resolvable
+by this entire project's existing test suite. Keeping them (and
+`llvm_lang.args_init`, and its `@llvm.global_ctors` entry) out of every
+program's module unless that program actually calls `args()` means the vast
+majority of existing and future programs carry zero new external-symbol risk
+at all from this feature's mere existence - a real, considered risk
+management decision, not just "slightly more efficient." `bindMinGWMainThunk`
+(`cmd/llvmc/main.go`, mirrored in `src/codegen/codegen_test.go`) additionally
+binds both to harmless, always-valid process-local memory under JIT via the
+same `AbsoluteSymbols` mechanism already used for the unrelated `__main`
+MinGW/GCC ABI quirk, removing even the residual risk that LLJIT's own
+per-module materialization strategy might need them to resolve to *something*
+merely by virtue of being declared in a module some other symbol gets looked
+up from - confirmed directly, not assumed, by `TestArgsCallUnderJITReturnsEmptySlice`
+et al. actually JIT-executing successfully.
+
+**Why an empty slice under JIT, not real trailing-argument forwarding
+through `llvmc`.** The alternative explicitly considered: have `llvmc`
+itself accept trailing positional arguments after the compiled program's own
+path (`llvmc program.llx foo bar`) and thread them through the JIT's own
+raw-`syscall.SyscallN`-based `main` invocation. This was rejected as
+genuinely awkward given how that invocation mechanism actually works, for
+two compounding reasons: (1) it would need `main`'s own LLVM signature to
+carry real argc/argv parameters after all - exactly the regression risk the
+entry above already explains rejecting; (2) even granting that, correctly
+poking an already-marshaled `{ptr, i32, i32}` slice value (referencing
+further heap-allocated `{ptr, i32}` string headers, each pointing at real
+string byte data) directly into a live JIT'd module's global memory *from
+the Go host process* would require this driver to independently reconstruct
+LLVM's own exact struct layout/alignment rules for `g.dynArrTy`/`g.stringTy`
+by hand, entirely outside any actual generated code - a fragile, easy-to-get-
+subtly-wrong approach for a fallback path this project's own explicit
+instructions permitted skipping ("an acceptable, clearly documented fallback
+is: args() returns ... an empty slice - pick whichever is simpler to
+implement correctly ... don't spend excessive effort forcing full
+trailing-arg-forwarding through JIT if it's fighting the existing invocation
+mechanism"). An empty slice is simple, cannot ever be subtly wrong, and is
+clearly, prominently documented (`LANGUAGE.md`'s "The `args()` builtin"
+section) rather than silently different behavior a user could stumble into
+unwarned.
+
+**Status:** shipped. See `LANGUAGE.md`'s "The `args()` builtin" section for
+the full language-level rule (including the JIT-vs-AOT behavioral
+difference, called out explicitly) and `CODEGEN.md`'s own section of the
+same name for the lowering; `src/codegen/args_test.go`/
+`cmd/llvmc/main_test.go`'s `TestBinary_AOT_Args` for the JIT-empty-slice vs.
+AOT-real-argv contrast asserted directly, and
+`TestArgsUnusedProgramHasNoArgsMachinery`/`TestArgsUsedProgramHasArgsMachinery`
+for the conditional-machinery behavior this entry describes.
+
+---
+
+## 2026-07-23 - Runtime trap diagnostics: an informative message, unchanged hard-abort mechanism
+
+**Decision:** every runtime safety trap this project already had
+(`genBoundsCheck`/`genSliceRangeCheck`, `src/codegen/expr.go`;
+`genMakeSizeCheck`, `src/codegen/runtime.go`) now prints a real, informative
+`printf`-based message - the actual runtime values involved (an
+out-of-range index and the size it was checked against; a bad slice's
+low/high/capacity; make's own len/cap) - immediately before the existing
+`llvm.trap` + `unreachable` sequence. The abort mechanism itself is
+completely unchanged: still a genuine illegal-instruction process crash, not
+a graceful `exit(1)` or any kind of recoverable panic/exception - this
+language still has no exception-handling concept anywhere, by design (see
+"Array bounds checking" and "Destructors" entries above).
+
+**Why:** a bare `llvm.trap` with zero diagnostic output made debugging a real
+program's out-of-bounds/bad-slice/bad-make failure needlessly painful -
+nothing distinguished *which* check failed or *what* the actual bad values
+were, from the outside, short of attaching a debugger. Go's own runtime
+panic convention (a message, then a hard crash) was the explicit model to
+follow, deliberately not a softer recovery mechanism - inventing one (a
+`recover`-like construct, a graceful `exit(1)`) was explicitly out of scope
+and would have been a much larger, unrelated language-design change this
+round had no mandate to make. Reusing the exact same `printf`/cached-format-
+string mechanism `print`'s own codegen already established (`g.printfType`/
+`g.printfFn`, `defineCString`) meant this needed no new runtime primitive at
+all - three more format-string globals (`fmtBoundsTrap`/`fmtSliceRangeTrap`/
+`fmtMakeSizeTrap`) in the same table every other cached format string
+already lives in, and one more `printf` call inserted immediately before
+each existing trap block.
+
+**Status:** shipped. See `CODEGEN.md`'s new "Runtime trap diagnostics"
+section for the exact message text/values per site, and
+`TestOutOfBoundsIndexTraps`/`TestSliceRangeCheckTraps`/
+`TestMakeCapLessThanLenTraps`/`TestMakeNegativeSizeTraps`
+(`src/codegen/bounds_test.go`/`slice_test.go`/`dynamic_array_test.go`) for
+the printed-message assertions added on top of each test's existing
+abnormal-exit assertion - confirming the abort mechanism itself is
+byte-for-byte unchanged, only informative output was added before it.

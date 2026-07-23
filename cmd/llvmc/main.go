@@ -22,13 +22,23 @@
 //	llvmc <file.llx>
 //	llvmc <directory>
 //	llvmc -emit-llvm <file.llx or directory>
+//	llvmc -o <output> <file.llx or directory>
 //
 // The -emit-llvm flag runs the exact same pipeline (including LLVM's own
 // module verifier) but, instead of JIT-executing the result, prints the
 // generated module's LLVM IR text to stdout and exits 0 without ever
 // executing anything - useful for inspecting what a language feature lowers
-// to without writing a throwaway `go test` each time. Every other flag
-// combination (no flag) keeps the default JIT-execution behavior exactly as
+// to without writing a throwaway `go test` each time.
+//
+// The -o flag (see CODEGEN.md's "-o: AOT compilation to a native executable"
+// section) runs the exact same pipeline, then - instead of JIT-executing or
+// printing IR - emits a native object file via LLVM's own target-machine
+// backend and links it into a real, standalone .exe at the given path by
+// shelling out to gcc (the same mingw64 toolchain this project already
+// requires on PATH - see AGENTS.md's "Compiling" section), producing a
+// program runnable with no Go/LLVM toolchain present at all. -o and
+// -emit-llvm are mutually exclusive (a usage error if both are given).
+// Neither flag given keeps the default JIT-execution behavior exactly as
 // before.
 //
 // Source file extension: this project picks ".llx" for llvm_lang source
@@ -41,10 +51,10 @@
 // answer to "which files in here are part of the package".
 //
 // Exit codes:
-//   - 2: usage error - no path argument, an unrecognized flag, the path
-//     couldn't be resolved to a real file/directory, or its resolved
-//     directory has zero .llx files in it. A short usage message is printed
-//     to stderr; nothing is compiled.
+//   - 2: usage error - no path argument, an unrecognized flag, both -o and
+//     -emit-llvm given together, the path couldn't be resolved to a real
+//     file/directory, or its resolved directory has zero .llx files in it. A
+//     short usage message is printed to stderr; nothing is compiled.
 //   - 1: a compile-time diagnostic - the lexer, parser,
 //     sema.ResolvePackage/ResolveProgram, sema.CheckProgram (src/compiler's
 //     finishPipeline always calls CheckProgram, even for a single, import-
@@ -58,7 +68,10 @@
 //     JIT-executing but containing no `main` function to run. With
 //     -emit-llvm, this is the only non-zero exit code possible - a verified
 //     module's IR is always printed and this process always exits 0
-//     afterward.
+//     afterward. With -o, this also covers a failure in the AOT-specific
+//     tail (see CODEGEN.md): the target machine failing to emit an object
+//     file, or the gcc link step itself failing/returning non-zero (its own
+//     combined stdout+stderr output is included in the printed message).
 //   - otherwise: the language program's own exit code. `func main()` always
 //     lowers to a real `i32 @main()` LLVM function regardless of whether the
 //     source declares a return type for it (see AGENTS.md's "`main` is the
@@ -77,8 +90,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"sync"
 	"syscall"
+	"unsafe"
 
 	"llvm_lang/src/codegen"
 	"llvm_lang/src/compiler"
@@ -101,9 +116,9 @@ func main() {
 }
 
 // usage is the short usage message printed on any usage error, and also
-// documents the -emit-llvm flag (see the package doc comment for the full
-// exit-code writeup).
-const usage = "usage: llvmc [-emit-llvm] <file.llx | directory>"
+// documents the -emit-llvm/-o flags (see the package doc comment for the
+// full exit-code writeup).
+const usage = "usage: llvmc [-emit-llvm | -o <output>] <file.llx | directory>"
 
 // run is main's testable body: it never calls os.Exit itself, so a test can
 // invoke it directly and just inspect the returned code plus whatever was
@@ -120,6 +135,11 @@ func run(args []string, stderr io.Writer) int {
 		false,
 		"print the generated LLVM IR to stdout instead of JIT-executing it, then exit 0",
 	)
+	output := fs.String(
+		"o",
+		"",
+		"compile to a standalone native executable at this path instead of JIT-executing or emitting LLVM IR",
+	)
 
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
@@ -130,6 +150,11 @@ func run(args []string, stderr io.Writer) int {
 		return exitUsage
 	}
 
+	if *emitLLVM && *output != "" {
+		fmt.Fprintln(stderr, "llvmc: -emit-llvm and -o are mutually exclusive")
+		return exitUsage
+	}
+
 	path := fs.Arg(0)
 	prog, err := loader.LoadProgram(afero.NewOsFs(), path)
 	if err != nil {
@@ -137,7 +162,12 @@ func run(args []string, stderr io.Writer) int {
 		return exitUsage
 	}
 
-	return compileAndRunProgram(prog, stderr, *emitLLVM)
+	// Bypasses compileAndRunProgram (unchanged, still JIT-or-emit-llvm only -
+	// see its own doc comment) since only this real CLI entry point ever
+	// knows about -o; every in-process test still goes through
+	// compileAndRun/compileAndRunPackage/compileAndRunProgram exactly as
+	// before, always with outputPath "".
+	return finish(compiler.CompileProgram(prog), stderr, *output, *emitLLVM)
 }
 
 // compileAndRun drives the full pipeline for a single source file - the
@@ -160,7 +190,7 @@ func compileAndRun(name, src string, stderr io.Writer, emitLLVM bool) int {
 // don't need one - see compileAndRunProgram for the real multi-*package*
 // (import-aware) driver run actually uses.
 func compileAndRunPackage(files []loader.SourceFile, stderr io.Writer, emitLLVM bool) int {
-	return finish(compiler.CompilePackage(files), stderr, emitLLVM)
+	return finish(compiler.CompilePackage(files), stderr, "", emitLLVM)
 }
 
 // compileAndRunProgram drives the full pipeline for prog - a whole program,
@@ -171,25 +201,31 @@ func compileAndRunPackage(files []loader.SourceFile, stderr io.Writer, emitLLVM 
 // compiler.CompileProgram, then this CLI's own diagnostic-printing/
 // JIT-or-emit tail (finish), exactly like compileAndRunPackage.
 func compileAndRunProgram(prog *loader.Program, stderr io.Writer, emitLLVM bool) int {
-	return finish(compiler.CompileProgram(prog), stderr, emitLLVM)
+	return finish(compiler.CompileProgram(prog), stderr, "", emitLLVM)
 }
 
 // finish is this CLI's own tail shared by compileAndRunPackage/
-// compileAndRunProgram, once src/compiler has already driven res's trees
+// compileAndRunProgram/run, once src/compiler has already driven res's trees
 // through the whole resolve/check/codegen/verify pipeline: print every
 // tree's diagnostics (any diagnostics collected along the way - warnings
 // included - are printed even when the pipeline ultimately succeeded, so
 // nothing collected is silently dropped), then, if res.Module is nil,
 // report why (a real diagnostic, or - more rarely - res.VerifyErr) and
-// return the compile-error exit code; otherwise either dump the verified
-// module's LLVM IR text (-emit-llvm) or JIT-execute its `main` (the
-// default).
+// return the compile-error exit code; otherwise exactly one of three
+// mutually exclusive tails runs against the verified module: AOT-compile it
+// to outputPath (compileToExecutable, if outputPath != ""), dump its LLVM IR
+// text (-emit-llvm), or JIT-execute its `main` (the default, neither of the
+// above). outputPath and emitLLVM are never both meaningful at once - run
+// itself already rejects that combination as a usage error before ever
+// reaching this function - so outputPath != "" is checked first and always
+// wins if it's ever somehow both.
 //
 // This is the only place left in this package that's CLI-specific rather
 // than pipeline orchestration: printing (io.Writer/diag.FormatSnippet),
-// exit codes, -emit-llvm's stdout dump, and JIT execution (jitRunMain) all
-// belong here, not in src/compiler.
-func finish(res *compiler.Result, stderr io.Writer, emitLLVM bool) int {
+// exit codes, -emit-llvm's stdout dump, -o's AOT tail
+// (compileToExecutable), and JIT execution (jitRunMain) all belong here, not
+// in src/compiler.
+func finish(res *compiler.Result, stderr io.Writer, outputPath string, emitLLVM bool) int {
 	for _, tree := range res.Trees {
 		b := res.Diags[tree]
 		if b.Len() > 0 {
@@ -202,6 +238,10 @@ func finish(res *compiler.Result, stderr io.Writer, emitLLVM bool) int {
 			fmt.Fprintf(stderr, "llvmc: %v\n", res.VerifyErr)
 		}
 		return exitCompile
+	}
+
+	if outputPath != "" {
+		return compileToExecutable(res.Module, outputPath, stderr)
 	}
 
 	// -emit-llvm: dump the verified module's IR text and stop here - this
@@ -221,6 +261,92 @@ func finish(res *compiler.Result, stderr io.Writer, emitLLVM bool) int {
 		return exitCompile
 	}
 	return code
+}
+
+// compileToExecutable is -o's own tail: emit mod as a native object file via
+// LLVM's own target-machine backend (third_party/go-llvm's target.go - see
+// CODEGEN.md's "-o: AOT compilation to a native executable" section for the
+// full design), write it to a temporary .o file, then link it into a real
+// standalone .exe at outputPath by shelling out to gcc - the same mingw64
+// toolchain this project already requires on PATH (see AGENTS.md's
+// "Compiling" section) for cgo/dev work, reused here rather than
+// reimplementing or vendoring a linker of this project's own. gcc already
+// resolves ordinary libc symbols (this package's own printf/malloc/free/...
+// externs - see src/codegen/runtime.go) and any user-declared `extern func`
+// binding to a real Win32 API export (kernel32.dll, etc. - see LANGUAGE.md's
+// "External functions (FFI)" section) automatically via mingw64's standard
+// import libraries, exactly like it would for a real, hand-written C
+// program calling the same APIs - no special linking flags are needed for
+// either case.
+//
+// mod is always disposed before this returns (successfully or not) - this
+// path never reaches llvm.NewLLJIT, so a plain Module.Dispose() is correct,
+// the same ownership story -emit-llvm's own success path (finish, above)
+// already has.
+//
+// The temporary object file goes through a plain os.CreateTemp/os.Remove,
+// not this project's own afero.Fs convention (see AGENTS.md's "Standards"
+// section) - that convention is about the compiler's own *input* file
+// loading (src/loader, so tests can build fake package layouts on
+// afero.NewMemMapFs() instead of real temp directories), a concern that
+// doesn't apply here at all: this is a single, ephemeral, write-only scratch
+// file for a CLI-only link step with no test needing to fake its contents,
+// immediately removed once gcc has read it - a narrow, deliberate exception,
+// not a quiet departure from that convention.
+func compileToExecutable(mod *codegen.Module, outputPath string, stderr io.Writer) int {
+	defer mod.Dispose()
+
+	// The exact same native-target initialization the JIT path already
+	// performs (initJIT, below) - LLVMInitializeNativeTarget's own C
+	// implementation already initializes TargetInfo+Target+TargetMC together
+	// for the host's native target, and LLVMInitializeNativeAsmPrinter the
+	// AsmPrinter needed to actually emit machine code - there is no separate
+	// "target machine" initialization step needed beyond what JIT execution
+	// already relies on.
+	initJIT()
+
+	triple := llvm.DefaultTargetTriple()
+	target, err := llvm.GetTargetFromTriple(triple)
+	if err != nil {
+		fmt.Fprintf(stderr, "llvmc: resolving target %q: %v\n", triple, err)
+		return exitCompile
+	}
+
+	tm := target.CreateTargetMachine(triple, "", "", llvm.CodeGenLevelDefault, llvm.RelocDefault, llvm.CodeModelDefault)
+	defer tm.Dispose()
+
+	mb, err := tm.EmitToMemoryBuffer(mod.LLVM, llvm.ObjectFile)
+	if err != nil {
+		fmt.Fprintf(stderr, "llvmc: emitting object code: %v\n", err)
+		return exitCompile
+	}
+	defer mb.Dispose()
+
+	objFile, err := os.CreateTemp("", "llvmc-*.o")
+	if err != nil {
+		fmt.Fprintf(stderr, "llvmc: creating temporary object file: %v\n", err)
+		return exitCompile
+	}
+	objPath := objFile.Name()
+	defer os.Remove(objPath)
+
+	if _, err := objFile.Write(mb.Bytes()); err != nil {
+		objFile.Close()
+		fmt.Fprintf(stderr, "llvmc: writing temporary object file: %v\n", err)
+		return exitCompile
+	}
+	if err := objFile.Close(); err != nil {
+		fmt.Fprintf(stderr, "llvmc: closing temporary object file: %v\n", err)
+		return exitCompile
+	}
+
+	link := exec.Command("gcc", objPath, "-o", outputPath)
+	if out, err := link.CombinedOutput(); err != nil {
+		fmt.Fprintf(stderr, "llvmc: linking %s: %v\n%s", outputPath, err, out)
+		return exitCompile
+	}
+
+	return 0
 }
 
 // printDiags renders every diagnostic in b (sorted by source position) via
@@ -277,6 +403,22 @@ func initJIT() {
 // compileAndJIT and friends - routinely call some other, arbitrarily named
 // function directly, which never goes through this __main mechanism at
 // all).
+//
+// Also binds __argc/__argv (see src/codegen/args.go's own doc comment for
+// the args() builtin's full design) to harmless, always-valid process-local
+// memory (jitArgcSink/jitArgvSink below) - same absolute-symbol-binding
+// mechanism, same reasoning as __main above: a module that calls args()
+// anywhere declares these two as real extern globals, and LLJIT's default
+// per-module materialization means merely looking up (and JIT-compiling)
+// *any* symbol in such a module could, in principle, need every symbol it
+// references - including these two - to already resolve to something, even
+// though this driver deliberately never calls llvm_lang.args_init itself
+// (see args.go: args() is documented to return an empty slice under JIT
+// execution specifically to avoid needing real argv-marshaling through this
+// raw-syscall invocation mechanism at all). Binding them here means that
+// assumption is never put to the test in the first place - args_init's own
+// body simply never runs, so whatever jitArgcSink/jitArgvSink actually
+// contain is never read by anything.
 func bindMinGWMainThunk(jit llvm.LLJIT) error {
 	dg, err := llvm.NewDynamicLibrarySearchGeneratorForProcess(jit.GlobalPrefix())
 	if err != nil {
@@ -289,14 +431,33 @@ func bindMinGWMainThunk(jit llvm.LLJIT) error {
 		return err
 	}
 
-	name := jit.ExecutionSession().Intern("__main")
-	defer name.Release()
+	mainName := jit.ExecutionSession().Intern("__main")
+	defer mainName.Release()
+	argcName := jit.ExecutionSession().Intern("__argc")
+	defer argcName.Release()
+	argvName := jit.ExecutionSession().Intern("__argv")
+	defer argvName.Release()
+
 	mu := llvm.AbsoluteSymbols([]llvm.AbsoluteSymbol{
 		{
-			Name: name,
+			Name: mainName,
 			Value: llvm.EvaluatedSymbol{
 				Address: randAddr,
 				Flags:   llvm.SymbolFlags{Generic: llvm.SymbolFlagExported | llvm.SymbolFlagCallable},
+			},
+		},
+		{
+			Name: argcName,
+			Value: llvm.EvaluatedSymbol{
+				Address: uint64(uintptr(unsafe.Pointer(&jitArgcSink))),
+				Flags:   llvm.SymbolFlags{Generic: llvm.SymbolFlagExported},
+			},
+		},
+		{
+			Name: argvName,
+			Value: llvm.EvaluatedSymbol{
+				Address: uint64(uintptr(unsafe.Pointer(&jitArgvSink))),
+				Flags:   llvm.SymbolFlags{Generic: llvm.SymbolFlagExported},
 			},
 		},
 	})
@@ -306,6 +467,15 @@ func bindMinGWMainThunk(jit llvm.LLJIT) error {
 	}
 	return nil
 }
+
+// jitArgcSink/jitArgvSink are the harmless, always-valid backing memory
+// __argc/__argv are bound to under JIT execution (bindMinGWMainThunk above)
+// - never read by anything, since this driver never calls
+// llvm_lang.args_init itself (see args.go).
+var (
+	jitArgcSink int32
+	jitArgvSink uintptr
+)
 
 // jitRunMain JIT-executes mod's `main` (the language's `func main()`, always
 // lowered to a real, parameterless `i32 @main()` - see declareFuncSignature,

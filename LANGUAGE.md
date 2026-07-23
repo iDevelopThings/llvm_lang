@@ -768,6 +768,62 @@ exactly one argument, of any type, and returns nothing (`void`). See
 `CODEGEN.md`'s "`print` builtin, concretely" section for how it renders each
 type at runtime.
 
+## The `args()` builtin
+
+`args()` is predeclared exactly like `print`/`make`/`append`/`len` (see
+`sema.universeScope`) - a real, no-argument call, callable from anywhere in a
+program (not just `main`), returning the program's own command-line
+arguments as a `[]string`:
+
+```go
+func main() int {
+    a := args()
+    print(len(a))
+    i := 0
+    for i < len(a) {
+        print(a[i])
+        i++
+    }
+    return 0
+}
+```
+
+Takes **no arguments at all** - `args(1)` is a compile error ("args takes no
+arguments, got 1"), unlike `make`/`append`/`len`, which all take at least
+one. Always returns `[]string` - an ordinary dynamic array, so `len(...)`,
+indexing, slicing, and `for` all work on its result exactly like any other
+`[]string` value, with no special casing anywhere past the call itself.
+
+**Constructed once, at program startup** - not re-marshaled on every call.
+Every call to `args()` anywhere in a program observes the identical value,
+computed a single time before the program's own logic ever begins running.
+
+**Real command-line arguments, when the program is a real, standalone,
+AOT-compiled executable** (`llvmc -o program.exe program.llx` - see
+`CODEGEN.md`'s "`-o`: AOT compilation to a native executable" section):
+`args()[0]` is the running executable's own path, and `args()[1:]` are
+whatever arguments it was actually invoked with, exactly like Go's
+`os.Args`/C's `argv`:
+
+```powershell
+.\program.exe foo "bar baz"
+# args() == [".\program.exe", "foo", "bar baz"]
+```
+
+**A real, honest, and deliberately narrower fallback under JIT execution**
+(`llvmc program.llx`, no `-o`): `args()` always returns an **empty**
+`[]string` (`len(args()) == 0`) - `llvmc` does not capture or forward any
+trailing command-line arguments typed after the compiled program's own path
+this round (a `foo`/`bar` written after the path is a plain usage error, not
+something forwarded into the running program). See `CODEGEN.md`'s own
+"`args()` builtin" section and `DECISIONS.md`'s dated entry for exactly why
+this fallback was chosen over threading real argv through the JIT's own
+raw-syscall invocation mechanism - the practical tradeoff was judged not
+worth the real regression risk (or genuine implementation awkwardness) the
+alternative would have introduced. This is the one, narrowly-scoped way
+`args()`'s behavior actually depends on *how* the same program is run, not
+just what it does - documented here precisely so it's never a surprise.
+
 ## Missing return
 
 A function declaring a return type must be guaranteed to return a value on

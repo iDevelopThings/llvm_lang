@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 )
 
@@ -84,6 +85,13 @@ func trap() int {
 			}
 			if exitErr.ExitCode() == 0 {
 				t.Fatalf("index %s: expected an abnormal (crash) exit, got a clean exit code 0 - output:\n%s", idx, out)
+			}
+			// See CODEGEN.md's "Runtime trap diagnostics" section: an
+			// informative message (the actual index/size involved) must
+			// print before the abort, not just a bare crash.
+			want := fmt.Sprintf("runtime error: index %s out of range [0:5)", idx)
+			if !strings.Contains(string(out), want) {
+				t.Errorf("index %s: expected trap message to contain %q, got:\n%s", idx, want, out)
 			}
 		})
 	}

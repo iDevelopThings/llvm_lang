@@ -100,6 +100,18 @@ func (g *Generator) setupRuntime() {
 	g.fmtLBracket = g.defineCString(".fmt.lbracket", "[")
 	g.fmtRBracket = g.defineCString(".fmt.rbracket", "]")
 	g.fmtNewline = g.defineCString(".fmt.newline", "\n")
+
+	// Runtime trap diagnostics (see genBoundsCheck/genSliceRangeCheck, expr.go,
+	// and genMakeSizeCheck below) - one printf call with the actual runtime
+	// values already in hand substituted in, immediately before every
+	// llvm.trap+unreachable site, mirroring Go's own runtime panic convention
+	// (a message, then a genuine hard crash - see AGENTS.md's "Runtime trap
+	// messages" round). Wording deliberately echoes Go's own real panic text
+	// ("index out of range", "slice bounds out of range") where a direct
+	// analogue exists.
+	g.fmtBoundsTrap = g.defineCString(".fmt.trap.bounds", "runtime error: index %d out of range [0:%d)\n")
+	g.fmtSliceRangeTrap = g.defineCString(".fmt.trap.slicerange", "runtime error: slice bounds out of range [%d:%d] with capacity %d\n")
+	g.fmtMakeSizeTrap = g.defineCString(".fmt.trap.makesize", "runtime error: makeslice: len %d, cap %d out of range\n")
 }
 
 // arenaChunkSize is the size (in bytes) of one block the arena grows by via
@@ -419,14 +431,18 @@ func (g *Generator) genMakeCall(callNode ast.NodeIndex, args []ast.NodeIndex) ll
 	return result
 }
 
-// genMakeSizeCheck traps (llvm.trap + unreachable, same as genBoundsCheck) on
-// any of make's own runtime size invariants failing: nVal < 0, capVal < 0, or
-// capVal < nVal ("cap can't be smaller than the requested length" - see
-// genMakeCall's doc comment for why these are all runtime checks rather than
-// sema diagnostics). All three conditions are folded into one trap block
-// rather than three separate ones - they're all the same class of "make was
-// asked for a nonsensical size" failure, so there's no value in distinguishing
-// which one fired once the process is about to abort anyway.
+// genMakeSizeCheck prints an informative diagnostic (fmtMakeSizeTrap - the
+// actual nVal/capVal values already in hand) and traps (llvm.trap +
+// unreachable, same as genBoundsCheck - see CODEGEN.md's "Runtime trap
+// diagnostics" section) on any of make's own runtime size invariants
+// failing: nVal < 0, capVal < 0, or capVal < nVal ("cap can't be smaller than
+// the requested length" - see genMakeCall's doc comment for why these are
+// all runtime checks rather than sema diagnostics). All three conditions are
+// folded into one trap block rather than three separate ones - they're all
+// the same class of "make was asked for a nonsensical size" failure, so
+// there's no value in distinguishing which one fired once the process is
+// about to abort anyway (the one printed message covers nVal and capVal
+// together regardless of which condition actually failed).
 func (g *Generator) genMakeSizeCheck(nVal, capVal llvm.Value) {
 	zero := llvm.ConstInt(g.i32Ty, 0, true)
 	nNonNegative := g.builder.CreateICmp(llvm.IntSGE, nVal, zero, "")
@@ -440,6 +456,7 @@ func (g *Generator) genMakeSizeCheck(nVal, capVal llvm.Value) {
 	g.builder.CreateCondBr(ok, okBB, trapBB)
 
 	g.builder.SetInsertPointAtEnd(trapBB)
+	g.builder.CreateCall(g.printfType, g.printfFn, []llvm.Value{g.fmtMakeSizeTrap, nVal, capVal}, "")
 	g.builder.CreateCall(g.trapType, g.trapFn, nil, "")
 	g.builder.CreateUnreachable()
 

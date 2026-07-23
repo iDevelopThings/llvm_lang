@@ -96,3 +96,47 @@ each) is reproducible via the command above; see each package's own
   merging and LLVM's module verifier, both real, both small) - a sanity
   check that nothing is being double-counted or missed between the
   per-stage benchmarks and the end-to-end one.
+
+## 2026-07-23 update - AOT compilation, `args()`, and runtime trap diagnostics
+
+Re-measured after landing AOT compilation (`-o`), the `args()` builtin, and
+informative runtime trap diagnostics (see `DECISIONS.md`'s three dated
+entries from this same round) - same machine/fixtures/command as the
+2026-07-22 baseline above, compared directly against a same-session
+pre-change build (`git stash`) rather than against the table above alone, to
+rule out cross-session machine-state noise:
+
+| Stage | Fixture | ns/op (before -> after) | B/op (before -> after) | allocs/op (before -> after) |
+|---|---|---:|---:|---:|
+| Sema (`Resolve`+`Check`) | Small | 108,383 -> 103,387 | 82,221 -> 83,231 | 265 -> 268 |
+| Sema (`Resolve`+`Check`) | Large | 2,482,991 -> 2,535,528 | 2,383,112 -> 2,384,186 | 4,047 -> 4,050 |
+| Codegen (`Generate`) | Small | 275,729 -> 276,345 | 6,357 -> 6,477 | 134 -> 139 |
+| Codegen (`Generate`) | Large | 6,015,516 -> 6,357,359 | 133,957 -> 138,779 | 2,038 -> 2,238 |
+
+- **Sema's +3 allocs/op, both fixtures, not scaling with input size** -
+  exactly what adding one predeclared symbol (`args`, alongside
+  `make`/`append`/`len`) to `universeScope` should cost: one extra `Symbol`
+  allocated once per `Resolve` call, a constant, not a per-node cost - the
+  identical +3 for both Small and Large (rather than Large scaling ~24x the
+  way every genuinely per-node cost in this file already does) confirms it's
+  exactly that and nothing more.
+- **Codegen's allocs/op grew disproportionately more for Large (+200) than
+  Small (+5)** - this is real, attributable, and expected, not noise: every
+  runtime trap site (`genBoundsCheck`/`genSliceRangeCheck`/
+  `genMakeSizeCheck`) now emits one additional `printf` call (the new
+  informative trap-diagnostic message - see `CODEGEN.md`'s "Runtime trap
+  diagnostics" section) alongside the pre-existing `llvm.trap`, and the Large
+  fixture's dynamic-array/indexing feature mix repeats every one of those
+  call sites 40x, same as everything else in it - so this cost scales with
+  how many trap-checked operations a program has, exactly like the rest of
+  codegen's own cost already does, not with anything unbounded. Small's own
+  +5 is the one-time `setupArgsGlobal` declaration (always present,
+  regardless of whether a program calls `args()` - see `CODEGEN.md`'s "The
+  `args()` builtin" section) plus its own smaller number of trap sites.
+  Nothing here is a stage no longer scaling linearly (Large/Small's own ratio
+  is still in the same band the 2026-07-22 entry already measured) - this is
+  a deliberate, requested tradeoff (informative crash diagnostics, per this
+  round's own explicit scope), not an accidental regression, and the
+  magnitude (a low-single-digit-percent `ns/op` change either way, ~10%
+  `allocs/op` on codegen's own Large fixture specifically) was judged not
+  worth trading away the debuggability the feature exists to provide.

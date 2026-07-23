@@ -414,11 +414,16 @@ func (g *Generator) genLambdaFunc(n ast.NodeIndex, captures []*sema.Symbol, ctxT
 }
 
 // genBoundsCheck emits a real runtime check that idx (an i32) satisfies
-// `0 <= idx < size`, trapping immediately (llvm.trap followed by
+// `0 <= idx < size`, printing an informative diagnostic (fmtBoundsTrap,
+// setupRuntime - the actual idx/size values already in hand, no extra
+// computation needed) and then trapping immediately (llvm.trap followed by
 // unreachable - see setupRuntime, runtime.go) rather than falling through to
 // an out-of-bounds GEP, which would otherwise be silent undefined behavior -
 // a read/write through arbitrary memory. See AGENTS.md's "Array bounds
-// checking" section.
+// checking" section and CODEGEN.md's "Runtime trap diagnostics" section for
+// why a message is printed at all (Go's own runtime-panic convention: an
+// informative message, then a genuine hard crash - the abort mechanism
+// itself is completely unchanged).
 //
 // size is an arbitrary already-computed i32 llvm.Value, not a compile-time
 // constant - a fixed-size array's caller (genAddr's IndexExpr case) passes a
@@ -445,6 +450,7 @@ func (g *Generator) genBoundsCheck(idx, size llvm.Value) {
 	g.builder.CreateCondBr(inBounds, okBB, trapBB)
 
 	g.builder.SetInsertPointAtEnd(trapBB)
+	g.builder.CreateCall(g.printfType, g.printfFn, []llvm.Value{g.fmtBoundsTrap, idx, size}, "")
 	g.builder.CreateCall(g.trapType, g.trapFn, nil, "")
 	g.builder.CreateUnreachable()
 
@@ -454,9 +460,12 @@ func (g *Generator) genBoundsCheck(idx, size llvm.Value) {
 // genSliceRangeCheck emits a real runtime check that low/high (i32 values)
 // satisfy `0 <= low <= high <= max` - the range-check counterpart to
 // genBoundsCheck's single-index check (see CODEGEN.md's "Slicing" section),
-// trapping immediately (llvm.trap + unreachable, same mechanism/convention
-// as genBoundsCheck/genMakeSizeCheck) rather than ever building a slice
-// header from an out-of-range pair.
+// printing an informative diagnostic (fmtSliceRangeTrap - the actual
+// low/high/max values already in hand) and then trapping immediately
+// (llvm.trap + unreachable, same mechanism/convention as
+// genBoundsCheck/genMakeSizeCheck) rather than ever building a slice header
+// from an out-of-range pair. See CODEGEN.md's "Runtime trap diagnostics"
+// section.
 //
 // max is an arbitrary already-computed i32 llvm.Value, not necessarily a
 // compile-time constant, mirroring genBoundsCheck's own size parameter: a
@@ -478,6 +487,7 @@ func (g *Generator) genSliceRangeCheck(low, high, max llvm.Value) {
 	g.builder.CreateCondBr(ok, okBB, trapBB)
 
 	g.builder.SetInsertPointAtEnd(trapBB)
+	g.builder.CreateCall(g.printfType, g.printfFn, []llvm.Value{g.fmtSliceRangeTrap, low, high, max}, "")
 	g.builder.CreateCall(g.trapType, g.trapFn, nil, "")
 	g.builder.CreateUnreachable()
 
@@ -1021,6 +1031,9 @@ func (g *Generator) genCallExpr(n ast.NodeIndex) llvm.Value {
 	}
 	if g.isBuiltinCall(calleeNode, "len") {
 		return g.genLenCall(argNodes[0])
+	}
+	if g.isBuiltinCall(calleeNode, "args") {
+		return g.genArgsCall()
 	}
 	if g.isConstructorCall(calleeNode) {
 		return g.genConstructorCall(calleeNode, argNodes)

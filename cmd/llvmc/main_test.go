@@ -336,6 +336,195 @@ func TestBinary_Failure(t *testing.T) {
 	}
 }
 
+// --- -o (AOT compilation to a native executable) tests. Every "run the
+// resulting binary directly" test below invokes the AOT-compiled .exe as a
+// completely separate process, with llvmcPath nowhere in that particular
+// exec.Command call - the real acceptance test for this feature: a
+// genuinely standalone, deployable binary, not just "the pipeline emitted an
+// object file".
+
+// aotCompile shells out to the real llvmc binary with -o against srcPath,
+// producing a fresh .exe in t.TempDir() and returning its path - failing the
+// test immediately if llvmc itself reports a non-zero exit (a compile or
+// link failure), since every test using this helper expects the AOT
+// compilation step itself to succeed.
+func aotCompile(t *testing.T, srcPath string) string {
+	t.Helper()
+	outPath := filepath.Join(t.TempDir(), "aot_out.exe")
+	cmd := exec.Command(llvmcPath, "-o", outPath, srcPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("llvmc -o %s %s failed: %v\n%s", outPath, srcPath, err, out)
+	}
+	return outPath
+}
+
+// TestBinary_AOT_HelloWorld is the primary acceptance test for -o: compile
+// examples/hello to a real .exe, then run that .exe directly (no llvmc, no
+// Go/LLVM toolchain in the loop at all) and confirm it prints "Hello,
+// World!" and exits 0 - a genuinely standalone, deployable binary.
+func TestBinary_AOT_HelloWorld(t *testing.T) {
+	exePath := aotCompile(t, "../../examples/hello/hello.llx")
+
+	out, err := exec.Command(exePath).Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			t.Fatalf("%s exited %v, stderr:\n%s", exePath, err, ee.Stderr)
+		}
+		t.Fatalf("running %s: %v", exePath, err)
+	}
+	if got := strings.TrimRight(string(out), "\r\n"); got != "Hello, World!" {
+		t.Errorf("stdout = %q, want %q", got, "Hello, World!")
+	}
+}
+
+// TestBinary_AOT_Features AOT-compiles examples/features and confirms
+// identical output/exit code to its JIT-executed behavior (see
+// TestBinary_MainExitCode) - proving -o doesn't change ordinary program
+// behavior, only how the result is produced/run.
+func TestBinary_AOT_Features(t *testing.T) {
+	exePath := aotCompile(t, "../../examples/features/features.llx")
+
+	cmd := exec.Command(exePath)
+	out, err := cmd.Output()
+	if err != nil {
+		ee, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("running %s: %v", exePath, err)
+		}
+		if ee.ExitCode() != 30 {
+			t.Fatalf("exit code = %d, want 30, stderr:\n%s", ee.ExitCode(), ee.Stderr)
+		}
+	} else {
+		t.Fatal("expected the AOT binary to exit 30, got exit 0")
+	}
+
+	normalized := strings.ReplaceAll(string(out), "\r\n", "\n")
+	normalized = strings.TrimRight(normalized, "\n")
+	if normalized != "10\n30\n100" {
+		t.Errorf("stdout = %q, want the lines 10, 30, 100", string(out))
+	}
+}
+
+// TestBinary_AOT_ExternFuncScopeTimer AOT-compiles examples/scope_timer -
+// exercising the `extern func` FFI feature (LANGUAGE.md's "External
+// functions (FFI)" section) - and confirms the resulting standalone .exe
+// runs correctly on its own, proving extern-bound Win32 API calls
+// (QueryPerformanceCounter/QueryPerformanceFrequency, kernel32.dll exports)
+// link and resolve correctly through gcc's own linker at build time, not
+// just the JIT's runtime process-symbol generator (see CODEGEN.md's
+// "External functions (FFI)" section: these are two genuinely different
+// resolution mechanisms, and this is the one test that actually exercises
+// the link-time path). The elapsed tick counts scope_timer itself prints
+// are inherently non-deterministic (real wall-clock-derived values), so this
+// only asserts the exe ran to completion, exited cleanly, and printed the
+// label/shape of output a successful run always produces - not exact tick
+// counts.
+func TestBinary_AOT_ExternFuncScopeTimer(t *testing.T) {
+	exePath := aotCompile(t, "../../examples/scope_timer/scope_timer.llx")
+
+	out, err := exec.Command(exePath).Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			t.Fatalf("%s exited %v, stderr:\n%s", exePath, err, ee.Stderr)
+		}
+		t.Fatalf("running %s: %v", exePath, err)
+	}
+
+	got := string(out)
+	if !strings.Contains(got, "slowWork") {
+		t.Errorf("stdout = %q, want it to contain the ScopeTimer destructor's \"slowWork\" label - extern QueryPerformanceCounter/Frequency calls must have resolved and run", got)
+	}
+	lines := strings.Split(strings.TrimRight(strings.ReplaceAll(got, "\r\n", "\n"), "\n"), "\n")
+	if len(lines) != 4 {
+		t.Errorf("stdout = %q, want exactly 4 lines (label, elapsed ticks, frequency, slowWork's own result)", got)
+	}
+}
+
+// TestBinary_AOT_Args writes a small scratch program calling the args()
+// builtin (see LANGUAGE.md's "The args() builtin" section), AOT-compiles it,
+// and runs the resulting .exe directly with real command-line arguments -
+// confirming args() sees the real OS argv (argv[0] the exe's own path,
+// argv[1:] the trailing arguments) when actually AOT-compiled and invoked as
+// a standalone process, distinct from (and a stronger guarantee than) the
+// JIT-execution path's own documented empty-slice fallback (see
+// TestArgsCallUnderJITReturnsEmptySlice, src/codegen/args_test.go).
+func TestBinary_AOT_Args(t *testing.T) {
+	src := `
+func main() int {
+	a := args()
+	print(len(a))
+	i := 0
+	for i < len(a) {
+		print(a[i])
+		i++
+	}
+	return 0
+}
+`
+	srcPath := filepath.Join(t.TempDir(), "args_prog.llx")
+	if err := os.WriteFile(srcPath, []byte(src), 0o644); err != nil {
+		t.Fatalf("writing temp source file: %v", err)
+	}
+	exePath := aotCompile(t, srcPath)
+
+	out, err := exec.Command(exePath, "foo", "bar baz").Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			t.Fatalf("%s exited %v, stderr:\n%s", exePath, err, ee.Stderr)
+		}
+		t.Fatalf("running %s: %v", exePath, err)
+	}
+
+	normalized := strings.ReplaceAll(string(out), "\r\n", "\n")
+	normalized = strings.TrimRight(normalized, "\n")
+	lines := strings.Split(normalized, "\n")
+	if len(lines) != 4 {
+		t.Fatalf("stdout = %q, want 4 lines (len, then 3 argv elements)", string(out))
+	}
+	if lines[0] != "3" {
+		t.Errorf("len(args()) = %q, want \"3\" (exe path + 2 trailing args)", lines[0])
+	}
+	if lines[1] != exePath {
+		t.Errorf("args()[0] = %q, want the exe's own path %q", lines[1], exePath)
+	}
+	if lines[2] != "foo" {
+		t.Errorf("args()[1] = %q, want %q", lines[2], "foo")
+	}
+	if lines[3] != "bar baz" {
+		t.Errorf("args()[2] = %q, want %q", lines[3], "bar baz")
+	}
+}
+
+// TestRun_EmitLLVMAndOutputMutuallyExclusive covers run's own usage-error
+// check: -emit-llvm and -o together is a usage error (exitUsage), not a
+// silent "one wins" - see the package doc comment's exit-code writeup.
+func TestRun_EmitLLVMAndOutputMutuallyExclusive(t *testing.T) {
+	var stderr bytes.Buffer
+	code := run([]string{"-emit-llvm", "-o", filepath.Join(t.TempDir(), "out.exe"), "../../examples/hello/hello.llx"}, &stderr)
+	if code != exitUsage {
+		t.Errorf("exit code = %d, want %d", code, exitUsage)
+	}
+	if !strings.Contains(stderr.String(), "mutually exclusive") {
+		t.Errorf("stderr = %q, want it to mention -emit-llvm/-o being mutually exclusive", stderr.String())
+	}
+}
+
+// TestRun_OutputLinkFailureIsCompileError covers -o's own link-failure exit
+// code (see the package doc comment): an output path inside a directory that
+// doesn't exist makes gcc's own link step fail - this must surface as
+// exitCompile with gcc's own error text on stderr, never a panic.
+func TestRun_OutputLinkFailureIsCompileError(t *testing.T) {
+	var stderr bytes.Buffer
+	badOutput := filepath.Join(t.TempDir(), "does-not-exist", "out.exe")
+	code := run([]string{"-o", badOutput, "../../examples/hello/hello.llx"}, &stderr)
+	if code != exitCompile {
+		t.Errorf("exit code = %d, want %d, stderr:\n%s", code, exitCompile, stderr.String())
+	}
+	if stderr.Len() == 0 {
+		t.Error("expected a link-failure message on stderr, got none")
+	}
+}
+
 // TestRun_MissingMainFunction covers a module with no `main` at all - the
 // pipeline succeeds all the way through codegen/verification, but there's
 // nothing to JIT-execute. Must fail cleanly (a diagnostic-shaped message,
