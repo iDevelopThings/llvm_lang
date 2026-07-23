@@ -236,6 +236,72 @@ func f() int {
 	}
 }
 
+// TestReturnThisEnablesMethodChaining covers the fluent/method-chaining
+// pattern `return this` unlocks (checkThisExpr, sema/typecheck.go, typing a
+// bare `this` as *T instead of the bare struct type): a method returning
+// *Point via `return this`, called twice in a chain
+// (`p.bump().bump()`-shaped), both calls mutating the same underlying
+// receiver - real proof `this` returned as a value is still the identical
+// pointer the receiver itself is, not some copy.
+func TestReturnThisEnablesMethodChaining(t *testing.T) {
+	jm := compileAndJIT(t, `
+struct Point {
+	x int
+	y int
+
+	constructor(px int, py int) {
+		this.x = px
+		this.y = py
+	}
+}
+
+func (Point) bump() *Point {
+	this.x = this.x + 1
+	this.y = this.y + 1
+	return this
+}
+
+func f() int {
+	p := new Point(1, 2)
+	p.bump().bump()
+	return p.x + p.y
+}
+`)
+	if got := jm.runInt32(t, "f"); got != 7 {
+		t.Errorf("f() = %d, want 7 (1+2 -> 2+3 -> 3+4)", got)
+	}
+}
+
+// TestThisAssignableToPointerLocal covers `x := this` inside a method body -
+// a bare `this` used as an ordinary value, assigned into a plain *T local -
+// and confirms the resulting local really is the same receiver address (a
+// mutation through it is visible via the original receiver-mutating path).
+func TestThisAssignableToPointerLocal(t *testing.T) {
+	jm := compileAndJIT(t, `
+struct Point {
+	x int
+
+	constructor(px int) {
+		this.x = px
+	}
+}
+
+func (Point) selfSetX(v int) {
+	p := this
+	p.x = v
+}
+
+func f() int {
+	pt := new Point(1)
+	pt.selfSetX(99)
+	return pt.x
+}
+`)
+	if got := jm.runInt32(t, "f"); got != 99 {
+		t.Errorf("f() = %d, want 99 (x := this must alias the same receiver)", got)
+	}
+}
+
 // TestNilPointerComparison covers `nil` lowering to a real null pointer
 // constant, comparing equal/not-equal correctly both before and after a
 // pointer variable is assigned a real address.

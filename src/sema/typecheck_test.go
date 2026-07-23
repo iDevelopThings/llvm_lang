@@ -671,6 +671,34 @@ func TestStructCompositeLitMixedFormsIsError(t *testing.T) {
 	expectCheckErrors(t, pointSrc+"var p Point = Point{1, y: 2}\n", 1)
 }
 
+// TestEmptyStructCompositeLitOk covers the fix for a fully-empty composite
+// literal (`T{}`): checkStructCompositeLit's own arity check
+// (`len(elems) != len(fields)`) always misfired against it before, since
+// `keyed` short-circuits false for zero elements and 0 != len(fields) for
+// any struct with at least one field. `T{}` must be unconditionally valid,
+// zero-filling every field - it vacuously satisfies both the positional and
+// keyed interpretations.
+func TestEmptyStructCompositeLitOk(t *testing.T) {
+	checkSrc(t, pointSrc+"var p Point = Point{}\n")
+}
+
+// TestEmptyStructCompositeLitOkSingleField covers the same fix against a
+// single-field struct - `len(fields) == 1`, so the old bug's arity check
+// (`0 != 1`) would have misfired here too, same as the multi-field case.
+func TestEmptyStructCompositeLitOkSingleField(t *testing.T) {
+	src := "struct Solo {\n\tx int\n}\n" + "var s Solo = Solo{}\n"
+	checkSrc(t, src)
+}
+
+// TestEmptyStructCompositeLitOkSamePackage is the same case reached through
+// a local variable inside a function rather than a top-level var, and
+// through `:=` rather than a declared-type var - confirms the fix isn't
+// somehow specific to one particular composite-literal call site.
+func TestEmptyStructCompositeLitOkSamePackage(t *testing.T) {
+	src := pointSrc + "func f() {\n\tp := Point{}\n}\n"
+	checkSrc(t, src)
+}
+
 func TestMemberExprFieldAccessResolvesAndTypes(t *testing.T) {
 	src := pointSrc + "func f() {\n\tp := Point{1, 2}\n\tvar a int = p.x\n}\n"
 	tree, info := checkSrc(t, src)
@@ -713,6 +741,13 @@ const pointWithMoveSrc = pointSrc +
 	"\tthis.y = this.y + dy\n" +
 	"}\n"
 
+// TestThisTypedAsReceiverStruct asserts `this`'s own bare type is *Point
+// (TypePointer wrapping the receiver struct), not the bare struct type -
+// checkThisExpr, sema/typecheck.go - matching what `this` already, literally
+// is at the codegen level (the receiver parameter itself, a real pointer, no
+// alloca of its own - see CODEGEN.md's "Method receivers" section). This is
+// what makes `return this`/`x := this`/passing `this` as a *T argument
+// type-check at all.
 func TestThisTypedAsReceiverStruct(t *testing.T) {
 	tree, info := checkSrc(t, pointWithMoveSrc)
 	methodDecl := tree.Children(tree.Root)[1]
@@ -722,9 +757,46 @@ func TestThisTypedAsReceiverStruct(t *testing.T) {
 	thisExpr := tree.Child(member, 0) // this
 
 	got := info.Types[thisExpr]
-	if got.Kind != TypeStruct || got.Struct.Symbol.Name != "Point" {
-		t.Errorf("Types[this] = %v, want struct Point", got)
+	if got.Kind != TypePointer || got.Elem == nil || got.Elem.Kind != TypeStruct || got.Elem.Struct.Symbol.Name != "Point" {
+		t.Errorf("Types[this] = %v, want *Point", got)
 	}
+}
+
+// TestThisFieldAndMethodAccessStillWorkAsPointer is a regression test for
+// checkThisExpr's TypePointer change above: resolveMember's generic
+// TypePointer auto-deref (the same mechanism an ordinary *T-typed local
+// already goes through) must keep making this.field/this.method() work
+// completely unchanged.
+func TestThisFieldAndMethodAccessStillWorkAsPointer(t *testing.T) {
+	src := pointWithMoveSrc + "func f() {\n\tp := Point{1, 2}\n\tp.move(1, 1)\n\tvar a int = p.x\n}\n"
+	checkSrc(t, src)
+}
+
+// TestReturnThisTypeChecksAgainstPointerReturnType covers `return this` from
+// a method declaring a `*T` return type - the concrete motivating case for
+// checkThisExpr's TypePointer change: previously this was rejected
+// ("cannot use Point as *Point in return statement") even though `this` is
+// already, literally, a pointer at the codegen level.
+func TestReturnThisTypeChecksAgainstPointerReturnType(t *testing.T) {
+	src := pointSrc + "func (Point) self() *Point {\n\treturn this\n}\n"
+	checkSrc(t, src)
+}
+
+// TestThisAssignableToPointerLocalVar covers `this` assigned into a plain
+// `*T`-typed local (`x := this`) - a bare `this` used as an ordinary value,
+// not through `.field`/`.method()`.
+func TestThisAssignableToPointerLocalVar(t *testing.T) {
+	src := pointSrc + "func (Point) self() {\n\tp := this\n\tvar q *Point = p\n}\n"
+	checkSrc(t, src)
+}
+
+// TestThisPassableAsPointerArgument covers `this` passed directly as a
+// `*T`-typed function argument.
+func TestThisPassableAsPointerArgument(t *testing.T) {
+	src := pointSrc +
+		"func identity(p *Point) *Point {\n\treturn p\n}\n" +
+		"func (Point) self() *Point {\n\treturn identity(this)\n}\n"
+	checkSrc(t, src)
 }
 
 func TestMethodCallOk(t *testing.T) {

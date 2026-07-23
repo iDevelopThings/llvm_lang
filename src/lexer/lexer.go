@@ -282,7 +282,8 @@ func asiEligible(t Token) bool {
 			enums.Keywords.Continue,
 			enums.Keywords.Return,
 			enums.Keywords.True,
-			enums.Keywords.False:
+			enums.Keywords.False,
+			enums.Keywords.This:
 			return true
 		default:
 			return false

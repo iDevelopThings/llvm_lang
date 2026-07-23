@@ -636,8 +636,22 @@ func (g *Generator) genExpr(n ast.NodeIndex) llvm.Value {
 			return llvm.ConstNull(g.ptrTy)
 		}
 		return g.genLoad(n)
-	case enums.NodeKinds.MemberExpr, enums.NodeKinds.IndexExpr, enums.NodeKinds.ThisExpr:
+	case enums.NodeKinds.MemberExpr, enums.NodeKinds.IndexExpr:
 		return g.genLoad(n)
+	case enums.NodeKinds.ThisExpr:
+		// `this` is typed *T now (checkThisExpr, sema/typecheck.go), matching
+		// what it already is at this level: the receiver parameter itself, a
+		// real pointer value with no alloca/storage of its own (see genAddr's
+		// own ThisExpr case, and CODEGEN.md's "Method receivers" section).
+		// genLoad's generic "genAddr then load" shape assumes its address is
+		// storage holding the value - true for an Ident/MemberExpr/IndexExpr,
+		// but not for `this`: genAddr(ThisExpr) already returns g.curReceiver
+		// (the pointer value itself), so loading through it again would
+		// dereference one indirection too many, reading the receiver's own
+		// first field's bytes as if they were the pointer. A bare `this` used
+		// as an ordinary value (`return this`, `x := this`, an argument) just
+		// needs that same pointer value directly, no load at all.
+		return g.curReceiver
 	case enums.NodeKinds.SliceExpr:
 		return g.genSliceExpr(n)
 	case enums.NodeKinds.NumberLit:

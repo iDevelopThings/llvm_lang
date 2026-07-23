@@ -290,6 +290,40 @@ func main() int {
 	requireDiagContaining(t, resolveAndCheckProgram(t, units), "not exported")
 }
 
+// TestImports_EmptyLiteralAllowedDespiteUnexportedField covers the fix for a
+// fully-empty composite literal (`T{}`, checkStructCompositeLit,
+// sema/typecheck.go): unlike a real positional literal
+// (TestImports_PositionalLiteralRejectedForUnexportedField above), `pkg.
+// Point{}` from another package must be legal even though Point has an
+// unexported field - providing zero values isn't "setting" anything the way
+// a positional literal with actual values would be, so the empty case skips
+// crossPackageStructConstruction's unexported-field check entirely, the same
+// way it skips the arity check.
+func TestImports_EmptyLiteralAllowedDespiteUnexportedField(t *testing.T) {
+	shapesTree := mustParseFile(t, "shapes/point.llx", "struct Point {\n\tX int\n\tsecret int\n}\n")
+	mainTree := mustParseFile(t, "app/main.llx", `import "./shapes"
+
+func main() {
+	p := shapes.Point{}
+	print(p.X)
+}
+`)
+
+	units := []*PackageUnit{
+		{Key: "shapes", Name: "shapes", Trees: []*ast.Tree{shapesTree}},
+		{
+			Key:   "app",
+			Name:  "app",
+			Trees: []*ast.Tree{mainTree},
+			FileImports: map[*ast.Tree][]FileImport{
+				mainTree: {{LocalName: "shapes", TargetKey: "shapes"}},
+			},
+		},
+	}
+
+	requireNoDiags(t, resolveAndCheckProgram(t, units))
+}
+
 // TestImports_SamePackageCaseInsensitivityStillHolds is a regression check:
 // within one package (even when checked via the new ResolveProgram/
 // CheckProgram multi-package path, not just plain ResolvePackage/

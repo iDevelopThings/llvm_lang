@@ -54,6 +54,54 @@ func onlyX() int {
 	}
 }
 
+// TestEmptyStructLiteralZeroFillsAllFields covers `T{}` - a fully-empty
+// composite literal (sema/typecheck.go's checkStructCompositeLit special-
+// cases len(elems)==0 as unconditionally valid) - actually zero-filling
+// every field at the codegen level too, not just compiling: genCompositeLitInto
+// already zero-fills every field unconditionally before ever looking at
+// elems, so an empty elems list should read back as all-zero without any
+// extra codegen work, but this proves it rather than assuming it.
+func TestEmptyStructLiteralZeroFillsAllFields(t *testing.T) {
+	jm := compileAndJIT(t, `
+struct Point {
+	x int
+	y int
+}
+
+func f() int {
+	p := Point{}
+	return p.x + p.y
+}
+`)
+	if got := jm.runInt32(t, "f"); got != 0 {
+		t.Errorf("f() = %d, want 0 (Point{} must zero-fill every field)", got)
+	}
+}
+
+// TestEmptyStructLiteralWithNonZeroFieldsAfterAssign is a stronger variant of
+// the above - confirms the zero-filled fields are real, individually
+// addressable storage (not, say, some shared zero-value constant aliasing
+// multiple instances), by constructing two independent Point{} values,
+// mutating one, and reading both back.
+func TestEmptyStructLiteralWithNonZeroFieldsAfterAssign(t *testing.T) {
+	jm := compileAndJIT(t, `
+struct Point {
+	x int
+	y int
+}
+
+func f() int {
+	a := Point{}
+	b := Point{}
+	a.x = 5
+	return a.x + a.y + b.x + b.y
+}
+`)
+	if got := jm.runInt32(t, "f"); got != 5 {
+		t.Errorf("f() = %d, want 5 (a.x=5, everything else zero, b unaffected)", got)
+	}
+}
+
 // TestArrayIndexing covers fixed-size array element load/store via GEP, and
 // an array composite literal.
 func TestArrayIndexing(t *testing.T) {

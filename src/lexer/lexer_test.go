@@ -73,6 +73,30 @@ func TestVarDeclAndASI(t *testing.T) {
 	})
 }
 
+// TestThisTriggersASI covers asiEligible's `this` keyword case (added
+// alongside sema's checkThisExpr change letting a bare `this` be used as an
+// ordinary value - see AGENTS.md/LANGUAGE.md): a newline right after a bare
+// `this` must insert a virtual semicolon exactly like it already does after
+// `break`/`continue`/`return`/`true`/`false` - otherwise a statement like
+// `p := this` followed by another statement on the next line would never
+// get a separator between them at all.
+func TestThisTriggersASI(t *testing.T) {
+	toks, file := collect(t, "p := this\nq := 1\n")
+	L := enums.Lexemes
+	K := enums.Keywords
+	check(t, toks, file, []wantTok{
+		{L.Identifier, "", "p"},
+		{L.ColonEqual, "", ":="},
+		{L.Identifier, K.This, "this"},
+		{L.Semicolon, "", ""}, // inserted
+		{L.Identifier, "", "q"},
+		{L.ColonEqual, "", ":="},
+		{L.Number, "", "1"},
+		{L.Semicolon, "", ""}, // inserted
+		{L.EOF, "", ""},
+	})
+}
+
 func TestWalrusAndBinaryOp(t *testing.T) {
 	toks, file := collect(t, "c := a + b\n")
 	L := enums.Lexemes

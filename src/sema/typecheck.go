@@ -1483,7 +1483,22 @@ func (c *checker) typeOfSymbolValue(n ast.NodeIndex, sym *Symbol) Type {
 	}
 }
 
-// checkThisExpr types `this` as the enclosing method's receiver struct.
+// checkThisExpr types `this` as a pointer to the enclosing method's receiver
+// struct (`*T`, never the bare struct type) - matching what `this` already,
+// literally is at the codegen level: the receiver parameter itself, a real
+// pointer, no alloca of its own (see CODEGEN.md's "Method receivers"
+// section). This is what makes `return this`/`x := this`/passing `this` as
+// a `*T`-typed argument type-check - a bare `this` used as an ordinary value
+// couldn't be expressed at all before this, only `.field`/`.method()` access
+// through it. It does NOT change the receiver-declaration syntax itself
+// (`func (T) Method()` stays receiver-less, no `*` - see LANGUAGE.md's
+// "Structs" section); it's purely about the type of a bare `this` value.
+//
+// resolveMember's own generic `TypePointer` auto-deref (used for all
+// `.field`/`.method()` access, same mechanism an ordinary `*T`-typed local
+// already goes through) means `this.field`/`this.method(...)` keep working
+// completely unchanged - see checkThisExprRegression-style tests.
+//
 // sym.Decl is that struct's own StructDecl node (see resolve.go's
 // fnScope.Receiver construction), not a variable declaration, so this
 // doesn't go through declType.
@@ -1502,8 +1517,11 @@ func (c *checker) checkThisExpr(n ast.NodeIndex) Type {
 		return invalidType
 	}
 	return Type{
-		Kind:   TypeStruct,
-		Struct: info,
+		Kind: TypePointer,
+		Elem: &Type{
+			Kind:   TypeStruct,
+			Struct: info,
+		},
 	}
 }
 
@@ -2785,6 +2803,21 @@ func (c *checker) checkCompositeLitElemFallback(elem ast.NodeIndex) {
 // field may be specified twice.
 func (c *checker) checkStructCompositeLit(n ast.NodeIndex, target Type, elems []ast.NodeIndex) {
 	info := target.Struct
+
+	// A fully-empty literal (`T{}`) is unconditionally valid and simply
+	// zero-fills every field - it vacuously satisfies both the positional
+	// and keyed interpretations (there's nothing to check either way), so
+	// it skips both the cross-package-unexported check and the arity check
+	// below entirely, same as Go's own "zero value via T{}" idiom. This
+	// holds even across a package boundary with unexported fields present:
+	// supplying zero values isn't "setting" anything the way a real
+	// positional literal with actual values would be, unlike the (still
+	// correct) rule just below that rejects a positional literal with real
+	// values against a struct with any unexported field.
+	if len(elems) == 0 {
+		return
+	}
+
 	// The struct's own Field nodes live in its declaring file, which may
 	// differ from n's own file (a composite literal naming a struct
 	// declared elsewhere in the package - see LANGUAGE.md's "Multi-file
@@ -2792,7 +2825,7 @@ func (c *checker) checkStructCompositeLit(n ast.NodeIndex, target Type, elems []
 	restore := c.pushTree(info.Symbol.Tree)
 	fields := c.tree.StructFields(info.Symbol.Decl) // Field nodes, declaration order
 	restore()
-	keyed := len(elems) > 0 && c.tree.IsKeyedElement(elems[0])
+	keyed := c.tree.IsKeyedElement(elems[0])
 
 	// Go's own stricter rule for a *positional* literal constructing a
 	// struct from another package: reject it if the struct has ANY
