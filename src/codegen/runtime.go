@@ -193,13 +193,38 @@ func (g *Generator) callPrintf(args []llvm.Value) llvm.Value {
 	return call
 }
 
-// arenaChunkSize is the size (in bytes) of one block the arena grows by via
-// malloc - see setupArena's doc comment for the full design. A single
-// request bigger than this still gets served (its own oversized block, sized
-// to fit exactly), so nothing is ever rejected for being "too big for the
-// arena" - this only controls how often a normal small request has to grow
-// the arena at all.
+// arenaChunkSize is the size (in bytes) of the *first* block the arena grows
+// by via malloc - see setupArena's doc comment for the full design. A single
+// request bigger than the *current* tracked chunk size still gets served (its
+// own oversized block, sized to fit exactly), so nothing is ever rejected for
+// being "too big for the arena" - this only controls how big the very first
+// normal growth event is; every subsequent normal growth event doubles from
+// here (see arenaChunkMaxSize, and `.arena.next_chunk_size` below).
 const arenaChunkSize = 64 * 1024
+
+// arenaChunkMaxSize caps the geometric doubling `.arena.next_chunk_size`
+// undergoes on every normal (non-oversized) growth event - without a ceiling,
+// a very long-running, sustained-allocation-pressure program would eventually
+// request single malloc blocks of an absurd size for no real benefit once
+// per-malloc overhead is already thoroughly amortized.
+//
+// 64MiB was chosen empirically, not arbitrarily: the investigation that
+// motivated this whole change (see DECISIONS.md's dated entry) measured a
+// 50,000-iteration `s = s + "x"` string-concatenation loop - a real,
+// sustained-allocation-pressure workload with ~1.25GB of *cumulative*
+// allocation volume over its lifetime (every intermediate string's size
+// summed, the classic O(n^2) naive-immutable-string-concat pattern) - going
+// from ~683ms (the original fixed 64KiB-chunk behavior, ~19,000 real malloc
+// calls) to ~400ms with a temporarily-hardcoded 16MiB chunk size, and to
+// ~313-344ms with a temporarily-hardcoded 128MiB chunk size (closing most of
+// the remaining gap to Go's own naive-`+=` baseline of ~243ms on the same
+// workload). 64MiB sits between those two experimental data points -
+// comfortably capturing most of the realistic win a bigger chunk buys before
+// diminishing returns set in, without going as far as 128MiB (which starts
+// reserving genuinely large blocks for a workload with no guarantee it will
+// ever fill them, given the arena never reclaims an abandoned block's unused
+// tail).
+const arenaChunkMaxSize = 64 * 1024 * 1024
 
 // setupArena builds this module's single bump allocator: a generated LLVM
 // function (`llvm_lang.arena_alloc`, not a libc call) that every heap-needing
@@ -209,24 +234,41 @@ const arenaChunkSize = 64 * 1024
 //
 // Design: one process-lifetime arena, growing in malloc'd chunks (never
 // freed - there is still no GC/`free` in this language; this remains a real,
-// intentional leak overall, exactly as before - see BLOCKERS.md). Two
+// intentional leak overall, exactly as before - see BLOCKERS.md). Three
 // mutable globals hold the arena's live state:
 //   - `.arena.cursor` - a pointer to the next free byte in the current block.
 //   - `.arena.remaining` - how many bytes are left in that block.
+//   - `.arena.next_chunk_size` - how big the *next* normal (non-oversized)
+//     growth event's block should be. Starts at arenaChunkSize (64KiB) and
+//     doubles (capped at arenaChunkMaxSize) every time it's actually used to
+//     size a normal growth block - see DECISIONS.md's dated entry for the
+//     empirical investigation (a sustained-allocation-pressure workload
+//     churning through ~19,000 real malloc calls at a fixed 64KiB chunk size)
+//     that motivated replacing the old fixed-chunk-size scheme with this
+//     geometric one, mirroring the exact same amortized-doubling strategy
+//     this project's own dynamic-array `append` already uses (see
+//     LANGUAGE.md's "Dynamic arrays" section).
 //
 // Allocating size bytes: if the current block doesn't have size bytes left,
-// malloc a fresh block first (sized to arenaChunkSize, or exactly size for a
-// single request bigger than that) and point the arena at it - whatever was
-// left in the old block is simply abandoned, not reclaimed (a real, accepted
-// waste in the name of never needing a free/realloc-in-place dance). Either
-// way, the cursor is then bumped forward by size and the pre-bump address
-// handed back as the allocation.
+// malloc a fresh block first - sized to the *current* `.arena.next_chunk_size`
+// for an ordinary request, or exactly size for a single request bigger than
+// that (an oversized one-off) - and point the arena at it; whatever was left
+// in the old block is simply abandoned, not reclaimed (a real, accepted waste
+// in the name of never needing a free/realloc-in-place dance). Only the
+// ordinary (non-oversized) path advances `.arena.next_chunk_size` afterward
+// (doubled, capped at arenaChunkMaxSize) - a one-off oversized request is
+// served at exactly its own size and otherwise left to not disturb the
+// tracked baseline at all, so a single unusually large allocation can't
+// permanently balloon every later *ordinary* chunk for a program whose
+// steady-state allocation pattern never needs that again. Either way, the
+// cursor is then bumped forward by size and the pre-bump address handed back
+// as the allocation.
 //
 // This is deliberately not a general-purpose allocator: no per-allocation
 // header, no way to free a single allocation, no thread-safety (this
 // language has no concurrency yet). It only needs to satisfy "hand out
 // successive non-overlapping regions," which is exactly what every current
-// caller (string concatenation) needs.
+// caller (string concatenation, dynamic arrays, maps) needs.
 func (g *Generator) setupArena() {
 	g.arenaCursorGlobal = llvm.AddGlobal(g.mod, g.ptrTy, ".arena.cursor")
 	g.arenaCursorGlobal.SetInitializer(llvm.ConstNull(g.ptrTy))
@@ -235,6 +277,10 @@ func (g *Generator) setupArena() {
 	g.arenaRemainingGlobal = llvm.AddGlobal(g.mod, g.i64Ty, ".arena.remaining")
 	g.arenaRemainingGlobal.SetInitializer(llvm.ConstInt(g.i64Ty, 0, false))
 	g.arenaRemainingGlobal.SetLinkage(llvm.PrivateLinkage)
+
+	g.arenaNextChunkGlobal = llvm.AddGlobal(g.mod, g.i64Ty, ".arena.next_chunk_size")
+	g.arenaNextChunkGlobal.SetInitializer(llvm.ConstInt(g.i64Ty, arenaChunkSize, false))
+	g.arenaNextChunkGlobal.SetLinkage(llvm.PrivateLinkage)
 
 	g.arenaAllocType = llvm.FunctionType(g.ptrTy, []llvm.Type{g.i64Ty}, false)
 	fn := llvm.AddFunction(g.mod, "llvm_lang.arena_alloc", g.arenaAllocType)
@@ -252,12 +298,32 @@ func (g *Generator) setupArena() {
 	g.builder.CreateCondBr(fits, okBB, growBB)
 
 	g.builder.SetInsertPointAtEnd(growBB)
-	chunkConst := llvm.ConstInt(g.i64Ty, arenaChunkSize, false)
-	needsBigger := g.builder.CreateICmp(llvm.IntUGT, size, chunkConst, "")
-	blockSize := g.builder.CreateSelect(needsBigger, size, chunkConst, "")
+	chunkSize := g.builder.CreateLoad(g.i64Ty, g.arenaNextChunkGlobal, "")
+	needsBigger := g.builder.CreateICmp(llvm.IntUGT, size, chunkSize, "")
+	blockSize := g.builder.CreateSelect(needsBigger, size, chunkSize, "")
 	newBlock := g.builder.CreateCall(g.mallocType, g.mallocFn, []llvm.Value{blockSize}, "")
 	g.builder.CreateStore(newBlock, g.arenaCursorGlobal)
 	g.builder.CreateStore(blockSize, g.arenaRemainingGlobal)
+
+	// Only an ordinary (non-oversized) growth event advances the tracked
+	// baseline for the *next* growth event - see setupArena's own doc comment
+	// above for why an oversized one-off request deliberately leaves
+	// `.arena.next_chunk_size` unaffected. This whole block is branch-free
+	// (CreateSelect, not a real conditional store), matching this function's
+	// own needsBigger/blockSize pattern just above for style consistency, so
+	// the store on the last line below always executes - on the oversized
+	// path, newChunkSize below resolves to the exact same chunkSize value
+	// already loaded at the top of this block, making that particular store
+	// a genuine no-op (write-back of the unchanged value), not a skipped one;
+	// the *effect* on `.arena.next_chunk_size` is identical to not touching
+	// it at all. min(chunkSize*2, arenaChunkMaxSize) via CreateSelect+ICmp,
+	// same reasoning.
+	doubled := g.builder.CreateMul(chunkSize, llvm.ConstInt(g.i64Ty, 2, false), "")
+	maxChunk := llvm.ConstInt(g.i64Ty, arenaChunkMaxSize, false)
+	cappedDoubled := g.builder.CreateSelect(g.builder.CreateICmp(llvm.IntULT, doubled, maxChunk, ""), doubled, maxChunk, "")
+	newChunkSize := g.builder.CreateSelect(needsBigger, chunkSize, cappedDoubled, "")
+	g.builder.CreateStore(newChunkSize, g.arenaNextChunkGlobal)
+
 	g.builder.CreateBr(okBB)
 
 	g.builder.SetInsertPointAtEnd(okBB)

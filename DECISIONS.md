@@ -1442,3 +1442,84 @@ for the full design (including the `nobuiltin` fix's own write-up) and
 `BENCHMARKS.md`'s dated entry for the resulting `CompilePackage` end-to-end
 cost increase (real and expected - the actual price of the passes now
 genuinely running).
+
+---
+
+## 2026-07-23 - Arena allocator: geometric (doubling) chunk growth, not a fixed 64KiB every time
+
+**Decision:** replace `setupArena`'s fixed-size growth (every chunk after the
+first was another flat `arenaChunkSize`, 64KiB, forever) with geometric
+growth: a new mutable global, `.arena.next_chunk_size`, starts at
+`arenaChunkSize` and doubles on every *ordinary* (non-oversized) growth
+event, capped at a new `arenaChunkMaxSize` (64MiB). The starting chunk size
+itself is unchanged - this is purely about what happens on the *second* and
+every subsequent normal growth event, not the first one. An oversized
+one-off request (bigger than the current tracked chunk size) is still served
+at exactly its own size, same as before, and deliberately does **not**
+advance `.arena.next_chunk_size` - see `CODEGEN.md`'s "The arena allocator"
+section for the full mechanics and `src/codegen/runtime.go`'s own doc
+comments for the exact IR shape.
+
+**Why:** empirically root-caused, not theorized. A 50,000-iteration
+`s = s + "x"` loop (`examples`-style AOT benchmark, the classic O(n^2)
+naive-immutable-string-concat pattern - same shape as Go's own naive `+=`)
+was running about 2.8x slower than Go's own equally-naive `+=` on the
+identical workload - a real, unexplained-by-algorithm gap. Traced precisely:
+this benchmark's *cumulative* allocation volume (the arena never reuses
+anything, by design - see the "one process-lifetime bump allocator" entry
+above) is roughly 1.25GB over the whole loop (the sum of every intermediate
+string's own size, 1+2+...+50000 bytes). At a fixed 64KiB chunk size, that's
+about 19,000 real `malloc` calls over the course of one loop - confirmed
+directly by temporarily hardcoding `arenaChunkSize` to 16MiB (~683ms ->
+~400ms) and then to 128MiB (~313-344ms, closing most of the remaining gap to
+Go's own ~243ms baseline on the same workload), then reverting both
+experimental changes before implementing the real, permanent fix. The fixed
+small chunk size - not `memcpy` throughput, not codegen quality - was the
+dominant cost.
+
+**Why 64MiB specifically (not 16MiB or 128MiB):** the two manual experiments
+above bracket a real tradeoff. 128MiB gets closer to Go's own baseline, but
+means a long-running, allocation-heavy program keeps requesting genuinely
+large single blocks well past the point of real per-`malloc`-overhead
+benefit, with no way to reclaim an abandoned block's unused tail (the arena
+never frees - see above). 64MiB sits between the two experimental data
+points, capturing most of the realistic win a bigger chunk buys (post-fix,
+the same 50,000-iteration benchmark measured 355-474ms across repeated
+min-of-5 runs, comfortably inside the 313-442ms range the manual experiments
+found) without reserving as aggressively as 128MiB would for a workload with
+no guarantee it will ever need that much.
+
+**Why an oversized one-off deliberately doesn't touch the tracked
+baseline:** a single unusually large allocation (e.g. one big `make([]T, n)`
+call for an otherwise string-concatenation-light program) would otherwise
+permanently inflate every *later, ordinary* chunk for the rest of the
+program's run, even though its own steady-state allocation pattern never
+asked for anything that large again. Keeping the two paths - "ordinary,
+tracked-and-doubling" vs. "oversized, served-once-and-forgotten" - genuinely
+separate avoids that: only a real, sustained pattern of hitting the current
+chunk size (not one spike) grows the baseline for next time.
+
+**Verification given the severity class of a bug here** (silent heap
+corruption in the one allocator every heap-needing language feature routes
+through): beyond the standard `gofmt`/`go vet`/full `go test` sweep and a
+byte-identical regression diff across every example under `examples/`
+(before vs. after, same stdout and exit code for all 19), a dedicated
+correctness stress suite was added
+(`src/codegen/arena_growth_test.go`) specifically scaled to walk the *entire*
+geometric progression (64KiB through the 64MiB cap) via many small
+independent allocations, build one genuinely large (128MiB) single string via
+doubling with byte-exact content checks at start/middle/end (not just
+length), interleave small string concatenations with large dynamic-array
+append bursts, append 3,000,000 elements to a single dynamic array
+(verifying every element plus an `i64` closed-form checksum), and churn a
+20,000+5,000-key map through heavy insert/remove/insert cycles (verifying
+every surviving, removed, and newly-inserted key individually) - each
+deliberately checking real per-element/per-byte content, not just a final
+length or count. One of these tests was confirmed to actually fail (a real
+process crash, not a soft assertion failure) when a deliberate bug was
+temporarily reintroduced into the grow path's `needsBigger` comparison,
+before being reverted - confirming the suite doesn't just pass vacuously.
+
+**Status:** shipped. See `CODEGEN.md`'s "The arena allocator" section for the
+updated design and `src/codegen/runtime.go`'s `arenaChunkSize`/
+`arenaChunkMaxSize`/`setupArena` doc comments for the exact mechanics.

@@ -361,13 +361,17 @@ type Generator struct {
 
 	// The bump-allocator arena (see setupArena in runtime.go): a generated
 	// LLVM function every heap-needing string operation calls into instead of
-	// malloc directly, plus the two mutable globals backing its state (the
-	// current block's bump cursor and remaining byte count). See AGENTS.md's
+	// malloc directly, plus the mutable globals backing its state (the
+	// current block's bump cursor, remaining byte count, and the tracked
+	// baseline size the *next* normal growth chunk should use - see
+	// arenaChunkSize/arenaChunkMaxSize's own doc comments in runtime.go for
+	// the geometric-growth design this last global drives). See AGENTS.md's
 	// codegen section for the exact design.
 	arenaAllocType       llvm.Type
 	arenaAllocFn         llvm.Value
 	arenaCursorGlobal    llvm.Value
 	arenaRemainingGlobal llvm.Value
+	arenaNextChunkGlobal llvm.Value
 
 	// Struct/array printing (see genPrintStructValue/genPrintArrayValue in
 	// runtime.go) needs a handful of additional cached format-string

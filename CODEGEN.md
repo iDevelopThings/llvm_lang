@@ -130,18 +130,41 @@ should route through this same primitive rather than reintroducing scattered
 `malloc` calls. See `DECISIONS.md` for why this shape was chosen over the
 alternatives.
 
-Design: **one process-lifetime arena, growing in malloc'd chunks** (64KiB
-each, `arenaChunkSize`) - not a single fixed-size block reserved up front, and
-not a `malloc`-per-request scheme either. It's a real generated LLVM function
-(`llvm_lang.arena_alloc`, an internal-linkage function this package builds
-directly at `Generate` time - not a libc call), backed by two mutable
-globals: `.arena.cursor` (the next free byte in the current block) and
-`.arena.remaining` (how many bytes are left in it). Allocating `size` bytes:
-if the current block doesn't have `size` bytes left, `malloc` a fresh block
-first (`arenaChunkSize`, or exactly `size` for a single request bigger than
-that) and point the arena at it - whatever was left in the abandoned block is
-simply never reused, not reclaimed; then bump the cursor forward by `size`
-and hand back the pre-bump address.
+Design: **one process-lifetime arena, growing in malloc'd chunks that
+themselves grow geometrically** - not a single fixed-size block reserved up
+front, and not a `malloc`-per-request scheme either. It's a real generated
+LLVM function (`llvm_lang.arena_alloc`, an internal-linkage function this
+package builds directly at `Generate` time - not a libc call), backed by
+three mutable globals: `.arena.cursor` (the next free byte in the current
+block), `.arena.remaining` (how many bytes are left in it), and
+`.arena.next_chunk_size` (how big the *next ordinary* growth chunk should be).
+
+The *first* chunk is always `arenaChunkSize` (64KiB) - unchanged from the
+original design, and still the right size for a program that never puts real
+allocation pressure on the arena. Every *ordinary* (non-oversized) growth
+event after that doubles `.arena.next_chunk_size` for next time, capped at
+`arenaChunkMaxSize` (64MiB - see that constant's own doc comment in
+`runtime.go` for the empirical benchmark data behind this exact number):
+64KiB, 128KiB, 256KiB, ... up to 64MiB, then steady at 64MiB. This mirrors
+the same amortized-doubling strategy this project's own dynamic-array
+`append` already uses (see `LANGUAGE.md`'s "Dynamic arrays" section) - small
+programs still start cheap, but a program under sustained allocation pressure
+(the classic `s = s + "x"`-in-a-loop pattern - see `DECISIONS.md`'s dated
+entry on the investigation that motivated this) gets progressively bigger
+chunks instead of paying for thousands of tiny `malloc` calls one at a time.
+
+Allocating `size` bytes: if the current block doesn't have `size` bytes left,
+`malloc` a fresh block first - sized to the *current* `.arena.next_chunk_size`
+for an ordinary request, or exactly `size` for a single request bigger than
+that (an oversized one-off, unrelated to the tracked chunk-size progression -
+see below) - and point the arena at it; whatever was left in the abandoned
+block is simply never reused, not reclaimed. Only the ordinary path advances
+`.arena.next_chunk_size` afterward; an oversized request is served at exactly
+its own size and leaves the tracked baseline completely untouched, so one
+unusually large allocation can't permanently balloon every later *ordinary*
+chunk for a program whose steady-state pattern never needs that again. Either
+way, the cursor is then bumped forward by `size` and the pre-bump address
+handed back as the allocation.
 
 This remains a real, intentional memory leak overall - **no per-allocation
 free, no GC, no refcounting** - exactly as before, just centralized behind
