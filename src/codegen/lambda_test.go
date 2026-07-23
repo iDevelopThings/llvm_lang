@@ -293,6 +293,171 @@ func runBoxAdder(v int, base int, x int) int {
 // module verifier (a mismatched call-site/callee signature) or - worse -
 // silently corrupt the stack/registers at runtime instead of crashing
 // cleanly.
+// TestForLoopCapturedHeaderVariableGetsPerIterationValue covers this
+// project's Go 1.22+-style per-iteration for-loop variable semantics (see
+// genForStmt, stmt.go, and LANGUAGE.md's "Lambdas" section): a closure
+// created inside a for-loop's body, capturing the loop's OWN header
+// variable (declared in its init clause), must see the value that variable
+// held at the moment that particular closure was created - not whatever
+// i++ mutates it to by the time the closure is actually called. Every
+// closure is stashed into a slice first and only called afterward
+// (folding all five results into one decimal number, sum = sum*10 +
+// fns[j](), the same "avoid a JIT harness that can only call one named
+// function" trick TestClosureCapturesByReferenceAcrossCalls above already
+// uses) specifically so a call happening well after i has advanced past
+// every value is exactly what's being exercised - the pre-fix, shared-slot
+// behavior would fold every one of the five calls to 5 (Go's own classic
+// closures-in-a-loop gotcha: 55555), not 01234 (1234).
+func TestForLoopCapturedHeaderVariableGetsPerIterationValue(t *testing.T) {
+	jm := compileAndJIT(t, `
+func buildAndFold() int {
+	fns := make([]func() int, 0)
+	for i := 0; i < 5; i++ {
+		fns = append(fns, func() int { return i })
+	}
+	sum := 0
+	j := 0
+	for j < len(fns) {
+		sum = sum*10 + fns[j]()
+		j++
+	}
+	return sum
+}
+`)
+
+	if got := jm.runInt32(t, "buildAndFold"); got != 1234 {
+		t.Errorf("buildAndFold() = %d, want 1234 (0,1,2,3,4 - each closure's own iteration value)", got)
+	}
+}
+
+// TestForLoopBodyLocalCaptureStillFreshEachIteration is the regression
+// counterpart to TestForLoopCapturedHeaderVariableGetsPerIterationValue: a
+// fresh local declared directly in the loop's own body (`captured := i`)
+// and captured instead of the header variable itself was already correct
+// before this fix (its own ShortVarDecl sits inside bodyBB, so its
+// arena_alloc call already re-executes fresh every dynamic iteration - see
+// genForStmt's own doc comment) and must produce the exact same result,
+// completely unaffected by the new per-iteration hand-off logic (this
+// path never touches it at all: sym here is never the for-loop's own
+// header symbol).
+func TestForLoopBodyLocalCaptureStillFreshEachIteration(t *testing.T) {
+	jm := compileAndJIT(t, `
+func buildAndFoldBodyLocal() int {
+	fns := make([]func() int, 0)
+	for i := 0; i < 5; i++ {
+		captured := i
+		fns = append(fns, func() int { return captured })
+	}
+	sum := 0
+	j := 0
+	for j < len(fns) {
+		sum = sum*10 + fns[j]()
+		j++
+	}
+	return sum
+}
+`)
+
+	if got := jm.runInt32(t, "buildAndFoldBodyLocal"); got != 1234 {
+		t.Errorf("buildAndFoldBodyLocal() = %d, want 1234 (0,1,2,3,4)", got)
+	}
+}
+
+// TestForLoopContinueStillPropagatesCapturedHeaderVariable covers `continue`
+// interacting with the per-iteration hand-off (genForStmt's postBB-entry
+// copy-back, which continueTarget routes every `continue` through): i=0 and
+// i=1 each append a closure over their own iteration value; at i==2, the
+// body itself reassigns i to 10 before continuing - that body-side mutation
+// must still reach the post-clause's own i++ (making it 11, so 11<5 is
+// false and the loop ends there), exactly as it would have before this fix.
+// Only two closures ever get appended, over 0 and 1.
+func TestForLoopContinueStillPropagatesCapturedHeaderVariable(t *testing.T) {
+	jm := compileAndJIT(t, `
+func buildAndFoldContinue() int {
+	fns := make([]func() int, 0)
+	for i := 0; i < 5; i++ {
+		if i == 2 {
+			i = 10
+			continue
+		}
+		fns = append(fns, func() int { return i })
+	}
+	sum := 0
+	j := 0
+	for j < len(fns) {
+		sum = sum*10 + fns[j]()
+		j++
+	}
+	return sum
+}
+`)
+
+	if got := jm.runInt32(t, "buildAndFoldContinue"); got != 1 {
+		t.Errorf("buildAndFoldContinue() = %d, want 1 (closures over 0 and 1 only)", got)
+	}
+}
+
+// TestForLoopBreakStillExitsCleanlyWithCapturedHeaderVariable covers
+// `break` alongside the per-iteration hand-off: break branches straight to
+// endBB, bypassing postBB (and so the copy-back hand-off) entirely - this
+// must still exit cleanly with exactly the closures captured before the
+// break (over 0, 1, and 2), no dangling/incorrect state.
+func TestForLoopBreakStillExitsCleanlyWithCapturedHeaderVariable(t *testing.T) {
+	jm := compileAndJIT(t, `
+func buildAndFoldBreak() int {
+	fns := make([]func() int, 0)
+	for i := 0; i < 10; i++ {
+		if i == 3 {
+			break
+		}
+		fns = append(fns, func() int { return i })
+	}
+	sum := 0
+	j := 0
+	for j < len(fns) {
+		sum = sum*10 + fns[j]()
+		j++
+	}
+	return sum
+}
+`)
+
+	if got := jm.runInt32(t, "buildAndFoldBreak"); got != 12 {
+		t.Errorf("buildAndFoldBreak() = %d, want 12 (closures over 0, 1, 2)", got)
+	}
+}
+
+// TestNestedForLoopsEachTrackOwnCapturedHeaderVariable covers an inner
+// for-loop's own captured header variable nested inside an outer one - each
+// level's per-iteration hand-off (loopVarSym/loopVarOrigAddr/loopVarType/
+// loopVarEligible in genForStmt are plain call-local variables, not
+// Generator fields) must track its own independent state via ordinary Go
+// recursion, with zero cross-contamination between the two levels: every
+// closure captures both i (outer) and j (inner), each at its own iteration.
+func TestNestedForLoopsEachTrackOwnCapturedHeaderVariable(t *testing.T) {
+	jm := compileAndJIT(t, `
+func buildAndFoldNested() int {
+	fns := make([]func() int, 0)
+	for i := 0; i < 2; i++ {
+		for j := 0; j < 3; j++ {
+			fns = append(fns, func() int { return i*10 + j })
+		}
+	}
+	sum := 0
+	k := 0
+	for k < len(fns) {
+		sum = sum*100 + fns[k]()
+		k++
+	}
+	return sum
+}
+`)
+
+	if got := jm.runInt32(t, "buildAndFoldNested"); got != 102101112 {
+		t.Errorf("buildAndFoldNested() = %d, want 102101112 (0,1,2,10,11,12)", got)
+	}
+}
+
 func TestUniformAbiAcrossPlainFunctionAndLambda(t *testing.T) {
 	jm := compileAndJIT(t, `
 func add(x int, y int) int {

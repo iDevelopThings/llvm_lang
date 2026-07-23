@@ -719,3 +719,65 @@ bringing its own call mechanism regardless of which one it used.
 
 **Status:** shipped. See `CODEGEN.md`'s "Global `var` initializers" and "A
 non-obvious disposal detail" sections for the mechanics.
+
+---
+
+## 2026-07-23 - For-loop header variables: per-iteration capture (Go 1.22+), diverging from this project's own prior implicit behavior
+
+**Decision:** a `for` loop's own init-clause variable (`for i := 0; ...;
+i++`), when captured by a lambda created inside the loop's body, now gets a
+fresh per-iteration value - confirmed with the project owner as a deliberate
+divergence from this project's own prior, pre-1.22-Go-style behavior (one
+shared slot, mutated in place by the post-clause, observed at whatever value
+it holds when the closure is finally called) to match modern Go instead.
+
+**Why:** the shared-slot behavior is exactly Go's own infamous
+closures-in-a-loop gotcha - confirmed by manual dogfooding here too, not
+hypothetical: `for i := 0; i < 5; i++ { fns = append(fns, func() int {
+return i }) }` printed `5,5,5,5,5` (every closure sharing one slot the loop's
+own `i++` had already driven to its final value) instead of the obviously-
+intended `0,1,2,3,4`. Go itself changed this exact behavior in 1.22 (each
+iteration gets its own variable) specifically because it was such a common,
+confusing footgun; there was no reason for a brand-new language to
+deliberately re-introduce a mistake an established one already spent years
+walking back. The root cause was purely a codegen accident, not a deliberate
+semantic choice up to this point: `genForStmt` (`src/codegen/stmt.go`) only
+ever calls `genStmt` on the init clause once, before the loop's own
+`for.body`/`for.post` basic blocks even exist (see `preInitBase`'s own doc
+comment) - so a captured init variable's arena-heap slot (`allocLocalSlot`,
+`src/codegen/func.go`) only ever gets written to by that one `arena_alloc`
+call, unlike a variable freshly declared *inside* the loop body (`captured
+:= i`), whose own declaring statement genuinely re-executes, and so
+genuinely re-allocates, on every dynamic iteration.
+
+**What changed:** `genForStmt` now does two symmetric hand-offs around the
+loop body, only for an eligible variable (init declares exactly one name,
+that name's `sym.Captured` is true, and its type isn't non-copyable - see
+below): entering the body, it copies the loop variable's current value into
+a fresh arena slot and repoints `g.locals[sym]` at it, so the body (and any
+lambda inside it) reads/writes that iteration's own private copy; entering
+the post-clause block (reached by both the ordinary fallthrough and every
+`continue` alike), it copies that value back into the loop variable's real,
+original storage before the post-statement (`i++`) runs, so the condition
+and post-clause keep observing the one real slot exactly as before - a body
+mutation of `i` still correctly reaches the next iteration's check.
+`break` bypasses this entirely (branches straight past the loop, same as
+before), needing no special handling.
+
+Deliberately excluded: a non-copyable loop variable (a struct with its own
+`destructor()`, or a fixed-size array of one) never gets this treatment,
+falling back to today's exact shared-slot behavior instead - giving it
+fresh per-iteration semantics would mean an implicit copy once per
+iteration, which would silently violate this project's own "non-copyable,
+zero exceptions" rule (see `LANGUAGE.md`'s "Destructors" section) that every
+other part of this codebase already enforces without exception. Nothing
+today can actually construct this case (no non-copyable type can be a `for`
+loop's own header variable in the first place), so this is a defensive
+guard against a future grammar change, not a live gap.
+
+**Status:** shipped. See `LANGUAGE.md`'s "Lambdas" section for the
+user-facing semantics (including the non-copyable exclusion) and
+`src/codegen/stmt.go`'s `genForStmt`/`typeIsNonCopyable` for the
+implementation, with new coverage in `src/codegen/lambda_test.go`
+(`TestForLoopCapturedHeaderVariableGetsPerIterationValue` and its
+sibling tests covering `continue`, `break`, and nested loops).

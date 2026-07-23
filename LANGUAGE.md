@@ -983,6 +983,54 @@ the start - `ctxPtr` finally does real work here, instead of always being
 null), the heap-promotion of a captured variable's storage, and the
 uniform-calling-convention fix a genuine closure's `ctxPtr` needed.
 
+**A `for` loop's own header variable gets fresh per-iteration semantics when
+captured (Go 1.22+ style), not the older, shared-slot behavior every other
+captured variable still gets.** This is the one deliberate exception to
+"capture is by reference, sharing one real storage location" above -
+specifically for a variable declared in a `for` loop's own init clause
+(`for i := 0; ...; i++ { ... }`), when a lambda created inside the loop's
+body captures it directly:
+
+```go
+fns := make([]func() int, 0)
+for i := 0; i < 5; i++ {
+    fns = append(fns, func() int { return i })
+}
+// fns[0](), fns[1](), ..., fns[4]() -> 0, 1, 2, 3, 4
+// (NOT 5, 5, 5, 5, 5 - the classic pre-1.22-Go closures-in-a-loop gotcha)
+```
+
+Each closure sees the value `i` held at its *own* iteration, not whatever
+`i++` has mutated it to by the time the closure is actually called - exactly
+matching modern Go's own loop-variable semantics (see `DECISIONS.md` for why
+this project deliberately diverges from its own prior implicit behavior to
+match it). Mutations the loop body itself makes to the header variable still
+propagate forward correctly into the next iteration's condition/post-clause
+check - `continue` doesn't lose them - so ordinary uses of the loop variable
+(as a counter, an index, mutated mid-body) behave exactly as before; only a
+lambda's own captured view of it gets a private per-iteration copy.
+
+This is narrower than it might sound - it applies *only* to the loop's own
+init-declared name, never to a variable declared anywhere else and merely
+read or reassigned inside a loop body:
+
+```go
+total := 0
+for i := 0; i < 5; i++ {
+    total = total + i   // ordinary shared-storage read/write, unaffected
+}
+```
+
+and it's silently skipped (falling back to today's exact shared-slot
+behavior) for a **non-copyable** loop variable - a struct declaring its own
+`destructor()`, or a fixed-size array of one, recursively (see "Destructors"
+below) - since giving it fresh per-iteration semantics would mean implicitly
+copying it once per iteration, which this language's "non-copyable, zero
+exceptions" rule never allows anywhere else either. In practice this is a
+non-issue today: nothing currently lets a non-copyable type be a `for` loop's
+own header variable in the first place, this is purely a defensive
+guarantee should the grammar ever grow one.
+
 ## Multi-file packages
 
 A package is a directory of `.llx` files, Go-style: every `.llx` file

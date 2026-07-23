@@ -448,6 +448,36 @@ func (g *Generator) genIfStmt(n ast.NodeIndex) bool {
 	return terminates
 }
 
+// typeIsNonCopyable is codegen's own narrow copy of sema/typecheck.go's
+// (*checker).typeIsNonCopyable (~line 781) - that method is unexported on
+// *checker and unreachable from this package, so genForStmt's per-iteration
+// loop-variable fix (below) needs its own equivalent to decide whether
+// introducing an implicit load+store "copy" of a value would silently
+// violate this language's "non-copyable, zero exceptions" rule (see
+// LANGUAGE.md's "Destructors" section). Deliberately only covers the two
+// cases that fix needs to guard against - a struct that isn't
+// StructInfo.Copyable, or a fixed-size array of a (recursively) non-copyable
+// element type - not a general restatement of sema's own copyability rules.
+//
+// A struct whose StructInfo.Copyable was never actually memoized (see
+// (*checker).structCopyable) reads back as its zero value, false, here -
+// which folds into "non-copyable" (the conservative, safe direction: this
+// only ever suppresses the optimization below, never wrongly enables an
+// implicit copy of something this language forbids copying).
+func (g *Generator) typeIsNonCopyable(t sema.Type) bool {
+	switch t.Kind {
+	case sema.TypeStruct:
+		return t.Struct != nil && !t.Struct.Copyable
+	case sema.TypeArray:
+		if t.Dynamic || t.Elem == nil {
+			return false
+		}
+		return g.typeIsNonCopyable(*t.Elem)
+	default:
+		return false
+	}
+}
+
 // genForStmt lowers all three Go-style for-loop forms uniformly - bare
 // `for {}`, cond-only `for cond {}`, and the full `for init; cond; post {}` -
 // since ForStmt's [init, cond, post, body] shape already represents every
@@ -477,6 +507,45 @@ func (g *Generator) genIfStmt(n ast.NodeIndex) bool {
 // runs anyway. Only once, right here, after the loop has structurally
 // finished (natural condition-false exit or a break landing at endBB) does
 // init's own local actually get destructed.
+//
+// Per-iteration loop variable (Go 1.22+ semantics - see LANGUAGE.md's
+// "Lambdas" section): if init declares exactly the one name this grammar
+// allows (`i := ...`/`var i ... = ...`) and sema marked that symbol
+// Captured (some FuncLit in the body closes over it - sema/capture.go's
+// analyzeFuncLitCaptures), a closure created on iteration K must see
+// iteration K's own value, not whatever i++ mutates it to by the time that
+// closure is actually called (a shared arena slot - see allocLocalSlot,
+// func.go - would otherwise make every closure observe the loop's final
+// value, since init only ever runs once, before bodyBB/postBB even exist).
+// loopVarSym/loopVarOrigAddr/loopVarType/loopVarEligible are plain local
+// variables scoped to this one genForStmt call/goroutine-stack-frame
+// (deliberately not Generator fields) so nested for-loops each track their
+// own independent per-iteration variable via ordinary Go recursion, with no
+// cross-contamination between levels.
+//
+// The fix itself is two symmetric hand-offs around the body:
+//   - entering bodyBB: copy origAddr's current value into a fresh arena slot
+//     and repoint g.locals[sym] at it, so the body (and any FuncLit inside
+//     it) reads/writes this iteration's own private copy - a FuncLit
+//     capturing sym therefore captures that fresh address, never origAddr.
+//   - entering postBB (before postNode runs): copy the fresh slot's
+//     (possibly body-mutated) value back into origAddr and repoint
+//     g.locals[sym] back to it, so the condition/post clause keep observing
+//     the single real loop-variable slot exactly as before. postBB's entry
+//     is reached by both the ordinary body-fallthrough branch and every
+//     `continue` (continueTarget is postBB - see loopCtx above), so this one
+//     placement covers both uniformly; `break` branches straight to endBB,
+//     bypassing postBB entirely, so it never runs this hand-off at all
+//     (nothing needs to - endBB's own unwindDestructorsTo(preInitBase)
+//     destructs origAddr's real symbol exactly as it always has, and the
+//     abandoned fresh slot is simply unreferenced arena garbage, consistent
+//     with this project's already-documented arena philosophy).
+//
+// Guarded by typeIsNonCopyable above: a non-copyable loop variable (a
+// disallowed shape today - AGENTS.md's Types section - but guarded
+// defensively regardless) keeps today's exact shared-slot behavior, since an
+// implicit copy here would silently violate this language's "non-copyable,
+// zero exceptions" rule.
 func (g *Generator) genForStmt(n ast.NodeIndex) bool {
 	initNode := g.tree.Child(n, 0)
 	condNode := g.tree.Child(n, 1)
@@ -484,8 +553,30 @@ func (g *Generator) genForStmt(n ast.NodeIndex) bool {
 	bodyNode := g.tree.Child(n, 3)
 
 	preInitBase := len(g.destructors)
+
+	var (
+		loopVarSym      *sema.Symbol
+		loopVarOrigAddr llvm.Value
+		loopVarType     llvm.Type
+		loopVarEligible bool
+	)
 	if initNode != ast.InvalidNode {
 		g.genStmt(initNode)
+
+		switch g.tree.Nodes[initNode].Kind {
+		case enums.NodeKinds.ShortVarDecl, enums.NodeKinds.VarDecl:
+			nameNode := g.tree.Child(initNode, 0)
+			sym := g.info.Refs[nameNode]
+			if sym.Captured {
+				t := g.info.Types[initNode]
+				if !g.typeIsNonCopyable(t) {
+					loopVarSym = sym
+					loopVarOrigAddr = g.locals[sym]
+					loopVarType = g.llvmType(t)
+					loopVarEligible = true
+				}
+			}
+		}
 	}
 
 	condBB := g.ctx.AddBasicBlock(g.curFn, "for.cond")
@@ -502,6 +593,12 @@ func (g *Generator) genForStmt(n ast.NodeIndex) bool {
 	}
 
 	g.builder.SetInsertPointAtEnd(bodyBB)
+	if loopVarEligible {
+		freshAddr := g.genArenaAlloc(llvm.SizeOf(loopVarType))
+		cur := g.builder.CreateLoad(loopVarType, loopVarOrigAddr, "")
+		g.builder.CreateStore(cur, freshAddr)
+		g.locals[loopVarSym] = freshAddr
+	}
 	g.loopStack = append(g.loopStack, loopCtx{
 		breakTarget:    endBB,
 		continueTarget: postBB,
@@ -514,6 +611,11 @@ func (g *Generator) genForStmt(n ast.NodeIndex) bool {
 	}
 
 	g.builder.SetInsertPointAtEnd(postBB)
+	if loopVarEligible {
+		cur := g.builder.CreateLoad(loopVarType, g.locals[loopVarSym], "")
+		g.builder.CreateStore(cur, loopVarOrigAddr)
+		g.locals[loopVarSym] = loopVarOrigAddr
+	}
 	if postNode != ast.InvalidNode {
 		g.genStmt(postNode)
 	}
