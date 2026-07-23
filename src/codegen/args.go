@@ -100,8 +100,8 @@ func (g *Generator) buildArgsInitFn() llvm.Value {
 	fn.SetLinkage(llvm.PrivateLinkage)
 
 	// The exact same per-function generation state genFuncBody/
-	// genGlobalCtors already set up for a synthesized/ordinary function body
-	// of their own - see codegen.go's Generator doc comment.
+	// buildGlobalInitFn already set up for a synthesized/ordinary function
+	// body of their own - see codegen.go's Generator doc comment.
 	g.curFn = fn
 	g.entryBlock = g.ctx.AddBasicBlock(fn, "entry")
 	g.builder.SetInsertPointAtEnd(g.entryBlock)

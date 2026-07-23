@@ -1348,18 +1348,18 @@ func (c *checker) constArraySize(sizeNode ast.NodeIndex) (int64, bool) {
 // Type - the map counterpart to arrayTypeFromNode, minus the size handling a
 // map type has no use for. Unlike an array's element type (unrestricted), a
 // map's key type is checked right here, at every declaration site, against
-// this language's own comparability rule (typeIsComparableKeyType) - a
-// dynamic array, function type, or another map is rejected outright with a
-// real diagnostic, the same "grammar accepts the general shape, sema
-// enforces the feature's own narrower rule" division of labor
-// arrayTypeFromNode's own non-copyable-element check already uses.
+// this language's own comparability rule (typeIsComparable) - a dynamic
+// array, function type, or another map is rejected outright with a real
+// diagnostic, the same "grammar accepts the general shape, sema enforces the
+// feature's own narrower rule" division of labor arrayTypeFromNode's own
+// non-copyable-element check already uses.
 func (c *checker) mapTypeFromNode(n ast.NodeIndex) Type {
 	keyNode := c.tree.Child(n, 0)
 	elemNode := c.tree.Child(n, 1)
 	key := c.typeFromNode(keyNode)
 	elem := c.typeFromNode(elemNode)
 
-	if !key.IsInvalid() && !c.typeIsComparableKeyType(key) {
+	if !key.IsInvalid() && !c.typeIsComparable(key) {
 		c.errorAt(keyNode, "invalid map key type %s: a map key must be comparable (a dynamic array, function type, or another map cannot be used as a key)", key)
 	}
 
@@ -1370,24 +1370,33 @@ func (c *checker) mapTypeFromNode(n ast.NodeIndex) Type {
 	}
 }
 
-// typeIsComparableKeyType reports whether t may be used as a map's key type
-// (see LANGUAGE.md's "Maps" section): any type this language's own `==`/`!=`
-// already supports - a numeric type, bool, string, a pointer, or a struct/
-// fixed-size array whose own fields/elements are themselves all comparable,
-// recursively (mirroring structCopyable's own recursive-field-walk shape,
-// just checking comparability instead of copyability) - a dynamic array
-// (`[]T`), a function type, or another map are all explicitly rejected: none
-// of them are meaningfully hashable/comparable the way this language
-// currently represents them (see AGENTS.md's Operators section - `==`/`!=`
-// themselves already reject a dynamic array outright, and never define
-// anything for a function or map type at all).
-func (c *checker) typeIsComparableKeyType(t Type) bool {
+// typeIsComparable reports whether t is a type this language's own `==`/`!=`
+// actually supports (see LANGUAGE.md's "Maps" section for the map-key use
+// this was originally written for, and its Operators section for the
+// struct/array-equality use it now shares too): any numeric type, bool,
+// string, a pointer, or a struct/fixed-size array whose own fields/elements
+// are themselves all comparable, recursively (mirroring structCopyable's own
+// recursive-field-walk shape, just checking comparability instead of
+// copyability) - a dynamic array (`[]T`), a function type, or another map are
+// all explicitly rejected, anywhere they appear, even nested arbitrarily deep
+// inside a struct field or fixed-array element: none of them are
+// meaningfully hashable/comparable the way this language currently
+// represents them (see AGENTS.md's Operators section - `==`/`!=` themselves
+// already reject a bare dynamic array outright, and never define anything
+// for a bare function or map type at all).
+//
+// This is the single source of truth both a map's key type (mapTypeFromNode)
+// and `==`/`!=`'s own struct/array operand (checkEqualityOperands) now
+// share - deliberately not the same set typeIsPrintable defines below: a
+// dynamic array is printable but never comparable (see that function's own
+// doc comment for why the two allowlists genuinely differ).
+func (c *checker) typeIsComparable(t Type) bool {
 	switch t.Kind {
 	case TypeArray:
 		if t.Dynamic {
 			return false
 		}
-		return t.Elem == nil || c.typeIsComparableKeyType(*t.Elem)
+		return t.Elem == nil || c.typeIsComparable(*t.Elem)
 	case TypeFunc, TypeMap:
 		return false
 	case TypeStruct:
@@ -1398,7 +1407,43 @@ func (c *checker) typeIsComparableKeyType(t Type) bool {
 		defer restore()
 		for _, field := range c.tree.StructFields(t.Struct.Symbol.Decl) {
 			fieldType := c.typeFromNode(c.tree.Child(field, 1))
-			if !c.typeIsComparableKeyType(fieldType) {
+			if !c.typeIsComparable(fieldType) {
+				return false
+			}
+		}
+		return true
+	default:
+		return true
+	}
+}
+
+// typeIsPrintable reports whether t is a type `print` can actually lower
+// (see codegen's genPrintCall/genPrintValueBare, runtime.go): the same
+// numeric/bool/string/pointer/struct/array base typeIsComparable accepts,
+// recursing into struct fields and BOTH fixed and dynamic array elements,
+// but strictly larger than typeIsComparable in one deliberate way - a
+// dynamic array (`[]T`) IS printable (genPrintArrayValue already renders one
+// correctly today, an existing working feature this must not regress) even
+// though it is never comparable (see typeIsComparable's own doc comment). A
+// function type or a map type are rejected either way - codegen has no
+// rendering for either and never will, the same as typeIsComparable's own
+// rejection of them, just for a different reason (nothing to hash/compare
+// vs. nothing to print).
+func (c *checker) typeIsPrintable(t Type) bool {
+	switch t.Kind {
+	case TypeArray:
+		return t.Elem == nil || c.typeIsPrintable(*t.Elem)
+	case TypeFunc, TypeMap:
+		return false
+	case TypeStruct:
+		if t.Struct == nil {
+			return true
+		}
+		restore := c.pushTree(t.Struct.Symbol.Tree)
+		defer restore()
+		for _, field := range c.tree.StructFields(t.Struct.Symbol.Decl) {
+			fieldType := c.typeFromNode(c.tree.Child(field, 1))
+			if !c.typeIsPrintable(fieldType) {
 				return false
 			}
 		}
@@ -2290,6 +2335,18 @@ func (c *checker) resolveNumericOperands(lNode, rNode ast.NodeIndex, lt, rt Type
 // language doesn't have yet - see LANGUAGE.md's "Dynamic arrays" section) -
 // checked before the general struct/array case below, which would otherwise
 // happily accept two identically-typed slices via Type.Equal.
+//
+// The struct/array case below also runs typeIsComparable(lt) alongside
+// Type.Equal - Type.Equal alone only confirms both operands share the same
+// aggregate type, it says nothing about whether every field/element nested
+// inside that type is itself something codegen's genValueEqual (expr.go) can
+// actually lower (a map or function-typed field, or a dynamic-array field
+// nested arbitrarily deep, none of which the top-level Dynamic check above
+// can see). Without this, a struct containing a map/func field reached
+// genValueEqual's own unsupported-type panic, and a struct containing a
+// dynamic-array field silently compared as always-equal on that field
+// (genValueEqual's array case loops to t.Size, which a dynamic array never
+// sets) - both now get a clean diagnostic here instead.
 func (c *checker) checkEqualityOperands(n, lNode, rNode ast.NodeIndex, lt, rt Type, op string) Type {
 	if (lt.Kind == TypeArray && lt.Dynamic) || (rt.Kind == TypeArray && rt.Dynamic) {
 		c.errorAt(n, "slices are not comparable with %s", op)
@@ -2301,6 +2358,10 @@ func (c *checker) checkEqualityOperands(n, lNode, rNode ast.NodeIndex, lt, rt Ty
 	switch {
 	case lt.Kind == TypeStruct, lt.Kind == TypeArray:
 		if lt.Equal(rt) {
+			if !c.typeIsComparable(lt) {
+				c.errorAt(n, "cannot compare values of type %s: %s is not comparable (a dynamic array, function type, or map cannot appear in an equality comparison, even nested inside a struct or array)", lt, lt)
+				return invalidType
+			}
 			return boolType
 		}
 	case lt.Kind == TypeString && rt.Kind == TypeString:
@@ -2790,20 +2851,30 @@ func (c *checker) isPrintCall(callee ast.NodeIndex) bool {
 	return ok && sym.Kind == SymFunc && sym.Decl == ast.InvalidNode && sym.Name == "print"
 }
 
-// checkPrintCall accepts exactly one argument, of any type - print has no
-// declaration to derive a stricter signature from, and AGENTS.md's examples
-// use it on both int and string arguments interchangeably (see AGENTS.md's
-// Operators section and BLOCKERS.md for this decision). An untyped argument
-// (a bare numeric literal, e.g. `print(42)`) defaults like any other value
-// context with no other type to adapt to (defaultIfUntyped) - print still
-// needs a concrete numeric type to pick a format specifier from (see
-// codegen's genPrintCall).
+// checkPrintCall accepts exactly one argument, of any printable type - print
+// has no declaration to derive a stricter signature from, and AGENTS.md's
+// examples use it on both int and string arguments interchangeably (see
+// AGENTS.md's Operators section and BLOCKERS.md for this decision). An
+// untyped argument (a bare numeric literal, e.g. `print(42)`) defaults like
+// any other value context with no other type to adapt to (defaultIfUntyped)
+// - print still needs a concrete numeric type to pick a format specifier
+// from (see codegen's genPrintCall).
+//
+// "Any type" was never quite true, though: codegen's genPrintCall/
+// genPrintValueBare only ever implemented a fixed set of Kinds and panicked
+// on everything else (a function value, a map value, or either one nested
+// inside a struct field, all reached codegen's own unsupported-type panic
+// with zero diagnostic first) - typeIsPrintable is the real, narrower rule
+// enforced here instead, closing that gap with a clean compile-time error.
 func (c *checker) checkPrintCall(n ast.NodeIndex, args []ast.NodeIndex) Type {
 	if len(args) != 1 {
 		c.errorAtNodes(args, n, "print takes exactly 1 argument, got %d", len(args))
 	}
 	for _, a := range args {
-		c.defaultIfUntyped(a, c.checkValueExpr(a))
+		at := c.defaultIfUntyped(a, c.checkValueExpr(a))
+		if !at.IsInvalid() && !c.typeIsPrintable(at) {
+			c.errorAt(a, "cannot print value of type %s: %s is not printable (a function type or map cannot be printed, even nested inside a struct or array)", at, at)
+		}
 	}
 	return voidType
 }

@@ -1,6 +1,7 @@
 package codegen
 
 import (
+	"strings"
 	"testing"
 
 	"llvm_lang/src/codegen/stdoutcapture"
@@ -133,5 +134,73 @@ func main() {
 	want := "{hi true -12 -1234 4000000000 2.500000 3.500000}\n"
 	if out != want {
 		t.Fatalf("print(m) captured stdout = %q, want %q", out, want)
+	}
+}
+
+// TestPrintPointerValueProducesRealAddress covers genPrintCall's new
+// TypePointer case (fmtPtr, "%p\n") - the new codegen support this bug fix's
+// sema-side gate (typeIsPrintable) makes actually reachable for the first
+// time, since print(&x) was never legally callable at all before. Rather
+// than assert a specific address (unknowable/non-deterministic across runs),
+// this prints the exact same pointer twice and asserts both lines render
+// identically and are neither empty nor the literal null-pointer spelling -
+// a real, stable, non-null address, which is all "sane" can mean here.
+func TestPrintPointerValueProducesRealAddress(t *testing.T) {
+	jm := compileAndJIT(t, `
+func main() {
+	a := 42
+	print(&a)
+	print(&a)
+}
+`)
+	out := captureStdout(t, func() {
+		jm.runInt32(t, "main")
+	})
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("print(&a) captured stdout = %q, want exactly 2 lines", out)
+	}
+	if lines[0] != lines[1] {
+		t.Fatalf("printing the exact same pointer twice produced different addresses: %q vs %q", lines[0], lines[1])
+	}
+	if lines[0] == "" || lines[0] == "0x0" || lines[0] == "(nil)" || lines[0] == "00000000" {
+		t.Fatalf("print(&a) = %q, want a real non-null address", lines[0])
+	}
+}
+
+// TestPrintStructWithPointerFieldRendersAddress covers a pointer-typed
+// struct field rendered through genPrintStructValue/genPrintValueBare's own
+// recursive `{f0 f1}` shape - proving the new TypePointer support isn't just
+// reachable at the top level (genPrintCall) but also through the shared
+// bare-value renderer every nested field goes through. Asserts the address
+// embedded inside the struct's own `{...}` rendering is byte-for-byte the
+// same address a bare print of the same pointer produces.
+func TestPrintStructWithPointerFieldRendersAddress(t *testing.T) {
+	jm := compileAndJIT(t, `
+struct Box {
+	p *int
+}
+
+func main() {
+	a := 42
+	b := Box{&a}
+	print(b)
+	print(&a)
+}
+`)
+	out := captureStdout(t, func() {
+		jm.runInt32(t, "main")
+	})
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("captured stdout = %q, want exactly 2 lines", out)
+	}
+	structLine, bareAddr := lines[0], lines[1]
+	if len(structLine) < 2 || structLine[0] != '{' || structLine[len(structLine)-1] != '}' {
+		t.Fatalf("print(b) = %q, want a {<address>} shape", structLine)
+	}
+	addrInStruct := structLine[1 : len(structLine)-1]
+	if addrInStruct != bareAddr {
+		t.Fatalf("struct-embedded pointer address %q != bare pointer address %q", addrInStruct, bareAddr)
 	}
 }

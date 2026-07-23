@@ -487,16 +487,16 @@ var (
 // MCJIT-based ExecutionEngine this driver used before (see DECISIONS.md's
 // dated "JIT execution: LLJIT" entry for the full why).
 //
-// llvm_lang.global_init (see src/codegen/globalinit.go's genGlobalCtors) is
-// looked up and called directly, exactly like main itself, before main runs.
-// A normal linked/loaded program's own C runtime startup sequence would scan
-// and call every entry in `@llvm.global_ctors` (see CODEGEN.md's "Global var
-// initializers" section) before ever reaching main on its own - unlike
+// llvm_lang.global_init (see src/codegen/globalinit.go's buildGlobalInitFn)
+// is looked up and called directly, exactly like main itself, before main
+// runs. A normal linked/loaded program's own C runtime startup sequence would
+// scan and call every entry in `@llvm.global_ctors` (see CODEGEN.md's "Global
+// var initializers" section) before ever reaching main on its own - unlike
 // MCJIT's ExecutionEngine, LLJIT has no RunStaticConstructors-style call to
 // trigger that automatically, so this looks up the well-known synthesized
 // function by name instead of walking the ctors array at all (the array
 // itself is still emitted, for a real linked/loaded program's benefit - see
-// genGlobalCtors). A module with no non-constant globals has no such
+// genCtors). A module with no non-constant globals has no such
 // function to find in the first place, so a failed Lookup here just means
 // there was nothing to run, not a real error.
 //

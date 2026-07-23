@@ -669,7 +669,7 @@ section) before `main`. This is solved by looking up and calling
 `llvm_lang.global_init` directly by name instead - the exact same
 synthesized function `@llvm.global_ctors`'s own single entry already points
 at - rather than relying on the generic ctors-array-walking convenience
-MCJIT provided. That needed one small companion change: `genGlobalCtors`
+MCJIT provided. That needed one small companion change: `buildGlobalInitFn`
 (`src/codegen/globalinit.go`) no longer gives that function private linkage,
 since a private symbol has no name a JIT's `Lookup` can resolve at all - it
 now keeps `AddFunction`'s own default (external), the same as every other
@@ -1274,3 +1274,77 @@ structural value rather than identity, and a nested `map[K]map[K2]V2`
 value), plus a real worked example (`examples/word_freq/word_freq.llx` - a
 word-frequency counter over `std/strings.Split`) exercised end to end -
 JIT and AOT alike, both producing byte-identical, hand-verified output.
+
+---
+
+## 2026-07-23 - `==`/`!=` and `print` gain a real comparability/printability gate in sema
+
+**Decision:** `checkEqualityOperands`'s struct/array branch
+(`src/sema/typecheck.go`) now runs a new `typeIsComparable` predicate over the
+whole aggregate type, alongside its existing `lt.Equal(rt)` check, before
+admitting `==`/`!=` between two same-typed structs/arrays. `typeIsComparable`
+is `typeIsComparableKeyType` (originally written for `map[K]V`'s own
+key-type restriction) generalized and renamed - the exact same recursive
+"walk every field/element, reject a dynamic array/function type/map type
+anywhere nested inside" logic, now shared by both the map-key-declaration
+site (`mapTypeFromNode`) and this operator. `checkPrintCall` gets its own,
+separate `typeIsPrintable` predicate, gating `print`'s single argument the
+same recursive way.
+
+**Why (root cause, not another codegen patch):** a 5-agent code review
+found `checkEqualityOperands` accepted `==`/`!=` between two same-typed
+structs/arrays via a bare whole-type `Type.Equal` check, never validating
+that every recursively-nested field/element `Kind` was actually something
+codegen's `genValueEqual` (`src/codegen/expr.go`) could lower. Two distinct
+failure modes followed from that one gap: a struct field of `TypeMap` or
+`TypeFunc` reached `genValueEqual`'s `default:` case and panicked the whole
+compiler; far worse, a struct field of a *dynamic array* (`[]T`) reached
+`genValueEqual`'s `TypeArray` case, whose `for i := 0; i < int(t.Size); i++`
+loop runs *zero times* for a dynamic array (`t.Size` is never set when
+`Dynamic` is true) - silently comparing that field as always-equal
+regardless of its real length/contents, so `a == b` for two structs
+differing only in a slice field's contents evaluated to `true`. `checkPrintCall`
+had the identical shape of bug for a different reason: it accepted "exactly
+one argument, of any type" with zero restriction, while codegen's
+`genPrintCall`/`genPrintValueBare` only ever implemented a fixed set of
+`Kind`s and panicked on a bare function value, map value, or either nested
+inside a struct field. In both cases the reactive fix - just widening
+codegen's switch again - was rejected: `genValueEqual` had already been
+widened once, that same day (i8/i16/i64/f32/f64/pointer fields), on a doc
+comment claiming its switch "must cover every Kind a struct field or array
+element can legitimately have" - a claim that was never actually true (no
+`TypeMap`/`TypeFunc` case, and the dynamic-array case was never correct to
+begin with). The real, load-bearing fix belongs in the layer that decides
+what's legal in the first place - sema - restoring codegen's own
+"unreachable given an already-checked tree" invariant (see
+`src/codegen/codegen.go`'s package doc comment) instead of chasing the
+symptom in codegen a second time.
+
+**Why two separate predicates, not one shared one:** `typeIsComparable` and
+`typeIsPrintable` are deliberately *not* the same allowlist, despite sharing
+almost all of their logic (same numeric/bool/string/pointer/struct/array
+base, both recursing into struct fields and rejecting `TypeFunc`/`TypeMap`
+anywhere nested). A dynamic array is printable - `genPrintArrayValue`
+already renders one correctly, an existing, tested, working feature that
+must not regress - but is never comparable (`==`/`!=` already rejected a
+bare slice outright, for the same "no meaningful equality" reason a map/func
+value is rejected). Reusing one predicate for both call sites would have
+either wrongly allowed comparing two slices or wrongly rejected printing
+one; keeping them as two small, separately-named functions makes that
+difference an explicit, checkable invariant instead of an implicit
+coincidence.
+
+**Also landed alongside this:** real `TypePointer` support in codegen's
+printing (`genPrintCall`/`genPrintValueBare`, `src/codegen/runtime.go`) - a
+pointer was already comparable and is included in the new printable set too,
+but codegen had no case for it at all (not even a panic case) until now. It
+prints via a new `"%p\n"`/`"%p"` format-string pair (`fmtPtr`/`fmtPtrBare`),
+the same "declare a libc-printf format string" convention every other
+`fmtInt`/`fmtFloat`/`fmtStr` pair already follows - no new runtime primitive
+needed.
+
+**Status:** shipped. Both failure modes (the map/func-field panic, and the
+dynamic-array-field silent-`true` bug) now produce a clean compile-time
+diagnostic instead. See `LANGUAGE.md`'s Operators section and its `print`
+builtin section for the user-facing rule, and `CODEGEN.md`'s "`print`
+builtin, concretely" section for the pointer-printing addition.

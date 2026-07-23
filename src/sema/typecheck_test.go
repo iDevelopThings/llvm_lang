@@ -162,6 +162,54 @@ func TestEqualityAcrossDifferentArrayElementTypesIsError(t *testing.T) {
 	expectCheckErrors(t, src, 1)
 }
 
+// --- struct/array equality nested-comparability gate (typeIsComparable) ---
+//
+// checkEqualityOperands's struct/array branch used to accept == between two
+// same-typed structs/arrays via a bare whole-type Type.Equal check alone,
+// never validating that every recursively-nested field/element Kind was
+// actually something codegen's genValueEqual could lower - a struct field of
+// TypeMap/TypeFunc reached genValueEqual's own unsupported-type panic, and a
+// dynamic-array field silently compared as always-equal (genValueEqual's
+// TypeArray case loops to t.Size, which a dynamic array never sets). See
+// DECISIONS.md's dated entry for the full root-cause writeup.
+
+func TestStructWithDynamicArrayFieldEqualityRejected(t *testing.T) {
+	src := "struct S {\n\ts []int\n}\n" +
+		"func f() {\n\ta := S{make([]int, 3)}\n\tb := S{make([]int, 3)}\n\tif a == b {\n\t}\n}\n"
+	expectCheckErrors(t, src, 1)
+}
+
+func TestStructWithMapFieldEqualityRejected(t *testing.T) {
+	src := "struct S {\n\tm map[string]int\n}\n" +
+		"func f() {\n\ta := S{make(map[string]int)}\n\tb := S{make(map[string]int)}\n\tif a == b {\n\t}\n}\n"
+	expectCheckErrors(t, src, 1)
+}
+
+func TestStructWithFuncFieldEqualityRejected(t *testing.T) {
+	src := "func double(x int) int {\n\treturn x * 2\n}\n" +
+		"struct Callback {\n\tfn func(int) int\n}\n" +
+		"func f() {\n\ta := Callback{double}\n\tb := Callback{double}\n\tif a == b {\n\t}\n}\n"
+	expectCheckErrors(t, src, 1)
+}
+
+func TestArrayOfDynamicArrayStructFieldEqualityRejected(t *testing.T) {
+	// A dynamic array nested two levels deep (fixed array of a struct that
+	// itself has a dynamic-array field) must still be caught - the
+	// recursion has to actually walk through both levels, not just the
+	// struct's own direct fields.
+	src := "struct S {\n\ts []int\n}\n" +
+		"func f() {\n\ta := [1]S{S{make([]int, 1)}}\n\tb := [1]S{S{make([]int, 1)}}\n\tif a == b {\n\t}\n}\n"
+	expectCheckErrors(t, src, 1)
+}
+
+// A pointer field is still comparable - typeIsComparable's rejection is
+// specific to a dynamic array/function type/map, not pointers in general.
+func TestStructWithPointerFieldEqualityStillOk(t *testing.T) {
+	src := "struct Box {\n\tp *int\n}\n" +
+		"func f() {\n\ta := 1\n\tb := Box{&a}\n\tc := Box{&a}\n\tif b == c {\n\t}\n}\n"
+	checkSrc(t, src)
+}
+
 func TestOrderingWorksForStrings(t *testing.T) {
 	tree, info := checkSrc(t, "var b bool = \"a\" < \"b\"\n")
 	decl := tree.Children(tree.Root)[0]
@@ -382,6 +430,60 @@ func TestPrintAcceptsSingleArgAnyType(t *testing.T) {
 
 func TestPrintWrongArgCountIsError(t *testing.T) {
 	expectCheckErrors(t, "func f() {\n\tprint(1, 2)\n}\n", 1)
+}
+
+// --- print's printability gate (typeIsPrintable) ---
+//
+// checkPrintCall used to accept "exactly one argument, of any type" with
+// zero restriction, while codegen's genPrintCall/genPrintValueBare only ever
+// implemented a fixed set of Kinds and panicked on a bare function value, a
+// map value, or either nested inside a struct field. See DECISIONS.md's
+// dated entry for the full root-cause writeup, and typeIsPrintable's own doc
+// comment for why this is a strictly larger allowlist than typeIsComparable
+// (a dynamic array is printable but never comparable).
+
+func TestPrintBareFuncValueRejected(t *testing.T) {
+	src := "func double(x int) int {\n\treturn x * 2\n}\n" +
+		"func f() {\n\tprint(double)\n}\n"
+	expectCheckErrors(t, src, 1)
+}
+
+func TestPrintBareMapValueRejected(t *testing.T) {
+	src := "func f() {\n\tm := make(map[string]int)\n\tprint(m)\n}\n"
+	expectCheckErrors(t, src, 1)
+}
+
+func TestPrintStructWithFuncFieldRejected(t *testing.T) {
+	src := "func double(x int) int {\n\treturn x * 2\n}\n" +
+		"struct Callback {\n\tfn func(int) int\n}\n" +
+		"func f() {\n\tcb := Callback{double}\n\tprint(cb)\n}\n"
+	expectCheckErrors(t, src, 1)
+}
+
+func TestPrintStructWithMapFieldRejected(t *testing.T) {
+	src := "struct S {\n\tm map[string]int\n}\n" +
+		"func f() {\n\ts := S{make(map[string]int)}\n\tprint(s)\n}\n"
+	expectCheckErrors(t, src, 1)
+}
+
+// A dynamic array is still printable - genPrintArrayValue already renders
+// one correctly, an existing feature typeIsPrintable must not regress even
+// though the exact same shape is now rejected for ==/!= (typeIsComparable).
+func TestPrintDynamicArrayStillOk(t *testing.T) {
+	checkSrc(t, "func f() {\n\ts := make([]int, 3)\n\tprint(s)\n}\n")
+}
+
+// A bare pointer is legally printable - it's already comparable, and is
+// included in typeIsPrintable's own base set too.
+func TestPrintBarePointerOk(t *testing.T) {
+	checkSrc(t, "func f() {\n\ta := 1\n\tprint(&a)\n}\n")
+}
+
+// A pointer field inside a struct is likewise still printable.
+func TestPrintStructWithPointerFieldOk(t *testing.T) {
+	src := "struct Box {\n\tp *int\n}\n" +
+		"func f() {\n\ta := 1\n\tb := Box{&a}\n\tprint(b)\n}\n"
+	checkSrc(t, src)
 }
 
 func TestVoidCallUsedAsValueIsError(t *testing.T) {

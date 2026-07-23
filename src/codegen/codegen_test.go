@@ -229,8 +229,8 @@ func compileAndJIT(t *testing.T, src string) *jitModule {
 	// own - LLJIT has no RunStaticConstructors-style call to trigger that
 	// automatically, so this looks up llvm_lang.global_init directly by name
 	// and calls it instead. Always safe: a module with no non-constant
-	// globals has no such function to find at all (see genGlobalCtors), so a
-	// failed Lookup here just means there was nothing to run.
+	// globals has no such function to find at all (see buildGlobalInitFn), so
+	// a failed Lookup here just means there was nothing to run.
 	if initAddr, err := jit.Lookup("llvm_lang.global_init"); err == nil {
 		syscall.SyscallN(uintptr(initAddr))
 	}

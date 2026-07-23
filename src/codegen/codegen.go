@@ -203,8 +203,8 @@ type Generator struct {
 	// globalInits queues every non-constant top-level `var`'s initializer -
 	// appended by genGlobalVarDecl, in source declaration order across every
 	// file in the package (the same order genPackage's own per-tree loops
-	// already visit declarations in) - for genGlobalCtors (globalinit.go) to
-	// consume, once, after every global/function/constructor signature in the
+	// already visit declarations in) - for buildGlobalInitFn (globalinit.go)
+	// to consume, once, after every global/function/constructor signature in the
 	// whole package already exists. See CODEGEN.md's "Global var
 	// initializers" section for why declaration order (not a full
 	// dependency-graph topological sort) is this round's deliberately scoped
@@ -374,6 +374,16 @@ type Generator struct {
 	fmtLBracket  llvm.Value
 	fmtRBracket  llvm.Value
 	fmtNewline   llvm.Value
+
+	// fmtPtr/fmtPtrBare are the newline/bare format-string pair for a
+	// TypePointer value (see genPrintCall/genPrintValueBare, runtime.go) -
+	// same "%p"-based pattern as every other fmtInt*/fmtFloat*/fmtStr* pair
+	// above, just for a raw pointer value: standard C printf's own
+	// pointer-address specifier, matching this project's existing
+	// libc-printf-based printing convention exactly, no new runtime
+	// primitive needed.
+	fmtPtr     llvm.Value
+	fmtPtrBare llvm.Value
 
 	// argsGlobal is the private llvm_lang.args global genArgsCall reads from
 	// and buildArgsInitFn (args.go) populates once, at startup - see that
@@ -622,14 +632,14 @@ func (g *Generator) structLitFieldSlot(layout *structLayout, e ast.NodeIndex, i 
 }
 
 // globalInitEntry is one non-constant top-level `var`'s initializer, queued
-// by genGlobalVarDecl (Generator.globalInits) for genGlobalCtors
+// by genGlobalVarDecl (Generator.globalInits) for buildGlobalInitFn
 // (globalinit.go) to lower later, once every global/function/constructor
 // signature in the whole package already exists. tree is recorded alongside
 // glob/initNode (rather than assuming whatever tree is currently entered)
 // since globalInits accumulates across every file in the package before
-// genGlobalCtors ever consumes it - initNode is only ever meaningful relative
-// to the one Tree it came from (see ast.NodeIndex's doc comment), so
-// genGlobalCtors must re-enter the right tree before generating each entry.
+// buildGlobalInitFn ever consumes it - initNode is only ever meaningful
+// relative to the one Tree it came from (see ast.NodeIndex's doc comment), so
+// buildGlobalInitFn must re-enter the right tree before generating each entry.
 type globalInitEntry struct {
 	tree     *ast.Tree
 	glob     llvm.Value
@@ -645,7 +655,7 @@ type globalInitEntry struct {
 // exact same behavior this function has always had, unchanged. Anything else
 // keeps the zero initializer and is instead queued into g.globalInits, to be
 // lowered as real generated code inside the synthesized init function
-// genGlobalCtors builds once every global in the package has been declared
+// buildGlobalInitFn builds once every global in the package has been declared
 // (globalinit.go) - see LANGUAGE.md's "Global var initializers" section for
 // what's now legal there (a function call, a reference to another global, a
 // dynamic-array/slice literal, ...) and the declaration-order guarantee this

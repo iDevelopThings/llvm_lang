@@ -1000,14 +1000,15 @@ func (g *Generator) genValueEqual(t sema.Type, lv, rv llvm.Value) llvm.Value {
 		}
 		return result
 	default:
-		// checkEqualityOperands (sema/typecheck.go) admits == between two
-		// structs/arrays via plain Type.Equal on the whole aggregate type -
-		// it does not itself validate that every recursive field/element
-		// Kind is one this function actually implements, so this switch must
-		// cover every Kind a struct field or array element can legitimately
-		// have (every case above does, mirroring genMapKeyEqual's identical
-		// switch in maps.go, built for the same reason on the map-key side)
-		// rather than relying on sema to have pre-filtered them.
+		// checkEqualityOperands (sema/typecheck.go) now runs typeIsComparable
+		// over the whole aggregate type before ever admitting == between two
+		// structs/arrays - that recursively rejects a map/function-typed
+		// field/element, or a dynamic array anywhere inside one, so every
+		// Kind reaching this switch on a tree that already passed sema.Check
+		// is one of the cases above (mirroring genMapKeyEqual's identical
+		// switch in maps.go, gated the same way on the map-key side by the
+		// very same typeIsComparable). Genuinely unreachable given that
+		// invariant - not a case this function itself needs to widen.
 		panic("codegen: genValueEqual reached an unsupported type " + t.String())
 	}
 }

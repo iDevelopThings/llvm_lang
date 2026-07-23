@@ -629,13 +629,13 @@ lower a *global's* initializer to.
   literal, ...) - the global gets a zero-value initializer up front (matching
   Go's own zero-value convention for a global whose real initializer hasn't
   run yet), and its real initializer expression is queued
-  (`Generator.globalInits`) for `genGlobalCtors`
+  (`Generator.globalInits`) for `buildGlobalInitFn`
   (`src/codegen/globalinit.go`) to lower as real generated code, once every
   global and every function/constructor signature in the whole package
   already exists (a non-constant initializer's expression can reference
   either).
 
-**The synthesized init function, and `@llvm.global_ctors`:** `genGlobalCtors`
+**The synthesized init function, and `@llvm.global_ctors`:** `buildGlobalInitFn`
 builds one parameterless function (`llvm_lang.global_init`) - the exact same
 per-function generation state (entry block, fresh locals map, no enclosing
 loop/receiver/lambda-capture context) `genFuncBody`/`genConstructorBody`/
@@ -648,7 +648,8 @@ itself (the arena allocator, lambda thunks - see `runtime.go`/`expr.go`),
 this one keeps `AddFunction`'s own default linkage (external) rather than
 private: `cmd/llvmc`'s JIT driver looks it up directly by this exact name
 (see "JIT execution" below), which a private symbol has no name for at all.
-This function is then registered into LLVM's own `@llvm.global_ctors`
+`genCtors` (the same top-level pass that calls `buildGlobalInitFn`) then
+registers this function into LLVM's own `@llvm.global_ctors`
 mechanism - a standard, well-documented array of `{ i32, ptr, ptr }` entries
 (`{ priority, ctor function pointer, associated data }`, appending linkage)
 any real linked/loaded program's C runtime startup sequence scans and calls,
@@ -700,8 +701,19 @@ sign-extended to `i32` first, see "print's printf format specifiers" above -
 first, matching C's own variadic float-promotion rule), a string argument
 uses `"%.*s\n"` (the explicit length means a non-null-terminated string
 value never needs `strlen`), and a bool argument selects between two cached
-`"true"`/`"false"` string values first. **print always appends a trailing
-newline** - there's no separate "print without newline" builtin.
+`"true"`/`"false"` string values first. A pointer prints its raw address via
+`"%p\n"` (`fmtPtr`, `src/codegen/codegen.go`/`runtime.go`) - standard C
+`printf`'s own pointer-address specifier, no new runtime primitive needed.
+**print always appends a trailing newline** - there's no separate "print
+without newline" builtin.
+
+Not every `sema.Type` reaches this switch, by design: `checkPrintCall`
+(`src/sema/typecheck.go`) gates the argument through `typeIsPrintable` before
+codegen ever sees it - a bare function value or map value, or one nested
+anywhere inside a struct/array field, is rejected with a compile-time
+diagnostic there, so `genPrintCall`/`genPrintValueBare`'s own `default:`
+panic case is unreachable on a tree that already passed `sema.Check`, not a
+case either function still needs to grow.
 
 A struct or array value is rendered recursively, Go-`fmt`-`%v`-inspired (not
 an exact match of Go's own output, just a reasonable pick - see

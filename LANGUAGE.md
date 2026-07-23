@@ -972,8 +972,15 @@ lossy: `i32(5.5)` (float -> int) truncates deliberately, same as Go's own
   `bool`. Two structs are equal iff every corresponding field is equal,
   recursively (a field can itself be a struct or array); two arrays are equal
   iff every corresponding element is equal, recursively - the same rule Go
-  itself uses. Two pointers compare equal iff they hold the exact same
-  address (identity, not pointee-value comparison - dereference first,
+  itself uses. That recursion also requires every field/element to itself be
+  a comparable type, exactly the same rule the "Maps" section's
+  key-type restriction already states (a **dynamic array (`[]T`)**, a
+  **function type**, or **another map**, anywhere nested inside the struct/
+  array, is rejected with a compile-time diagnostic, not just at the top
+  level) - a struct or array containing one of those is simply not
+  comparable at all, on either side of `==`/`!=`. Two pointers compare equal
+  iff they hold the exact same address (identity, not pointee-value comparison
+  - dereference first,
   `*a == *b`, to compare what they point to). `nil` (see "Pointers" above)
   is a special case on either side of `==`/`!=` against a pointer - it's
   never itself a pointer *value*, only ever an untyped placeholder that
@@ -1032,9 +1039,16 @@ isn't supported.
 
 `print` is predeclared (see `sema.universeScope`), not a real function
 declaration, so it has no parameter list to check calls against. It accepts
-exactly one argument, of any type, and returns nothing (`void`). See
-`CODEGEN.md`'s "`print` builtin, concretely" section for how it renders each
-type at runtime.
+exactly one argument, of any *printable* type, and returns nothing (`void`).
+"Printable" is any numeric type, `bool`, `string`, a pointer, or a
+struct/array whose own fields/elements are themselves all printable,
+recursively (`sema.typeIsPrintable`) - a **function type** or a **map**,
+anywhere nested inside a struct/array, is rejected with a compile-time
+diagnostic instead of ever reaching codegen. This is a strictly larger set
+than what `==`/`!=` accepts (see the "Operators" section above): a dynamic
+array (`[]T`) prints fine but is never comparable. See `CODEGEN.md`'s
+"`print` builtin, concretely" section for how it renders each type at
+runtime.
 
 ## The `args()` builtin
 

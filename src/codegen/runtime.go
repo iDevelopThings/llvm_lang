@@ -99,6 +99,12 @@ func (g *Generator) setupRuntime() {
 	g.fmtFloat = g.defineCString(".fmt.float", "%f\n")
 	g.fmtStr = g.defineCString(".fmt.str", "%.*s\n")
 
+	// A pointer prints its raw address via standard C printf's own "%p"
+	// specifier - the same convention every other fmt* pair above already
+	// follows (declare a libc-printf format string, call through the same
+	// cached printfFn), no new runtime primitive needed.
+	g.fmtPtr = g.defineCString(".fmt.ptr", "%p\n")
+
 	// Struct/array printing (genPrintStructValue/genPrintArrayValue below)
 	// builds its output from repeated printf calls instead of one format
 	// string - a "bare" (no newline) specifier for each field/element, plus
@@ -115,6 +121,7 @@ func (g *Generator) setupRuntime() {
 	g.fmtLBracket = g.defineCString(".fmt.lbracket", "[")
 	g.fmtRBracket = g.defineCString(".fmt.rbracket", "]")
 	g.fmtNewline = g.defineCString(".fmt.newline", "\n")
+	g.fmtPtrBare = g.defineCString(".fmt.ptr.bare", "%p")
 
 	// Runtime trap diagnostics (see genBoundsCheck/genSliceRangeCheck, expr.go,
 	// and genMakeSizeCheck below) - one printf call with the actual runtime
@@ -572,10 +579,12 @@ func (g *Generator) genLenCall(argNode ast.NodeIndex) llvm.Value {
 	}
 }
 
-// genPrintCall lowers `print(arg)`. Every numeric width/bool/string prints
-// directly via a single self-contained printf call (its own format string
-// already includes the trailing newline - see AGENTS.md's "print builtin"
-// section); a struct or array value is rendered recursively
+// genPrintCall lowers `print(arg)`. Every numeric width/bool/string/pointer
+// prints directly via a single self-contained printf call (its own format
+// string already includes the trailing newline - see AGENTS.md's "print
+// builtin" section, and see fmtPtr's own doc comment (codegen.go) for a
+// pointer's "%p" raw-address format specifically); a struct or array value
+// is rendered recursively
 // (genPrintStructValue/genPrintArrayValue), field-by-field/element-by-
 // element, with the trailing newline appended once at the very end instead.
 // See AGENTS.md's codegen section for the exact struct/array format chosen
@@ -599,6 +608,8 @@ func (g *Generator) genPrintCall(argNode ast.NodeIndex) {
 		g.genPrintStringValue(g.boolStringValue(v))
 	case sema.TypeString:
 		g.genPrintStringValue(v)
+	case sema.TypePointer:
+		g.builder.CreateCall(g.printfType, g.printfFn, []llvm.Value{g.fmtPtr, v}, "")
 	case sema.TypeStruct:
 		g.genPrintStructValue(t, v)
 		g.genPrintLiteral(g.fmtNewline)
@@ -606,11 +617,13 @@ func (g *Generator) genPrintCall(argNode ast.NodeIndex) {
 		g.genPrintArrayValue(t, v)
 		g.genPrintLiteral(g.fmtNewline)
 	default:
-		// Every numeric width, string/bool/struct/array are the only Types
-		// print's single argument can ever have on a tree that already
-		// passed sema.Check (see checkPrintCall in sema/typecheck.go and the
-		// package doc comment) - TypeInvalid/TypeVoid/either untyped kind
-		// can't reach here.
+		// Every numeric width, string/bool/pointer/struct/array are the only
+		// Types print's single argument can ever have on a tree that already
+		// passed sema.Check (see checkPrintCall's typeIsPrintable gate in
+		// sema/typecheck.go, and the package doc comment) - TypeInvalid/
+		// TypeVoid/either untyped kind can't reach here, and a function/map
+		// value (bare or nested inside a struct/array field) is now rejected
+		// at sema before ever reaching codegen at all.
 		panic("codegen: print does not support values of type " + t.String())
 	}
 }
@@ -660,16 +673,22 @@ func (g *Generator) genPrintValueBare(t sema.Type, v llvm.Value) {
 		g.genPrintStringValueBare(g.boolStringValue(v))
 	case sema.TypeString:
 		g.genPrintStringValueBare(v)
+	case sema.TypePointer:
+		g.builder.CreateCall(g.printfType, g.printfFn, []llvm.Value{g.fmtPtrBare, v}, "")
 	case sema.TypeStruct:
 		g.genPrintStructValue(t, v)
 	case sema.TypeArray:
 		g.genPrintArrayValue(t, v)
 	default:
-		// Every numeric width, string/bool/struct/array are the only Types
-		// that exist (see sema/types.go) besides TypeInvalid/TypeVoid/either
-		// untyped kind - every reachable one is handled above, so this is
-		// unreachable on a tree that already passed sema.Check (see the
-		// package doc comment).
+		// Every numeric width, string/bool/pointer/struct/array are the only
+		// Types a struct field or array element reaching here can ever have
+		// on a tree that already passed sema.Check (see checkPrintCall's
+		// typeIsPrintable gate in sema/typecheck.go, recursing into every
+		// field/element exactly like this function's own callers do, and the
+		// package doc comment) - a function/map value nested anywhere inside
+		// is rejected there before ever reaching codegen, so this is
+		// genuinely unreachable, not a case this function itself needs to
+		// widen.
 		panic("codegen: genPrintValueBare reached an unsupported type " + t.String())
 	}
 }
