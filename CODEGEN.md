@@ -1728,28 +1728,42 @@ structure" (pure I/O + discovery, per its own doc comment); `compiler` is
 the next layer up - "given that loaded structure, actually run it through
 the semantic/codegen pipeline". It exposes exactly two entry points:
 
-- `CompilePackage(files []loader.SourceFile) *Result` - the flat-file-list
-  case (no real filesystem/`loader.Program` needed): `lexer.NewFile` ->
-  `parser.ParseFile` per file, then `sema.ResolvePackage` -> the shared
-  tail below. `treePackage` is nil going into `sema.CheckProgram` - a
-  single, import-less package has no cross-package export enforcement to
-  do at all (see `sema.CheckProgram`'s own doc comment).
-- `CompileProgram(prog *loader.Program) *Result` - the real,
+- `CompilePackage(files []loader.SourceFile, optimize bool) *Result` - the
+  flat-file-list case (no real filesystem/`loader.Program` needed):
+  `lexer.NewFile` -> `parser.ParseFile` per file, then `sema.ResolvePackage`
+  -> the shared tail below. `treePackage` is nil going into
+  `sema.CheckProgram` - a single, import-less package has no cross-package
+  export enforcement to do at all (see `sema.CheckProgram`'s own doc
+  comment).
+- `CompileProgram(prog *loader.Program, optimize bool) *Result` - the real,
   potentially-multi-package case: every package in `prog.Order` (already in
   dependency order - see that field's own doc comment) becomes one
   `sema.PackageUnit`, and every package's trees are flattened into one
   slice, driven through `sema.ResolveProgram` -> the same shared tail.
 
+`optimize` is a plain, explicit `bool` parameter on both entry points (this
+project's own established style over a hidden default or a functional-
+options pattern - no existing API in this codebase uses that shape) - see
+the "Optimization pipeline" section below for what it actually does and
+`cmd/llvmc`'s `-no-opt` flag for the one real caller that ever passes
+`false`.
+
 Both funnel into one unexported tail (`finishPipeline`) that mirrors this
 file's own `GeneratePackage`/multi-file writeup exactly: `sema.CheckProgram`
--> `codegen.GeneratePackage` -> LLVM's own module verifier, stopping at the
-first stage that reports an error-severity diagnostic in any file. A
-`Result` carries every tree, every tree's own merged diagnostics (`Diags`),
-and - only on full success - the generated, verified `*codegen.Module`
-(`nil` on any failure; a rarer verifier-only failure with no source
-position to attribute it to is `Result.VerifyErr` instead, `Diags` in that
-case being otherwise empty). Disposal of a returned `Module` is the caller's
-job, same as `codegen.GeneratePackage`'s own `Module.Dispose()` contract.
+-> `codegen.GeneratePackage` -> LLVM's own module verifier -> building the
+host target machine -> (when `optimize` is true) running the optimization
+pipeline, stopping at the first stage that reports an error-severity
+diagnostic in any file. A `Result` carries every tree, every tree's own
+merged diagnostics (`Diags`), and - only on full success - the generated,
+verified, (by default) optimized `*codegen.Module` plus the
+`llvm.TargetMachine` built alongside it (`Result.TargetMachine` - both `nil`/
+zero-value on any failure; a rarer verifier/target-machine/optimizer-only
+failure with no source position to attribute it to is `Result.VerifyErr`
+instead, `Diags` in that case being otherwise empty). Disposal of a returned
+`Module`/`TargetMachine` is the caller's job, same as
+`codegen.GeneratePackage`'s own `Module.Dispose()` contract - see the
+"Optimization pipeline" section for the full ownership/disposal story across
+`cmd/llvmc`'s three consumption paths.
 
 This package is deliberately **pure orchestration and CLI-agnostic**: no
 `io.Writer`/stderr, no exit codes, no flag handling, and no lexer/parser/
@@ -1757,6 +1771,152 @@ sema/codegen *logic* of its own beyond calling those packages' existing
 entry points in the right order - a `Result` is data a caller decides what
 to do with (print how it wants, choose an exit code, feed it to a JIT, feed
 it to an LSP), not something this package prints or exits on its own behalf.
+
+# Optimization pipeline
+
+Before this round, this compiler ran **zero LLVM optimization passes** -
+`finishPipeline` only ever called `llvm.VerifyModule` (correctness, not
+optimization) after codegen. This was discovered while benchmarking
+llvm_lang against Go/Node.js: a trivial 100M-iteration arithmetic loop ran
+~3x slower than equivalent Go/JS code, almost entirely explained by that gap
+- Go's compiler and V8's JIT both do real optimization; this compiler did
+none. `finishPipeline` now runs LLVM's own `default<O2>` pass pipeline (real
+optimization - inlining, mem2reg, GVN, LICM, DCE, and more) over every
+successfully-verified module by default, with an explicit escape hatch to
+turn it back off.
+
+**Why it lives in `finishPipeline`, not duplicated per consumption path** -
+JIT execution, `-emit-llvm`, and `-o` all funnel through
+`CompilePackage`/`CompileProgram` -> `finishPipeline` already (see the
+"`src/compiler`: pipeline orchestration" section above); running the
+optimizer once, right there, right after `llvm.VerifyModule` succeeds, means
+all three uniformly see the identical optimized module - including
+`-emit-llvm`, whose printed IR is optimized IR by default now, matching how
+`clang -emit-llvm -O2` already behaves (a real toolchain's `-emit-llvm`
+doesn't print unoptimized IR just because you asked to see IR instead of an
+executable).
+
+**`optimize bool`, threaded explicitly** - `CompilePackage`/`CompileProgram`/
+`finishPipeline` all take a plain `optimize bool` parameter (this project's
+own established style over a hidden default or functional options - see
+this file's own `CompilePackage`/`CompileProgram` bullets above) rather than
+always running `default<O2>` unconditionally. Every existing call site
+across the codebase passes `true` except `cmd/llvmc`'s real CLI entry point,
+which threads `!noOpt` through (see `-no-opt` below).
+
+**Why `default<O2>`, not `O1`/`O3`/`Os`/`Oz`** - `default<O2>` is LLVM's own
+standard, well-balanced pipeline (the same one `clang -O2` runs): real
+inlining/mem2reg/GVN/LICM/DCE without the more aggressive, occasionally
+UB-exploiting or code-size-inflating tradeoffs `default<O3>` makes, and
+without sacrificing runtime speed for code size the way `default<Os>`/
+`default<Oz>` do (not this project's goal at all - a hobby compiler chasing
+"my loop shouldn't be 3x slower than Go's", not embedded/size-constrained
+deployment).
+
+**`optimize` false genuinely restores the old, pre-this-round behavior
+byte-for-byte** - `RunPasses` is skipped *entirely* when `optimize` is
+false, never substituted with `"default<O0>"` (which is still a real,
+if minimal, pass pipeline, not "no pipeline at all"). This matters for
+debugging: comparing `-no-opt` output against a plain codegen dump lets you
+tell whether a bug lives in codegen itself or was introduced by an
+optimization pass, with total certainty that `-no-opt` changed nothing about
+what codegen itself produced.
+
+**The `TargetMachine`: built once, shared, not duplicated** - `finishPipeline`
+builds this host's own `llvm.TargetMachine`
+(`llvm.DefaultTargetTriple` -> `llvm.GetTargetFromTriple` ->
+`Target.CreateTargetMachine`) unconditionally, even when `optimize` is
+false, and exposes it via a new `Result.TargetMachine` field - both because
+`RunPasses` itself needs one (when `optimize` is true) to know which target
+to optimize for, and because `cmd/llvmc`'s `-o` AOT path
+(`compileToExecutable`) needs one anyway for its own `EmitToMemoryBuffer`
+object-code emission. Before this round, `compileToExecutable` built its own
+separate `TargetMachine` from scratch, duplicating those same three calls;
+it now just reuses `Result.TargetMachine` instead. Building a real host
+target machine needs LLVM's native-target infrastructure initialized first
+(`llvm.InitializeNativeTarget`/`llvm.InitializeNativeAsmPrinter` - the same
+pair `cmd/llvmc`'s own `initJIT`/`src/codegen`'s own test-only `jitInit`
+each already call before touching a target machine of their own) -
+`src/compiler` now does this itself too, guarded by its own `sync.Once`,
+since `buildTargetMachine` (called on every successful compile, not just an
+AOT one) is the first place in that package that ever resolves a real host
+target.
+
+**Disposal ownership** - a `TargetMachine` must be disposed exactly once,
+after every consumer that might still need it is done with it. `Result`'s
+own doc comment states the contract; concretely, across `cmd/llvmc`'s three
+consumption paths (`finish`, `main.go`):
+
+- **`-o` (AOT)**: `compileToExecutable` takes over ownership - it reuses
+  `res.TargetMachine` for its own `EmitToMemoryBuffer` call and disposes it
+  itself (alongside `mod`), so `finish` returns before ever reaching its own
+  dispose.
+- **`-emit-llvm`**: no further use for the target machine at all once
+  `RunPasses` (if it ran) is done - `finish` disposes it right alongside
+  `res.Module`.
+- **Plain JIT execution**: same as `-emit-llvm` - `jitRunMain` never touches
+  `res.TargetMachine`, so `finish` disposes it once `jitRunMain` returns.
+
+**Verifying optimization actually changes generated code, and that
+`-no-opt` actually restores the old shape** - both easy to check by eye via
+`-emit-llvm`:
+
+```powershell
+PS> .\llvmc.exe -emit-llvm -no-opt path\to\program.llx    # unoptimized: every
+                                                           # local still an
+                                                           # alloca/load/store,
+                                                           # every call still
+                                                           # a real call
+PS> .\llvmc.exe -emit-llvm path\to\program.llx             # optimized: dead
+                                                           # allocas promoted
+                                                           # to SSA registers
+                                                           # (mem2reg), trivial
+                                                           # calls inlined and
+                                                           # constant-folded
+                                                           # away entirely
+```
+
+A small worked example (`func addOne(x int) int { return x + 1 }` called
+once from `main` as `addOne(5) + 2`) makes the difference concrete: `-no-opt`
+emits `addOne` as a real function with an `alloca`/`store`/`load` for its
+parameter and a real `call` from `main`; the default optimized path emits
+`addOne` as a one-instruction `add`, and `main` as `ret i32 8` - the entire
+computation constant-folded away at compile time, with every unused runtime
+extern/global codegen would otherwise always emit (`printf`, `malloc`, the
+arena allocator, ...) dead-code-eliminated out of the module entirely, since
+this particular program never uses any of them.
+
+**A real bug this round's own verification caught and fixed: `printf`
+calls need the `nobuiltin` attribute.** LLVM's optimizer (specifically
+`SimplifyLibCalls`/`InstCombine`, part of `default<O2>`) recognizes any call
+literally named `printf` as the real libc function and is willing to
+rewrite it into a different, "equivalent" libc entry point it considers
+cheaper. Concretely: `genPrintLiteral` (`src/codegen/runtime.go`) - used for
+every struct/array bracket, element-separator space, and trailing newline -
+calls `printf` with a constant, single-character, no-format-specifier
+format string, which InstCombine happily rewrites into a bare `putchar`
+call. That rewrite is only truly safe if `putchar` and `printf` share the
+exact same underlying stdio buffer - not a safe assumption under this
+project's own JIT hosting (a mingw64-built process, LLJIT materializing
+symbols straight out of the already-running host process rather than one
+program's own normal, single, statically-linked CRT startup/shutdown
+sequence). The observed symptom: every literal bracket/space/newline
+silently vanished from a dynamic array's printed output under the default
+optimized path, while ordinary `"%d"`-style prints (no equivalent-libcall
+rewrite exists for those) kept working - the two families' surviving output
+visibly running together with no separators.
+
+The fix: every `printf` call this package emits now goes through one choke
+point, `callPrintf` (`src/codegen/runtime.go`), which tags the call site
+with LLVM's `nobuiltin` attribute - the same attribute Clang emits on every
+call in a translation unit built with `-fno-builtin`. It tells the optimizer
+this particular call must be treated as an ordinary, opaque external call,
+never recognized as the corresponding libc built-in, so no library-call
+rewrite ever applies to it - without disabling `printf`/libc recognition
+globally, which would give up real, safe optimizations everywhere else a
+compiled *program's own code* calls libc functions on its own terms (this
+is purely about this compiler's own codegen-emitted `printf` calls, not
+anything a user's `extern func`-declared FFI call would ever touch).
 
 # The `llvmc` CLI driver (`cmd/llvmc`)
 
@@ -1850,9 +2010,35 @@ so `printf` never actually fires and nothing is written to the real stdout
 beyond the IR text itself.
 
 Since this path never reaches `llvm.NewLLJIT`, disposal is a plain
-`Module.Dispose()` - same as the diagnostic/verification-failure paths below,
-not the JIT path's own ownership-transfer teardown (see "A non-obvious
-disposal detail" below).
+`Module.Dispose()`/`TargetMachine.Dispose()` pair - same as the diagnostic/
+verification-failure paths below, not the JIT path's own ownership-transfer
+teardown (see "A non-obvious disposal detail" below).
+
+**The IR printed here is optimized IR by default now** (see the
+"Optimization pipeline" section above) - the sample above predates that
+round and shows the plain, unoptimized shape codegen itself produces; pass
+`-no-opt` (below) alongside `-emit-llvm` to see that same shape today, or
+drop it to see what `default<O2>` actually does to it.
+
+## `-no-opt`: disabling the optimization pipeline
+
+```powershell
+.\llvmc.exe -no-opt path\to\program.llx               # JIT, unoptimized
+.\llvmc.exe -no-opt -emit-llvm path\to\program.llx     # dump unoptimized IR
+.\llvmc.exe -no-opt -o out.exe path\to\program.llx     # AOT, unoptimized
+```
+
+Skips `finishPipeline`'s `RunPasses` call entirely (see the "Optimization
+pipeline" section above for the full design) - not "run `default<O0>`
+instead," genuinely no optimization pipeline call at all - so the module
+JIT-executed/printed/AOT-compiled is byte-for-byte the same shape codegen
+itself produced, before this round's default-on optimization pipeline
+existed. Combines freely with `-emit-llvm`/`-o`, unlike those two flags'
+own mutual exclusivity with each other - optimization never changes program
+behavior/results, only speed/code shape, so every mode keeps working
+identically either way. Meant for debugging: comparing `-no-opt` output
+against the default optimized output tells you whether a bug lives in
+codegen itself or was introduced by an optimization pass.
 
 ## `-o`: AOT compilation to a native executable
 
@@ -1875,19 +2061,24 @@ given path instead.
 **The tail, concretely** (`compileToExecutable`, `cmd/llvmc/main.go`):
 
 1. **Emit a native object file** via LLVM's own target-machine backend
-   (`third_party/go-llvm`'s `target.go` - `llvm.DefaultTargetTriple()`,
-   `llvm.GetTargetFromTriple`, `Target.CreateTargetMachine`,
-   `TargetMachine.EmitToMemoryBuffer(mod, llvm.ObjectFile)`) - zero vendored-
-   binding changes were needed for this at all, full target-machine/object-
-   emission support was already there, unused until now. The exact same
-   native-target initialization the JIT path already performs
-   (`InitializeNativeTarget`/`InitializeNativeAsmPrinter`, `initJIT`) turned
-   out to already be sufficient - `LLVMInitializeNativeTarget`'s own C
-   implementation (`llvm-c/Target.h`) already initializes TargetInfo+Target+
-   TargetMC together for the host's native target, and
-   `InitializeNativeAsmPrinter` the AsmPrinter needed to actually emit real
-   machine code - confirmed concretely by this round's own AOT tests
-   succeeding, not assumed.
+   (`third_party/go-llvm`'s `target.go` - `TargetMachine.EmitToMemoryBuffer(mod,
+   llvm.ObjectFile)`) - zero vendored-binding changes were needed for this at
+   all, full target-machine/object-emission support was already there. As of
+   the optimization-pipeline round (see "Optimization pipeline" above),
+   `compileToExecutable` no longer builds its own `TargetMachine` here at
+   all - it reuses `res.TargetMachine`, already built once by
+   `src/compiler`'s own `finishPipeline` (`llvm.DefaultTargetTriple()` ->
+   `llvm.GetTargetFromTriple` -> `Target.CreateTargetMachine`, the same
+   three calls this function used to make on its own) and handed back
+   through `compiler.Result`. The native-target initialization that
+   construction needs (`InitializeNativeTarget`/`InitializeNativeAsmPrinter`)
+   likewise now happens inside `src/compiler` itself (guarded by its own
+   `sync.Once`) rather than this function's own `initJIT` call -
+   `LLVMInitializeNativeTarget`'s own C implementation (`llvm-c/Target.h`)
+   already initializes TargetInfo+Target+TargetMC together for the host's
+   native target, and `InitializeNativeAsmPrinter` the AsmPrinter needed to
+   actually emit real machine code - confirmed concretely by this round's own
+   AOT tests succeeding, not assumed.
 2. **Write the resulting object bytes to a temporary `.o` file** via a plain
    `os.CreateTemp`/`os.Remove` - not this project's own `afero.Fs` convention
    (see `AGENTS.md`'s "Standards" section): that convention exists so
@@ -1975,8 +2166,10 @@ directory's own doc comments).
   `sema.Resolve`/`sema.Check`/`codegen.Generate` entry points this section
   used to describe here), `sema.CheckProgram`, or `codegen.GeneratePackage`
   (the pipeline stops at the first stage reporting an error-severity
-  diagnostic in any file) - or the module failing LLVM's own verifier, or a
-  module with no `main` function to JIT-execute. Every diagnostic from
+  diagnostic in any file) - or the module failing LLVM's own verifier, or
+  (rarer still) `finishPipeline`'s own target-machine construction or (with
+  optimization on) its `RunPasses` call failing, or a module with no `main`
+  function to JIT-execute. Every diagnostic from
   whichever stage failed is printed to stderr via `diag.FormatSnippet` (a
   `file:line:col: severity: message` header plus the offending source line
   and a caret). With `-emit-llvm`, this is the only non-zero exit code

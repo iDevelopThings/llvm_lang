@@ -40,10 +40,11 @@ func double(x int) int {
 	return x * 2
 }
 `},
-	})
+	}, true)
 	t.Cleanup(func() {
 		if res.Module != nil {
 			res.Module.Dispose()
+			res.TargetMachine.Dispose()
 		}
 	})
 
@@ -89,10 +90,11 @@ func main() int {
 		t.Fatalf("LoadProgram: %v", err)
 	}
 
-	res := CompileProgram(prog)
+	res := CompileProgram(prog, true)
 	t.Cleanup(func() {
 		if res.Module != nil {
 			res.Module.Dispose()
+			res.TargetMachine.Dispose()
 		}
 	})
 
@@ -114,7 +116,7 @@ func main() {
 	print(
 }
 `},
-	})
+	}, true)
 
 	if res.Module != nil {
 		t.Fatalf("Module = non-nil, want nil on a parse error")
@@ -135,7 +137,7 @@ func main() {
 	print(doesNotExist)
 }
 `},
-	})
+	}, true)
 
 	if res.Module != nil {
 		res.Module.Dispose()
@@ -157,7 +159,7 @@ func main() {
 	print(a)
 }
 `},
-	})
+	}, true)
 
 	if res.Module != nil {
 		res.Module.Dispose()
@@ -188,10 +190,11 @@ func main() {
 	print(a)
 }
 `},
-	})
+	}, true)
 	t.Cleanup(func() {
 		if res.Module != nil {
 			res.Module.Dispose()
+			res.TargetMachine.Dispose()
 		}
 	})
 
@@ -216,7 +219,7 @@ func main() {
 	print(a)
 }
 `},
-	})
+	}, true)
 
 	if res.Module != nil {
 		res.Module.Dispose()
@@ -250,7 +253,7 @@ func main() int {
 	return make([]int, 2)
 }
 `},
-	})
+	}, true)
 
 	if res.Module != nil {
 		res.Module.Dispose()

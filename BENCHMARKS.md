@@ -140,3 +140,54 @@ rule out cross-session machine-state noise:
   magnitude (a low-single-digit-percent `ns/op` change either way, ~10%
   `allocs/op` on codegen's own Large fixture specifically) was judged not
   worth trading away the debuggability the feature exists to provide.
+
+## 2026-07-23 update - default-on `default<O2>` optimization pipeline
+
+Re-measured `BenchmarkCompilePackageSmall`/`Large` after this round's own
+change (see `DECISIONS.md`'s dated entry): `CompilePackage`/`CompileProgram`
+now always run LLVM's real `default<O2>` pass pipeline unless a caller
+explicitly opts out (`optimize` false - `cmd/llvmc`'s own `-no-opt` flag),
+and every existing call site (including this benchmark's own
+`benchmarkCompilePackage`, `src/compiler/bench_test.go`) keeps optimization
+on, matching every real caller's own new default - so this is the genuine
+new steady-state cost of `CompilePackage`, not a distinct "with optimize"
+variant benchmarked alongside an unchanged one. Lexer/parser/sema/codegen's
+own per-stage benchmarks are untouched by this round at all (none of them
+ever call through `src/compiler`), so only the end-to-end row moves:
+
+| Stage | Fixture | ns/op (before -> after) | B/op (before -> after) | allocs/op (before -> after) |
+|---|---|---:|---:|---:|
+| End-to-end (`CompilePackage`) | Small | 561,393 -> 11,850,009 | 198,388 -> 210,719 | 490 -> 543 |
+| End-to-end (`CompilePackage`) | Large | 13,661,341 -> 422,949,467 | 5,606,010 -> 5,852,045 | 7,051 -> 8,074 |
+
+- **This is a real, expected, large jump (~21x Small, ~31x Large), not a
+  regression to chase** - it's the actual cost of running LLVM's own
+  `default<O2>` pipeline (a large, fixed battery of analysis/transform
+  passes - inlining, mem2reg, GVN, LICM, DCE, and many more, see
+  `CODEGEN.md`'s "Optimization pipeline" section) over a module, which this
+  compiler previously never ran at all (see that same section's "why now" -
+  a real 100M-iteration arithmetic loop benchmarked ~3x slower than
+  equivalent Go/Node.js, entirely attributable to zero optimization ever
+  running). `B/op`/`allocs/op` barely move by comparison (+6% Small, +4%
+  Large) - almost all of the new cost is pure CPU time spent walking/
+  rewriting IR the pass pipeline already holds in memory, not new
+  allocation volume.
+- **Large's ns/op ratio to Small no longer sits in the ~22-26x band every
+  other stage (and this same end-to-end benchmark, before this round) still
+  does** - 422,949,467 / 11,850,009 ≈ 35.7x. This is expected, not a
+  linearity regression to fix: `default<O2>`'s own cost is not a fixed
+  per-module constant added on top of an otherwise-linear codegen cost - a
+  40x-larger module gives the pipeline's own interprocedural passes (inlining
+  in particular) proportionally more to actually do, so its own cost grows
+  somewhat faster than linearly with module size on top of the
+  already-linear stages beneath it. Nothing here is a correctness concern
+  (see this round's own JIT/AOT output-equivalence verification, not a
+  benchmarking task) - purely a compile-speed/runtime-speed tradeoff, made
+  deliberately and by explicit request.
+- **`-no-opt` exists precisely to opt back out of this cost** when compile
+  speed matters more than runtime speed for a given invocation (e.g. a fast
+  debug-iteration loop) - untested by this benchmark specifically (which
+  always passes `optimize` true, matching the new default), but skipping
+  `finishPipeline`'s `RunPasses` call entirely when `optimize` is false
+  means that path's own cost is unchanged from the pre-this-round numbers
+  above.

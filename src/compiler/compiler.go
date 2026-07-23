@@ -1,9 +1,14 @@
 // Package compiler drives an already-loaded llvm_lang program or package
 // (see src/loader) through the rest of the compiler pipeline - lexer/parser
-// output is turned into a resolved, type-checked, and code-generated LLVM
-// module: sema.ResolvePackage/ResolveProgram -> sema.CheckProgram ->
-// codegen.GeneratePackage -> LLVM's own module verifier - stopping at the
-// first stage that reports an error-severity diagnostic in any file.
+// output is turned into a resolved, type-checked, code-generated, and (by
+// default) optimized LLVM module: sema.ResolvePackage/ResolveProgram ->
+// sema.CheckProgram -> codegen.GeneratePackage -> LLVM's own module verifier
+// -> building the host target machine -> (when the caller's own optimize
+// parameter is true) running LLVM's "default<O2>" optimization pipeline -
+// stopping at the first stage that reports an error-severity diagnostic in
+// any file. See CompilePackage/CompileProgram's own doc comments for the
+// optimize parameter, and CODEGEN.md's "Optimization pipeline" section for
+// the full design.
 //
 // This is the layer directly above src/loader in this project's own
 // architecture: loader owns "given a path, discover/parse/resolve the
@@ -22,6 +27,7 @@ package compiler
 
 import (
 	"fmt"
+	"sync"
 
 	"llvm_lang/src/ast"
 	"llvm_lang/src/codegen"
@@ -33,6 +39,16 @@ import (
 
 	"tinygo.org/x/go-llvm"
 )
+
+// optimizationPipeline is the pass-pipeline string handed to
+// llvm.Module.RunPasses (see finishPipeline) whenever a caller asks for
+// optimization - the standard, well-balanced "opt -passes=default<O2>"
+// pipeline (inlining, mem2reg, GVN, LICM, DCE, ...), the same one clang uses
+// at -O2. Deliberately not default<O3> (more aggressive/riskier - larger
+// code, longer compiles, occasionally exposes UB-sensitive miscompiles) or
+// default<Os>/default<Oz> (size-optimized, not this project's goal) - see
+// DECISIONS.md's dated entry for the full "why O2" writeup.
+const optimizationPipeline = "default<O2>"
 
 // Result is the outcome of compiling a program (see CompileProgram) or a
 // single import-less package's file list (see CompilePackage) through the
@@ -58,10 +74,25 @@ type Result struct {
 	// The caller owns disposal (Module.Dispose(), or handing it to
 	// llvm.NewLLJIT, whichever it needs).
 	Module *codegen.Module
+	// TargetMachine is the host target machine built once inside
+	// finishPipeline - only meaningful when Module != nil (never built at
+	// all on a failed compile). Used internally to run the optimization
+	// pipeline (see the optimize parameter on CompilePackage/CompileProgram)
+	// and handed back here so a caller with its own further use for one (the
+	// -o AOT path's own object-code emission, cmd/llvmc's
+	// compileToExecutable) doesn't need to build a second, separate one.
+	// Caller-owned disposal, exactly like Module: TargetMachine.Dispose()
+	// exactly once, whenever every consumer that might still need it (an AOT
+	// path's own EmitToMemoryBuffer call included) is done with it - never
+	// before, never twice.
+	TargetMachine llvm.TargetMachine
 	// VerifyErr is set only when codegen itself reported no diagnostics but
-	// the generated module still failed LLVM's own verifier - a real bug in
-	// codegen's own lowering, not attributable to any source position, hence
-	// not a Diags entry. Module is nil whenever this is set.
+	// the generated module still failed LLVM's own verifier, or a later
+	// infrastructure-level step past that point (building the host target
+	// machine, or - when optimize is true - running the optimization
+	// pipeline) failed - none of these are attributable to any source
+	// position, hence never a Diags entry. Module is nil whenever this is
+	// set.
 	VerifyErr error
 }
 
@@ -72,7 +103,10 @@ type Result struct {
 // an in-process caller (a test, or a future tool) reaches for when it has
 // source text in hand but no real filesystem/loader.Program to build one
 // from.
-func CompilePackage(files []loader.SourceFile) *Result {
+//
+// optimize threads straight through to finishPipeline's own RunPasses call -
+// see its doc comment for what that actually does.
+func CompilePackage(files []loader.SourceFile, optimize bool) *Result {
 	trees := make([]*ast.Tree, len(files))
 	diags := make(map[*ast.Tree]*diag.Bag, len(files))
 	anyParseErrors := false
@@ -99,7 +133,7 @@ func CompilePackage(files []loader.SourceFile) *Result {
 	// as reasonable a choice as any for a multi-file package. treePackage is
 	// nil - a single package has no cross-package export enforcement to do
 	// at all (see sema.CheckProgram's own doc comment).
-	return finishPipeline(trees, diags, infos, rdiags, nil, files[0].Name)
+	return finishPipeline(trees, diags, infos, rdiags, nil, files[0].Name, optimize)
 }
 
 // CompileProgram compiles prog - potentially spanning several packages
@@ -119,7 +153,10 @@ func CompilePackage(files []loader.SourceFile) *Result {
 // CODEGEN.md's "Multi-file packages" section for why one shared Module
 // needs no package-boundary awareness at all, the same reasoning extended
 // one level up unchanged.
-func CompileProgram(prog *loader.Program) *Result {
+//
+// optimize threads straight through to finishPipeline's own RunPasses call -
+// see its doc comment for what that actually does.
+func CompileProgram(prog *loader.Program, optimize bool) *Result {
 	var trees []*ast.Tree
 	diags := make(map[*ast.Tree]*diag.Bag)
 	units := make([]*sema.PackageUnit, 0, len(prog.Order))
@@ -172,7 +209,7 @@ func CompileProgram(prog *loader.Program) *Result {
 	// package's first file is as reasonable a choice as any for the whole
 	// program's module name.
 	moduleName := prog.Entry.Files[0].Name
-	return finishPipeline(trees, diags, infos, rdiags, treePackage, moduleName)
+	return finishPipeline(trees, diags, infos, rdiags, treePackage, moduleName, optimize)
 }
 
 // finishPipeline drives the shared tail of the pipeline once every tree has
@@ -182,8 +219,22 @@ func CompileProgram(prog *loader.Program) *Result {
 // ResolveProgram the caller used): merge rdiags into diags and stop on any
 // resolve error; otherwise sema.CheckProgram, merge + stop on any check
 // error; otherwise codegen.GeneratePackage, merge + stop on any codegen
-// error; otherwise LLVM's own module verifier.
-func finishPipeline(trees []*ast.Tree, diags map[*ast.Tree]*diag.Bag, infos map[*ast.Tree]*sema.Info, rdiags map[*ast.Tree]*diag.Bag, treePackage map[*ast.Tree]*sema.Scope, moduleName string) *Result {
+// error; otherwise LLVM's own module verifier; otherwise build the host
+// target machine (buildTargetMachine) and, when optimize is true, run
+// optimizationPipeline ("default<O2>") over the verified module via
+// llvm.Module.RunPasses before ever handing it back.
+//
+// This is the one place in the whole pipeline any of these three JIT/
+// -emit-llvm/-o consumption paths ever runs, so every one of them uniformly
+// sees the same optimized (or, with optimize false, exactly as-generated)
+// module - see CODEGEN.md's "Optimization pipeline" section for the full
+// design and why it lives here rather than duplicated per caller.
+//
+// optimize false does not run "default<O0>" - RunPasses is skipped
+// entirely, so today's pre-optimization behavior is restored byte-for-byte,
+// useful for isolating whether a bug lives in codegen itself or was
+// introduced by an optimization pass.
+func finishPipeline(trees []*ast.Tree, diags map[*ast.Tree]*diag.Bag, infos map[*ast.Tree]*sema.Info, rdiags map[*ast.Tree]*diag.Bag, treePackage map[*ast.Tree]*sema.Scope, moduleName string, optimize bool) *Result {
 	if mergeStage(diags, trees, rdiags) {
 		return &Result{
 			Trees: trees,
@@ -226,11 +277,83 @@ func finishPipeline(trees []*ast.Tree, diags map[*ast.Tree]*diag.Bag, infos map[
 		}
 	}
 
-	return &Result{
-		Trees:  trees,
-		Diags:  diags,
-		Module: mod,
+	// Built unconditionally (even when optimize is false) - a caller's own
+	// further use for one (cmd/llvmc's -o AOT path) needs it regardless of
+	// whether optimization actually ran, and building one here once is
+	// exactly what lets that path stop building a second, separate one of
+	// its own (see Result.TargetMachine's own doc comment).
+	tm, err := buildTargetMachine()
+	if err != nil {
+		mod.Dispose()
+		return &Result{
+			Trees:     trees,
+			Diags:     diags,
+			VerifyErr: fmt.Errorf("building target machine: %w", err),
+		}
 	}
+
+	if optimize {
+		pbo := llvm.NewPassBuilderOptions()
+		err := mod.LLVM.RunPasses(optimizationPipeline, tm, pbo)
+		pbo.Dispose()
+		if err != nil {
+			mod.Dispose()
+			tm.Dispose()
+			return &Result{
+				Trees:     trees,
+				Diags:     diags,
+				VerifyErr: fmt.Errorf("running optimization passes: %w", err),
+			}
+		}
+	}
+
+	return &Result{
+		Trees:         trees,
+		Diags:         diags,
+		Module:        mod,
+		TargetMachine: tm,
+	}
+}
+
+// initNativeTargetOnce/initNativeTargetErr guard llvm.InitializeNativeTarget/
+// llvm.InitializeNativeAsmPrinter - process-global LLVM setup meant to run at
+// most once per process (mirroring cmd/llvmc/main.go's own initJIT and
+// src/codegen/codegen_test.go's own jitInit, each independently needing the
+// exact same pair of calls before touching a host target at all) - now
+// needed here too, since buildTargetMachine (called unconditionally by
+// finishPipeline, on every successful compile) is the first place in this
+// package that ever resolves a real host Target/TargetMachine.
+var (
+	initNativeTargetOnce sync.Once
+	initNativeTargetErr  error
+)
+
+// buildTargetMachine resolves this host's own target machine
+// (llvm.DefaultTargetTriple -> llvm.GetTargetFromTriple ->
+// Target.CreateTargetMachine, the same three calls cmd/llvmc/main.go's own
+// compileToExecutable used to make on its own before this round - see
+// CODEGEN.md's "Optimization pipeline" section) - used both to drive
+// RunPasses (when optimize is true) and hand back via Result.TargetMachine
+// for the -o AOT path's own object-code emission.
+func buildTargetMachine() (llvm.TargetMachine, error) {
+	initNativeTargetOnce.Do(func() {
+		if err := llvm.InitializeNativeTarget(); err != nil {
+			initNativeTargetErr = err
+			return
+		}
+		initNativeTargetErr = llvm.InitializeNativeAsmPrinter()
+	})
+	if initNativeTargetErr != nil {
+		return llvm.TargetMachine{}, initNativeTargetErr
+	}
+
+	triple := llvm.DefaultTargetTriple()
+	target, err := llvm.GetTargetFromTriple(triple)
+	if err != nil {
+		return llvm.TargetMachine{}, err
+	}
+
+	return target.CreateTargetMachine(triple, "", "", llvm.CodeGenLevelDefault, llvm.RelocDefault, llvm.CodeModelDefault), nil
 }
 
 // mergeStage merges each tree's bag from stageDiags into diags (see

@@ -1348,3 +1348,97 @@ dynamic-array-field silent-`true` bug) now produce a clean compile-time
 diagnostic instead. See `LANGUAGE.md`'s Operators section and its `print`
 builtin section for the user-facing rule, and `CODEGEN.md`'s "`print`
 builtin, concretely" section for the pointer-printing addition.
+
+---
+
+## 2026-07-23 - Default-on LLVM `default<O2>` optimization pipeline, with a `-no-opt` escape hatch
+
+**Decision:** `src/compiler`'s `finishPipeline` now runs LLVM's real
+`default<O2>` pass pipeline (`llvm.Module.RunPasses`, the vendored
+`third_party/go-llvm`'s `passes.go` - already fully present, unused until
+now) over every module right after `llvm.VerifyModule` succeeds, in the one
+shared pipeline tail every consumption path (JIT execution, `-emit-llvm`,
+`-o`) already funnels through - not duplicated per path. `CompilePackage`/
+`CompileProgram`/`finishPipeline` all gained an explicit `optimize bool`
+parameter (this project's own established style over a hidden default or a
+functional-options pattern - no existing API here uses that shape); every
+existing call site now passes `true` except `cmd/llvmc`'s new `-no-opt` CLI
+flag, which threads `false` through when set. `finishPipeline` also now
+builds this host's own `llvm.TargetMachine` once, unconditionally (needed
+either way: to drive `RunPasses` when `optimize` is true, and for `-o`'s own
+object-code emission regardless), and exposes it via a new
+`Result.TargetMachine` field - `cmd/llvmc`'s `compileToExecutable` (the `-o`
+AOT tail) now reuses that instead of building a second, separate
+`TargetMachine` of its own the way it used to.
+
+**Why now:** discovered while benchmarking llvm_lang against Go/Node.js - a
+trivial 100M-iteration arithmetic loop ran ~3x slower than equivalent Go/JS
+code, and grepping/reading `src/compiler/compiler.go` directly confirmed
+why: this compiler ran **zero LLVM optimization passes**, ever, at any
+stage. Go's compiler and V8's JIT both do real optimization; this one did
+none. The 100M-loop benchmark's own gap is almost entirely explained by
+that, not by anything else in codegen's own lowering.
+
+**Why `default<O2>`, not `O1`/`O3`/`Os`/`Oz`:** `O2` is LLVM's own standard,
+well-balanced pipeline - the same one `clang -O2` runs - giving real
+inlining/mem2reg/GVN/LICM/DCE without `O3`'s more aggressive, occasionally
+UB-exploiting/code-size-inflating tradeoffs, and without `Os`/`Oz` trading
+away runtime speed for code size (not this project's goal - a hobby
+compiler chasing "don't be 3x slower than Go," not embedded/size-constrained
+deployment).
+
+**Why on by default, with a disable flag, not opt-in:** every real consumer
+of this compiler (the JIT path, `-emit-llvm`, `-o`) wants fast code by
+default - matching how every mainstream compiler (`clang`, `go build`,
+`rustc`) treats *some* optimization as the ordinary, expected case, not a
+special mode you have to ask for. `-no-opt` exists specifically for
+debugging: comparing its output against the default optimized output tells
+you whether a bug lives in codegen's own lowering or was introduced by an
+optimization pass - and, unlike a hypothetical `"default<O0>"` substitution,
+`-no-opt` skips `RunPasses` entirely, so it's a genuine, byte-for-byte
+restoration of this compiler's pre-this-round behavior, not "a different,
+still-real pass pipeline."
+
+**Why the `TargetMachine` moved into `src/compiler` and got shared, not left
+duplicated:** `cmd/llvmc/main.go`'s `-o` tail (`compileToExecutable`) already
+built its own `TargetMachine` from scratch (`llvm.DefaultTargetTriple` ->
+`llvm.GetTargetFromTriple` -> `Target.CreateTargetMachine`) purely for its
+own object-code emission. `RunPasses` needs one too, and `finishPipeline` is
+now the one place that always runs regardless of which consumption path the
+caller ultimately wants - building it there once, and handing it back via
+`Result` for `-o`'s own further use, removes the duplication instead of
+adding a second copy of the same three calls. Disposal is caller-owned,
+exactly like `Result.Module` already is: `cmd/llvmc`'s `finish` disposes it
+directly for the `-emit-llvm`/JIT paths (neither has any further use for
+it); `compileToExecutable` takes over ownership for `-o` (it needs the
+`TargetMachine` alive through its own `EmitToMemoryBuffer` call) and disposes
+it itself instead.
+
+**A real regression this round's own verification caught, not shipped:**
+turning on `default<O2>` broke dynamic array/struct printing - every literal
+punctuation character `genPrintLiteral` prints (`[`, `]`, ` `, the trailing
+newline) vanished from JIT/AOT output, because LLVM's `SimplifyLibCalls`
+recognizes `printf` called with a constant, single-character,
+no-format-specifier format string and rewrites it into a bare `putchar`
+call - not a safe rewrite under this project's own JIT hosting (LLJIT
+materializing symbols straight out of the already-running host process,
+rather than through one program's own single, statically-linked CRT
+startup/shutdown sequence), where `putchar`'s and `printf`'s underlying
+stdio buffers can't be assumed to be the same one. Fixed by routing every
+`printf` call this package emits through one new choke point,
+`callPrintf` (`src/codegen/runtime.go`), which tags the call site with
+LLVM's `nobuiltin` attribute (the same attribute Clang emits under
+`-fno-builtin`) - telling the optimizer never to recognize these particular
+calls as the corresponding libc built-in, so no library-call rewrite ever
+applies to them, without disabling `printf`/libc recognition globally (which
+would give up real, safe optimizations everywhere a *user's* compiled
+program calls libc functions on its own terms). Caught by this round's own
+full-example regression sweep (optimized vs. `-no-opt` output diffed for
+every program under `examples/`) before being considered done, not shipped
+and discovered later.
+
+**Status:** shipped. See `CODEGEN.md`'s new "Optimization pipeline" section
+for the full design (including the `nobuiltin` fix's own write-up) and
+`BENCHMARKS.md`'s dated entry for the resulting `CompilePackage` end-to-end
+cost increase (real and expected - the actual price of the passes now
+genuinely running).

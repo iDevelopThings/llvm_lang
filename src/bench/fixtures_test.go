@@ -23,10 +23,11 @@ func TestFixturesCompileCleanly(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			res := compiler.CompilePackage([]loader.SourceFile{{Name: "fixture.llx", Src: tt.src}})
+			res := compiler.CompilePackage([]loader.SourceFile{{Name: "fixture.llx", Src: tt.src}}, true)
 			t.Cleanup(func() {
 				if res.Module != nil {
 					res.Module.Dispose()
+					res.TargetMachine.Dispose()
 				}
 			})
 			if res.Module == nil {

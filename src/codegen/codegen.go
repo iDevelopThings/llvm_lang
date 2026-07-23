@@ -324,24 +324,29 @@ type Generator struct {
 	// Runtime externs and cached format-string globals - see runtime.go.
 	printfType llvm.Type
 	printfFn   llvm.Value
-	mallocType llvm.Type
-	mallocFn   llvm.Value
-	freeType   llvm.Type
-	freeFn     llvm.Value
-	memcpyType llvm.Type
-	memcpyFn   llvm.Value
-	memcmpType llvm.Type
-	memcmpFn   llvm.Value
-	memsetType llvm.Type
-	memsetFn   llvm.Value
-	trapType   llvm.Type
-	trapFn     llvm.Value
-	fflushType llvm.Type
-	fflushFn   llvm.Value
-	fmtInt     llvm.Value
-	fmtInt64   llvm.Value
-	fmtFloat   llvm.Value
-	fmtStr     llvm.Value
+	// noBuiltinAttrKind is the "nobuiltin" enum attribute kind ID (looked up
+	// once in setupRuntime, cached here rather than re-resolving the kind ID
+	// by name on every single call site) - see callPrintf's own doc comment
+	// (runtime.go) for why every printf call this package emits needs it.
+	noBuiltinAttrKind uint
+	mallocType        llvm.Type
+	mallocFn          llvm.Value
+	freeType          llvm.Type
+	freeFn            llvm.Value
+	memcpyType        llvm.Type
+	memcpyFn          llvm.Value
+	memcmpType        llvm.Type
+	memcmpFn          llvm.Value
+	memsetType        llvm.Type
+	memsetFn          llvm.Value
+	trapType          llvm.Type
+	trapFn            llvm.Value
+	fflushType        llvm.Type
+	fflushFn          llvm.Value
+	fmtInt            llvm.Value
+	fmtInt64          llvm.Value
+	fmtFloat          llvm.Value
+	fmtStr            llvm.Value
 
 	// Runtime trap diagnostic messages (see CODEGEN.md's "Runtime trap
 	// diagnostics" section) - printed via printf immediately before every

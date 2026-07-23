@@ -307,7 +307,7 @@ func (g *Generator) genMapTrapIfNil(mapVal llvm.Value) {
 	g.builder.CreateCondBr(isNil, trapBB, okBB)
 
 	g.builder.SetInsertPointAtEnd(trapBB)
-	g.builder.CreateCall(g.printfType, g.printfFn, []llvm.Value{g.fmtMapNilTrap}, "")
+	g.callPrintf([]llvm.Value{g.fmtMapNilTrap})
 	g.builder.CreateCall(g.fflushType, g.fflushFn, []llvm.Value{llvm.ConstNull(g.ptrTy)}, "")
 	g.builder.CreateCall(g.trapType, g.trapFn, nil, "")
 	g.builder.CreateUnreachable()

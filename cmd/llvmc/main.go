@@ -23,12 +23,22 @@
 //	llvmc <directory>
 //	llvmc -emit-llvm <file.llx or directory>
 //	llvmc -o <output> <file.llx or directory>
+//	llvmc -no-opt <file.llx or directory>
 //
 // The -emit-llvm flag runs the exact same pipeline (including LLVM's own
 // module verifier) but, instead of JIT-executing the result, prints the
 // generated module's LLVM IR text to stdout and exits 0 without ever
 // executing anything - useful for inspecting what a language feature lowers
 // to without writing a throwaway `go test` each time.
+//
+// The -no-opt flag disables the optimization pipeline src/compiler's
+// finishPipeline otherwise always runs by default (LLVM's standard
+// "default<O2>" pass pipeline - see CODEGEN.md's "Optimization pipeline"
+// section) - useful for comparing optimized vs. raw codegen output, or
+// isolating whether a bug is in codegen itself or was introduced by an
+// optimization pass. Combines freely with -emit-llvm/-o; optimization
+// never changes program behavior, only speed/code shape, so every mode
+// keeps working identically either way.
 //
 // The -o flag (see CODEGEN.md's "-o: AOT compilation to a native executable"
 // section) runs the exact same pipeline, then - instead of JIT-executing or
@@ -116,9 +126,9 @@ func main() {
 }
 
 // usage is the short usage message printed on any usage error, and also
-// documents the -emit-llvm/-o flags (see the package doc comment for the
-// full exit-code writeup).
-const usage = "usage: llvmc [-emit-llvm | -o <output>] <file.llx | directory>"
+// documents the -emit-llvm/-o/-no-opt flags (see the package doc comment
+// for the full exit-code writeup).
+const usage = "usage: llvmc [-emit-llvm | -o <output>] [-no-opt] <file.llx | directory>"
 
 // run is main's testable body: it never calls os.Exit itself, so a test can
 // invoke it directly and just inspect the returned code plus whatever was
@@ -139,6 +149,11 @@ func run(args []string, stderr io.Writer) int {
 		"o",
 		"",
 		"compile to a standalone native executable at this path instead of JIT-executing or emitting LLVM IR",
+	)
+	noOpt := fs.Bool(
+		"no-opt",
+		false,
+		"skip the default LLVM optimization pipeline (default<O2>), keeping the module exactly as codegen produced it - useful for debugging",
 	)
 
 	if err := fs.Parse(args); err != nil {
@@ -164,10 +179,10 @@ func run(args []string, stderr io.Writer) int {
 
 	// Bypasses compileAndRunProgram (unchanged, still JIT-or-emit-llvm only -
 	// see its own doc comment) since only this real CLI entry point ever
-	// knows about -o; every in-process test still goes through
+	// knows about -o/-no-opt; every in-process test still goes through
 	// compileAndRun/compileAndRunPackage/compileAndRunProgram exactly as
-	// before, always with outputPath "".
-	return finish(compiler.CompileProgram(prog), stderr, *output, *emitLLVM)
+	// before, always with outputPath "" and optimization on.
+	return finish(compiler.CompileProgram(prog, !*noOpt), stderr, *output, *emitLLVM)
 }
 
 // compileAndRun drives the full pipeline for a single source file - the
@@ -189,8 +204,12 @@ func compileAndRun(name, src string, stderr io.Writer, emitLLVM bool) int {
 // which build source strings directly with no real file/directory on disk,
 // don't need one - see compileAndRunProgram for the real multi-*package*
 // (import-aware) driver run actually uses.
+//
+// Always compiles with optimization on (compiler.CompilePackage's optimize
+// true) - only run's own real CLI entry point ever threads -no-opt through;
+// no existing test here has a specific reason to compile unoptimized.
 func compileAndRunPackage(files []loader.SourceFile, stderr io.Writer, emitLLVM bool) int {
-	return finish(compiler.CompilePackage(files), stderr, "", emitLLVM)
+	return finish(compiler.CompilePackage(files, true), stderr, "", emitLLVM)
 }
 
 // compileAndRunProgram drives the full pipeline for prog - a whole program,
@@ -200,25 +219,37 @@ func compileAndRunPackage(files []loader.SourceFile, stderr io.Writer, emitLLVM 
 // diagnostics were already collected then, not here) - via
 // compiler.CompileProgram, then this CLI's own diagnostic-printing/
 // JIT-or-emit tail (finish), exactly like compileAndRunPackage.
+//
+// Always compiles with optimization on - see compileAndRunPackage's own
+// doc comment for why.
 func compileAndRunProgram(prog *loader.Program, stderr io.Writer, emitLLVM bool) int {
-	return finish(compiler.CompileProgram(prog), stderr, "", emitLLVM)
+	return finish(compiler.CompileProgram(prog, true), stderr, "", emitLLVM)
 }
 
 // finish is this CLI's own tail shared by compileAndRunPackage/
 // compileAndRunProgram/run, once src/compiler has already driven res's trees
-// through the whole resolve/check/codegen/verify pipeline: print every
-// tree's diagnostics (any diagnostics collected along the way - warnings
-// included - are printed even when the pipeline ultimately succeeded, so
-// nothing collected is silently dropped), then, if res.Module is nil,
-// report why (a real diagnostic, or - more rarely - res.VerifyErr) and
-// return the compile-error exit code; otherwise exactly one of three
-// mutually exclusive tails runs against the verified module: AOT-compile it
-// to outputPath (compileToExecutable, if outputPath != ""), dump its LLVM IR
-// text (-emit-llvm), or JIT-execute its `main` (the default, neither of the
-// above). outputPath and emitLLVM are never both meaningful at once - run
-// itself already rejects that combination as a usage error before ever
-// reaching this function - so outputPath != "" is checked first and always
-// wins if it's ever somehow both.
+// through the whole resolve/check/codegen/verify/optimize pipeline: print
+// every tree's diagnostics (any diagnostics collected along the way -
+// warnings included - are printed even when the pipeline ultimately
+// succeeded, so nothing collected is silently dropped), then, if res.Module
+// is nil, report why (a real diagnostic, or - more rarely - res.VerifyErr)
+// and return the compile-error exit code; otherwise exactly one of three
+// mutually exclusive tails runs against the verified (and, by default,
+// optimized) module: AOT-compile it to outputPath (compileToExecutable, if
+// outputPath != ""), dump its LLVM IR text (-emit-llvm), or JIT-execute its
+// `main` (the default, neither of the above). outputPath and emitLLVM are
+// never both meaningful at once - run itself already rejects that
+// combination as a usage error before ever reaching this function - so
+// outputPath != "" is checked first and always wins if it's ever somehow
+// both.
+//
+// res.TargetMachine disposal: compileToExecutable takes ownership of it (it
+// reuses res.TargetMachine for its own EmitToMemoryBuffer call, rather than
+// building a second one - see CODEGEN.md's "Optimization pipeline" section)
+// and disposes it itself, so the outputPath != "" branch returns before
+// ever reaching this function's own dispose - the -emit-llvm and JIT tails
+// have no further use for it at all, so the deferred Dispose right below
+// that branch covers both of them uniformly.
 //
 // This is the only place left in this package that's CLI-specific rather
 // than pipeline orchestration: printing (io.Writer/diag.FormatSnippet),
@@ -241,8 +272,9 @@ func finish(res *compiler.Result, stderr io.Writer, outputPath string, emitLLVM 
 	}
 
 	if outputPath != "" {
-		return compileToExecutable(res.Module, outputPath, stderr)
+		return compileToExecutable(res.Module, res.TargetMachine, outputPath, stderr)
 	}
+	defer res.TargetMachine.Dispose()
 
 	// -emit-llvm: dump the verified module's IR text and stop here - this
 	// path never reaches llvm.NewLLJIT, so a plain res.Module.Dispose()
@@ -279,10 +311,14 @@ func finish(res *compiler.Result, stderr io.Writer, outputPath string, emitLLVM 
 // program calling the same APIs - no special linking flags are needed for
 // either case.
 //
-// mod is always disposed before this returns (successfully or not) - this
-// path never reaches llvm.NewLLJIT, so a plain Module.Dispose() is correct,
-// the same ownership story -emit-llvm's own success path (finish, above)
-// already has.
+// tm is src/compiler's own Result.TargetMachine - already built once inside
+// finishPipeline (see CODEGEN.md's "Optimization pipeline" section) and
+// reused here rather than this function building a second, separate one of
+// its own the way it used to. mod and tm are both always disposed before
+// this returns (successfully or not) - this path never reaches
+// llvm.NewLLJIT, so a plain Module.Dispose()/TargetMachine.Dispose() pair is
+// correct, the same ownership story -emit-llvm's own success path (finish,
+// above) already has for mod.
 //
 // The temporary object file goes through a plain os.CreateTemp/os.Remove,
 // not this project's own afero.Fs convention (see AGENTS.md's "Standards"
@@ -293,26 +329,8 @@ func finish(res *compiler.Result, stderr io.Writer, outputPath string, emitLLVM 
 // file for a CLI-only link step with no test needing to fake its contents,
 // immediately removed once gcc has read it - a narrow, deliberate exception,
 // not a quiet departure from that convention.
-func compileToExecutable(mod *codegen.Module, outputPath string, stderr io.Writer) int {
+func compileToExecutable(mod *codegen.Module, tm llvm.TargetMachine, outputPath string, stderr io.Writer) int {
 	defer mod.Dispose()
-
-	// The exact same native-target initialization the JIT path already
-	// performs (initJIT, below) - LLVMInitializeNativeTarget's own C
-	// implementation already initializes TargetInfo+Target+TargetMC together
-	// for the host's native target, and LLVMInitializeNativeAsmPrinter the
-	// AsmPrinter needed to actually emit machine code - there is no separate
-	// "target machine" initialization step needed beyond what JIT execution
-	// already relies on.
-	initJIT()
-
-	triple := llvm.DefaultTargetTriple()
-	target, err := llvm.GetTargetFromTriple(triple)
-	if err != nil {
-		fmt.Fprintf(stderr, "llvmc: resolving target %q: %v\n", triple, err)
-		return exitCompile
-	}
-
-	tm := target.CreateTargetMachine(triple, "", "", llvm.CodeGenLevelDefault, llvm.RelocDefault, llvm.CodeModelDefault)
 	defer tm.Dispose()
 
 	mb, err := tm.EmitToMemoryBuffer(mod.LLVM, llvm.ObjectFile)

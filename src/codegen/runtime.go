@@ -25,6 +25,7 @@ import (
 func (g *Generator) setupRuntime() {
 	g.printfType = llvm.FunctionType(g.i32Ty, []llvm.Type{g.ptrTy}, true)
 	g.printfFn = llvm.AddFunction(g.mod, "printf", g.printfType)
+	g.noBuiltinAttrKind = llvm.AttributeKindID("nobuiltin")
 
 	g.mallocType = llvm.FunctionType(g.ptrTy, []llvm.Type{g.i64Ty}, false)
 	g.mallocFn = llvm.AddFunction(g.mod, "malloc", g.mallocType)
@@ -134,6 +135,62 @@ func (g *Generator) setupRuntime() {
 	g.fmtBoundsTrap = g.defineCString(".fmt.trap.bounds", "runtime error: index %d out of range [0:%d)\n")
 	g.fmtSliceRangeTrap = g.defineCString(".fmt.trap.slicerange", "runtime error: slice bounds out of range [%d:%d] with capacity %d\n")
 	g.fmtMakeSizeTrap = g.defineCString(".fmt.trap.makesize", "runtime error: makeslice: len %d, cap %d out of range\n")
+}
+
+// llvmAttributeFunctionIndex is the special "attribute index" LLVM's C API
+// uses to mean "the call/callee itself", as opposed to the return value
+// (index 0) or a specific argument - see LLVMAttributeFunctionIndex in
+// llvm-c/Core.h (defined there as ~0U). third_party/go-llvm's own
+// AddFunctionAttr reaches that same cgo constant directly;
+// AddCallSiteAttribute instead takes a plain Go int and converts it through
+// the identical C type, so passing -1 here reproduces the same all-ones bit
+// pattern without this package needing to reach into a cgo-internal
+// constant of its own.
+const llvmAttributeFunctionIndex = -1
+
+// callPrintf calls libc's printf with args (the format string first,
+// followed by its variadic arguments - exactly the argument list every
+// direct CreateCall(g.printfType, g.printfFn, ...) site in this package used
+// to build by hand) and tags the call site with LLVM's "nobuiltin"
+// attribute. Every printf call this package ever emits (print's own
+// top-level numeric/bool/string/pointer cases, struct/array recursive
+// rendering, and every runtime-trap diagnostic in expr.go/maps.go) goes
+// through this one function - never CreateCall directly - specifically so
+// none of them can ever again regress the way this doc comment describes.
+//
+// Why this exists: LLVM's optimizer (SimplifyLibCalls/InstCombine, run
+// whenever src/compiler's optimize is true - see CODEGEN.md's "Optimization
+// pipeline" section) recognizes any call named "printf" as the real libc
+// function and is willing to rewrite it into a different, "equivalent" libc
+// entry point it considers cheaper. Concretely, and empirically observed
+// while verifying this round: printf called with a single-character,
+// no-format-specifier format string (genPrintLiteral below, used for every
+// struct/array bracket/space/newline) got rewritten into a bare putchar
+// call - every one of those literal-punctuation characters silently
+// vanished from a dynamic array's printed output under the default
+// optimized path, while the "%d"-style element prints (which InstCombine
+// has no equivalent-libcall rewrite for) kept working untouched, the two
+// families' surviving output visibly running together with no separators.
+// The rewrite is only truly safe if putchar and printf are guaranteed to
+// share the exact same underlying stdio buffer - not an assumption safe to
+// lean on under this project's own JIT hosting (a mingw64-built process,
+// LLJIT materializing symbols straight out of the already-running host
+// process rather than through one program's normal, single, statically-
+// linked CRT startup/shutdown sequence).
+//
+// "nobuiltin" is the standard LLVM mechanism for exactly this situation -
+// the same call-site attribute Clang emits on every call in a translation
+// unit built with -fno-builtin. It tells the optimizer this particular call
+// must be treated as an ordinary, opaque external call - never recognized
+// as the corresponding libc built-in, so no library-call-specific rewrite
+// ever applies to it - without disabling TargetLibraryInfo's recognition of
+// printf/libc functions globally, which would give up real, safe
+// optimizations everywhere else the compiled program's own code calls libc
+// functions on its own terms.
+func (g *Generator) callPrintf(args []llvm.Value) llvm.Value {
+	call := g.builder.CreateCall(g.printfType, g.printfFn, args, "")
+	call.AddCallSiteAttribute(llvmAttributeFunctionIndex, g.ctx.CreateEnumAttribute(g.noBuiltinAttrKind, 0))
+	return call
 }
 
 // arenaChunkSize is the size (in bytes) of one block the arena grows by via
@@ -483,7 +540,7 @@ func (g *Generator) genMakeSizeCheck(nVal, capVal llvm.Value) {
 	g.builder.CreateCondBr(ok, okBB, trapBB)
 
 	g.builder.SetInsertPointAtEnd(trapBB)
-	g.builder.CreateCall(g.printfType, g.printfFn, []llvm.Value{g.fmtMakeSizeTrap, nVal, capVal}, "")
+	g.callPrintf([]llvm.Value{g.fmtMakeSizeTrap, nVal, capVal})
 	g.builder.CreateCall(g.fflushType, g.fflushFn, []llvm.Value{llvm.ConstNull(g.ptrTy)}, "")
 	g.builder.CreateCall(g.trapType, g.trapFn, nil, "")
 	g.builder.CreateUnreachable()
@@ -595,21 +652,21 @@ func (g *Generator) genPrintCall(argNode ast.NodeIndex) {
 	v := g.genExpr(argNode)
 	switch t.Kind {
 	case sema.TypeI8, sema.TypeI16:
-		g.builder.CreateCall(g.printfType, g.printfFn, []llvm.Value{g.fmtInt, g.builder.CreateSExt(v, g.i32Ty, "")}, "")
+		g.callPrintf([]llvm.Value{g.fmtInt, g.builder.CreateSExt(v, g.i32Ty, "")})
 	case sema.TypeI32:
-		g.builder.CreateCall(g.printfType, g.printfFn, []llvm.Value{g.fmtInt, v}, "")
+		g.callPrintf([]llvm.Value{g.fmtInt, v})
 	case sema.TypeI64:
-		g.builder.CreateCall(g.printfType, g.printfFn, []llvm.Value{g.fmtInt64, v}, "")
+		g.callPrintf([]llvm.Value{g.fmtInt64, v})
 	case sema.TypeF32:
-		g.builder.CreateCall(g.printfType, g.printfFn, []llvm.Value{g.fmtFloat, g.builder.CreateFPExt(v, g.f64Ty, "")}, "")
+		g.callPrintf([]llvm.Value{g.fmtFloat, g.builder.CreateFPExt(v, g.f64Ty, "")})
 	case sema.TypeF64:
-		g.builder.CreateCall(g.printfType, g.printfFn, []llvm.Value{g.fmtFloat, v}, "")
+		g.callPrintf([]llvm.Value{g.fmtFloat, v})
 	case sema.TypeBool:
 		g.genPrintStringValue(g.boolStringValue(v))
 	case sema.TypeString:
 		g.genPrintStringValue(v)
 	case sema.TypePointer:
-		g.builder.CreateCall(g.printfType, g.printfFn, []llvm.Value{g.fmtPtr, v}, "")
+		g.callPrintf([]llvm.Value{g.fmtPtr, v})
 	case sema.TypeStruct:
 		g.genPrintStructValue(t, v)
 		g.genPrintLiteral(g.fmtNewline)
@@ -640,14 +697,18 @@ func (g *Generator) boolStringValue(v llvm.Value) llvm.Value {
 func (g *Generator) genPrintStringValue(v llvm.Value) {
 	ptr := g.builder.CreateExtractValue(v, 0, "")
 	ln := g.builder.CreateExtractValue(v, 1, "")
-	g.builder.CreateCall(g.printfType, g.printfFn, []llvm.Value{g.fmtStr, ln, ptr}, "")
+	g.callPrintf([]llvm.Value{g.fmtStr, ln, ptr})
 }
 
 // genPrintLiteral calls printf with a literal, argument-less format string -
 // used for struct/array punctuation and the trailing newline after one. Safe
-// because none of these contain a '%'.
+// because none of these contain a '%' - and, like every other printf call
+// this package emits, goes through callPrintf (its own doc comment covers
+// exactly why this particular shape of call - a single-character constant
+// format string, no variadic arguments - is the one that actually needs the
+// "nobuiltin" attribute in practice).
 func (g *Generator) genPrintLiteral(fmtGlobal llvm.Value) {
-	g.builder.CreateCall(g.printfType, g.printfFn, []llvm.Value{fmtGlobal}, "")
+	g.callPrintf([]llvm.Value{fmtGlobal})
 }
 
 // genPrintValueBare renders v (of type t) with no trailing newline - the
@@ -660,21 +721,21 @@ func (g *Generator) genPrintLiteral(fmtGlobal llvm.Value) {
 func (g *Generator) genPrintValueBare(t sema.Type, v llvm.Value) {
 	switch t.Kind {
 	case sema.TypeI8, sema.TypeI16:
-		g.builder.CreateCall(g.printfType, g.printfFn, []llvm.Value{g.fmtIntBare, g.builder.CreateSExt(v, g.i32Ty, "")}, "")
+		g.callPrintf([]llvm.Value{g.fmtIntBare, g.builder.CreateSExt(v, g.i32Ty, "")})
 	case sema.TypeI32:
-		g.builder.CreateCall(g.printfType, g.printfFn, []llvm.Value{g.fmtIntBare, v}, "")
+		g.callPrintf([]llvm.Value{g.fmtIntBare, v})
 	case sema.TypeI64:
-		g.builder.CreateCall(g.printfType, g.printfFn, []llvm.Value{g.fmtInt64Bare, v}, "")
+		g.callPrintf([]llvm.Value{g.fmtInt64Bare, v})
 	case sema.TypeF32:
-		g.builder.CreateCall(g.printfType, g.printfFn, []llvm.Value{g.fmtFloatBare, g.builder.CreateFPExt(v, g.f64Ty, "")}, "")
+		g.callPrintf([]llvm.Value{g.fmtFloatBare, g.builder.CreateFPExt(v, g.f64Ty, "")})
 	case sema.TypeF64:
-		g.builder.CreateCall(g.printfType, g.printfFn, []llvm.Value{g.fmtFloatBare, v}, "")
+		g.callPrintf([]llvm.Value{g.fmtFloatBare, v})
 	case sema.TypeBool:
 		g.genPrintStringValueBare(g.boolStringValue(v))
 	case sema.TypeString:
 		g.genPrintStringValueBare(v)
 	case sema.TypePointer:
-		g.builder.CreateCall(g.printfType, g.printfFn, []llvm.Value{g.fmtPtrBare, v}, "")
+		g.callPrintf([]llvm.Value{g.fmtPtrBare, v})
 	case sema.TypeStruct:
 		g.genPrintStructValue(t, v)
 	case sema.TypeArray:
@@ -696,7 +757,7 @@ func (g *Generator) genPrintValueBare(t sema.Type, v llvm.Value) {
 func (g *Generator) genPrintStringValueBare(v llvm.Value) {
 	ptr := g.builder.CreateExtractValue(v, 0, "")
 	ln := g.builder.CreateExtractValue(v, 1, "")
-	g.builder.CreateCall(g.printfType, g.printfFn, []llvm.Value{g.fmtStrBare, ln, ptr}, "")
+	g.callPrintf([]llvm.Value{g.fmtStrBare, ln, ptr})
 }
 
 // genPrintStructValue renders a struct value as `{f0 f1 ...}` - each field's
