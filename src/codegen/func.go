@@ -132,6 +132,11 @@ func (g *Generator) genFuncBody(decl ast.NodeIndex) {
 	returnTypeNode := g.tree.FuncReturnType(decl)
 	body := g.tree.FuncBody(decl)
 
+	retType := sema.Type{Kind: sema.TypeVoid}
+	if returnTypeNode != ast.InvalidNode {
+		retType = g.info.Types[returnTypeNode]
+	}
+
 	entry := g.funcs[g.info.Refs[nameNode]]
 	g.curFn = entry.fn
 	g.entryBlock = g.ctx.AddBasicBlock(g.curFn, "entry")
@@ -158,6 +163,7 @@ func (g *Generator) genFuncBody(decl ast.NodeIndex) {
 	g.curFunc = &funcCtx{
 		isMain:    receiver == ast.InvalidNode && g.tree.Text(nameNode) == "main",
 		hasReturn: returnTypeNode != ast.InvalidNode,
+		retType:   retType,
 	}
 
 	g.finishBody(body)
@@ -319,6 +325,7 @@ func (g *Generator) genConstructorBody(ctor ast.NodeIndex) {
 	g.curFunc = &funcCtx{
 		isMain:    false,
 		hasReturn: false,
+		retType:   sema.Type{Kind: sema.TypeVoid},
 	}
 
 	g.finishBody(body)
@@ -373,6 +380,7 @@ func (g *Generator) genDestructorBody(dtor ast.NodeIndex) {
 	g.curFunc = &funcCtx{
 		isMain:    false,
 		hasReturn: false,
+		retType:   sema.Type{Kind: sema.TypeVoid},
 	}
 
 	g.finishBody(body)

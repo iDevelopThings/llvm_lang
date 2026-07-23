@@ -51,3 +51,7 @@ values:
   - name: DeleteStmt
   - name: SliceExpr
   - name: ExternFuncDecl
+  - name: MultiReturnType
+  - name: MultiValueExpr
+  - name: MultiShortVarDecl
+  - name: MultiAssignStmt

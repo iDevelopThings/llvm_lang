@@ -1142,6 +1142,88 @@ needs, transparently, the same way it does for any other LLVM-to-LLVM call.
 This works because every caller and callee in a given module is generated
 by this same package; there's no need to match an external C ABI by hand.
 
+## Go-style multi-return values
+
+See `LANGUAGE.md`'s "Functions" section for the language-level feature (a
+function may declare a parenthesized `(T1, T2, ...)` return-type list;
+`return a, b, ...` supplies them; the sole way to consume the result is
+immediate destructuring via `a, b := f(...)`/`a, b = f(...)` - no first-class
+tuple type anywhere). This needed **no new ABI mechanism at all** - it
+reuses the "Structs/arrays/strings are passed and returned as real LLVM
+aggregate types" convention immediately above verbatim, just for a value
+that's never a *named* struct type.
+
+**The `Type` representation.** `sema.TypeMultiReturn` reuses `Type`'s own
+`Params []Type` field (the same field `TypeFunc` already uses for its own
+parameter types) to hold the N component types - see `sema/types.go`'s own
+doc comment. A multi-return function's `funcSignature.Return` is simply this
+`Type` directly; nothing about `funcSignature`'s own shape changed at all.
+
+**The LLVM type.** `llvmType`'s `TypeMultiReturn` case (`src/codegen/types.go`)
+builds an anonymous LLVM struct type `{T1, T2, ...}` from the component
+types - exactly the shape a real, named struct's own `llvmType` case already
+builds from a `StructInfo`'s declared fields, just anonymous (there's no
+`StructInfo` backing a multi-return type at all, only a bare `[]Type`) and
+computed fresh every time rather than cached in `setupTypes` (unlike
+`stringTy`/`dynArrTy`/`funcValTy`, which are each one fixed shape reused
+everywhere, every multi-return function's own component types differ, so
+there's nothing to precompute once up front).
+
+**Declaring the function itself.** `declareFuncSignature`/`genFuncBody`
+(`src/codegen/func.go`) needed no changes beyond what already existed: a
+`FuncDecl`'s return-type node is looked up in `info.Types` exactly the same
+way for every return-type shape (a plain type, `MultiReturnType`'s own
+`ast.Node`, or none at all) - `sema.Check`'s own `multiReturnTypeFromNode`
+already stored the right `Type` there, so `g.llvmType(retType)` just does the
+right thing once `TypeMultiReturn` has its own `llvmType` case. The one new
+piece of state is `funcCtx.retType` (`src/codegen/codegen.go`) - the
+function currently being generated's own declared return type, needed by
+`return`'s own multi-value lowering below (a `MultiValueExpr` node carries no
+`Type` of its own to read out of `info.Types` the way an ordinary expression
+would - the enclosing function's own declared return type is the only place
+that information lives).
+
+**`return a, b, ...`** (`genMultiValueExpr`, `src/codegen/stmt.go`): builds
+the aggregate value via `llvm.Undef(retTy)` plus one `CreateInsertValue` per
+returned expression, evaluated left to right - the same runtime-aggregate-
+construction approach `genFuncLit`'s own closure value already uses for its
+`{fnPtr, ctxPtr}` fat pointer whenever `ctxPtr` is a genuine runtime value
+rather than a compile-time constant (a `ConstStruct` requires every field to
+already be constant, which a `return`'s own computed values essentially never
+are). `genReturnStmt` dispatches to this the same way it already dispatches
+on every other node-kind-specific shape - a plain single-value `return expr`
+is completely unchanged, still just `g.genExpr(valueNode)` directly.
+
+**`a, b := f(...)`** (`genMultiShortVarDecl`, `stmt.go`): calls `f` exactly
+once via the ordinary `genExpr` path (its callee's own real LLVM signature
+already returns the matching anonymous struct - no special call-site lowering
+needed at all, direct or indirect alike), then allocates each name's own
+storage (`allocLocalSlot`, same captured-vs-stack decision every other local
+already goes through) and fills it via `CreateExtractValue` against that one
+aggregate result, one field index per name - exactly analogous to how an
+ordinary struct's own fields are already extracted elsewhere in this package.
+
+**`a, b = f(...)`** (`genMultiAssignStmt`, `stmt.go`): the assignment-form
+counterpart - every target's own address is resolved via the same `genAddr`
+a single-target `AssignStmt` already uses (working identically for a plain
+variable, a struct field, or an array/slice element - `genAddr` has no notion
+of "multi-target" to special-case at all), computed before the call itself
+runs, then filled via `CreateExtractValue` the same way `genMultiShortVarDecl`
+does.
+
+**Component types genuinely differing in width/kind** (an `i64` alongside a
+`bool`, an `f64` alongside a `string`) need no special handling anywhere in
+any of this - `CreateInsertValue`/`CreateExtractValue` already operate on a
+struct's field index, not a uniform element type the way an array's own GEP
+does, so a mixed-shape aggregate was never actually a special case to guard
+against; `TestMultiReturnMixedWidthTypes`/`TestMultiReturnFloatAndStringTypes`
+(`src/codegen/multireturn_test.go`) exercise exactly this, JIT-executed.
+
+See `examples/multireturn/multireturn.llx` for the worked dogfooding demo
+(a `divide`/`find` pair mirroring Go's own `v, ok := m[k]` idiom), exercised
+end to end - JIT and AOT alike - by `cmd/llvmc/main_test.go`'s
+`TestBinary_MultiReturnExample`/`TestBinary_AOT_MultiReturn`.
+
 ## Terminator safety (LLVM requires every basic block to end in one)
 
 `sema.Check` now runs a full "does every path return" flow analysis (see

@@ -400,6 +400,7 @@ func (g *Generator) genLambdaFunc(n ast.NodeIndex, captures []*sema.Symbol, ctxT
 	g.curFunc = &funcCtx{
 		isMain:    false,
 		hasReturn: returnTypeNode != ast.InvalidNode,
+		retType:   retType,
 	}
 
 	g.finishBody(body)

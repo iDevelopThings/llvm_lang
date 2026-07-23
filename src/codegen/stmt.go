@@ -88,8 +88,14 @@ func (g *Generator) genStmt(n ast.NodeIndex) bool {
 	case enums.NodeKinds.ShortVarDecl:
 		g.genShortVarDecl(n)
 		return false
+	case enums.NodeKinds.MultiShortVarDecl:
+		g.genMultiShortVarDecl(n)
+		return false
 	case enums.NodeKinds.AssignStmt:
 		g.genAssignStmt(n)
+		return false
+	case enums.NodeKinds.MultiAssignStmt:
+		g.genMultiAssignStmt(n)
 		return false
 	case enums.NodeKinds.IncDecStmt:
 		g.genIncDecStmt(n)
@@ -152,6 +158,29 @@ func (g *Generator) genShortVarDecl(n ast.NodeIndex) {
 	g.locals[sym] = addr
 	g.pushDestructorEntry(sym, t)
 	g.storeValueInto(addr, initNode)
+}
+
+// genMultiShortVarDecl lowers `a, b := f(...)` (see LANGUAGE.md's "Go-style
+// multi-return values" section): f is called exactly once - its own real
+// LLVM signature already returns the matching anonymous struct (see
+// llvmType's TypeMultiReturn case) - and each name's own storage is then
+// filled by CreateExtractValue-ing that one aggregate value, exactly
+// analogous to how an ordinary struct's own fields are extracted elsewhere in
+// this package (see CODEGEN.md's Structs section).
+func (g *Generator) genMultiShortVarDecl(n ast.NodeIndex) {
+	names := g.tree.MultiShortVarDeclNames(n)
+	valueNode := g.tree.MultiShortVarDeclValue(n)
+
+	aggregate := g.genExpr(valueNode)
+	for i, nameNode := range names {
+		sym := g.info.Refs[nameNode]
+		t := g.info.Types[nameNode]
+		llt := g.llvmType(t)
+		addr := g.allocLocalSlot(sym, llt, sym.Name)
+		g.locals[sym] = addr
+		g.pushDestructorEntry(sym, t)
+		g.builder.CreateStore(g.builder.CreateExtractValue(aggregate, i, ""), addr)
+	}
 }
 
 // storeValueInto stores valueNode's value into the already-computed address
@@ -287,6 +316,27 @@ func (g *Generator) genAssignStmt(n ast.NodeIndex) {
 	g.builder.CreateStore(result, addr)
 }
 
+// genMultiAssignStmt lowers `a, b = f(...)` - the assignment-form counterpart
+// to genMultiShortVarDecl, storing into each target's own already-existing
+// address (genAddr, exactly like an ordinary AssignStmt's single target)
+// instead of allocating fresh storage. Every target's address is computed
+// before the call itself runs, mirroring plain AssignStmt's own
+// address-then-value evaluation order.
+func (g *Generator) genMultiAssignStmt(n ast.NodeIndex) {
+	targets := g.tree.MultiAssignStmtTargets(n)
+	valueNode := g.tree.MultiAssignStmtValue(n)
+
+	addrs := make([]llvm.Value, len(targets))
+	for i, target := range targets {
+		addrs[i] = g.genAddr(target)
+	}
+
+	aggregate := g.genExpr(valueNode)
+	for i, addr := range addrs {
+		g.builder.CreateStore(g.builder.CreateExtractValue(aggregate, i, ""), addr)
+	}
+}
+
 // genIncDecStmt lowers `++`/`--` - any numeric type (any int width or float
 // width - see AGENTS.md's Operators section), using the target's own actual
 // type/width rather than assuming i32.
@@ -333,10 +383,35 @@ func (g *Generator) genReturnStmt(n ast.NodeIndex) bool {
 	// section: a return exits the whole function, so this always unwinds
 	// every entry currently on the stack, not just the innermost block's
 	// own), then actually return the already-computed value.
-	v := g.genExpr(valueNode)
+	var v llvm.Value
+	if g.tree.Nodes[valueNode].Kind == enums.NodeKinds.MultiValueExpr {
+		v = g.genMultiValueExpr(valueNode)
+	} else {
+		v = g.genExpr(valueNode)
+	}
 	g.unwindDestructorsTo(0)
 	g.builder.CreateRet(v)
 	return true
+}
+
+// genMultiValueExpr builds the anonymous LLVM struct aggregate a multi-value
+// `return a, b, ...` (see LANGUAGE.md's "Go-style multi-return values"
+// section) lowers to - reusing the exact same "return a struct by value" ABI
+// an ordinary struct-returning function already uses (see CODEGEN.md): the
+// enclosing function's own real LLVM return type (g.curFunc.retType, see
+// funcCtx's own doc comment) is this same anonymous struct type, built here
+// via llvm.Undef + one CreateInsertValue per value - the same runtime-
+// aggregate-construction approach genFuncLit's own closure value already
+// uses (a ConstStruct can't be used here: unlike a bare free-function
+// reference's fat pointer, each returned value is a genuine, independently-
+// computed runtime SSA value, never a compile-time constant in general).
+func (g *Generator) genMultiValueExpr(n ast.NodeIndex) llvm.Value {
+	retTy := g.llvmType(g.curFunc.retType)
+	result := llvm.Undef(retTy)
+	for i, valueNode := range g.tree.Children(n) {
+		result = g.builder.CreateInsertValue(result, g.genExpr(valueNode), i, "")
+	}
+	return result
 }
 
 // genBreakStmt/genContinueStmt branch to the innermost enclosing loop's
@@ -546,6 +621,19 @@ func (g *Generator) typeIsNonCopyable(t sema.Type) bool {
 // defensively regardless) keeps today's exact shared-slot behavior, since an
 // implicit copy here would silently violate this language's "non-copyable,
 // zero exceptions" rule.
+//
+// This eligibility switch also only ever matches a single-name ShortVarDecl/
+// VarDecl init clause - a multi-return destructuring init
+// (`for a, b := f(); ...; ... {}`, MultiShortVarDecl - see LANGUAGE.md's
+// "Functions" section) falls outside it by construction and so keeps
+// today's exact shared-slot capture behavior for both names, same as this
+// language's own pre-1.22-Go-style default before this per-iteration fix
+// existed at all. A deliberately narrow, out-of-scope gap for now (this
+// feature's own scope was kept to "destructuring only, no expansion" - see
+// DECISIONS.md's dated "Go-style multi-return values" entry) rather than an
+// oversight: it can be added later (looping over every declared name instead
+// of assuming exactly one) if a real program ever needs a closure inside a
+// multi-return-destructuring `for` loop to see fresh per-iteration values.
 func (g *Generator) genForStmt(n ast.NodeIndex) bool {
 	initNode := g.tree.Child(n, 0)
 	condNode := g.tree.Child(n, 1)

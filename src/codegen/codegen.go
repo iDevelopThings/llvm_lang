@@ -86,6 +86,17 @@ type destructorEntry struct {
 type funcCtx struct {
 	isMain    bool
 	hasReturn bool
+
+	// retType is this function's own declared return type (sema.Type{Kind:
+	// TypeVoid} when hasReturn is false) - genReturnStmt reads this to build
+	// a multi-value `return a, b, ...`'s own aggregate struct value (see
+	// genMultiValueExpr, stmt.go): unlike a single-value return (which just
+	// evaluates its one value expression directly, whatever type it already
+	// is), a multi-value return has to build the enclosing function's own
+	// real LLVM return struct type from scratch, since a MultiValueExpr node
+	// itself carries no type of its own to read back out of info.Types the
+	// way an ordinary expression node would.
+	retType sema.Type
 }
 
 // funcEntry is what the module-scope pass over every FuncDecl/method

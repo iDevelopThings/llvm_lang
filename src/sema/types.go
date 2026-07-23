@@ -52,6 +52,22 @@ import (
 // untyped float -> f64). See resolveNumericOperands/checkAssignable/
 // retypeUntyped in typecheck.go and AGENTS.md's Types section.
 //
+// TypeMultiReturn is the type of a multi-return function call's result - "this
+// expression yields N values" (see LANGUAGE.md's "Go-style multi-return
+// values" section) - never a real, storable value type: it exists purely so
+// checkValueExpr has something to reject everywhere except the two specific
+// positions that actually consume it (a return statement matching the
+// enclosing function's own multi-return type, or the sole right-hand side of
+// a matching multi-target `:=`/`=` - see checkMultiValueReturn/
+// checkDestructureSource, typecheck.go). Reuses Type's own Params field for
+// the N component types (see Type's own doc comment) - the same "a Type
+// holding several component Types" shape TypeFunc already established for its
+// own Params, just without a Return of its own (a multi-return type is never
+// itself callable). A function's own declared `(T1, T2, ...)` return-type
+// list (MultiReturnType, ast.Node) becomes exactly this Type via
+// multiReturnTypeFromNode - funcSignature.Return holds it directly, with no
+// separate "is this multi" flag needed anywhere else in this pass.
+//
 // TypeUntypedNil is the predeclared `nil` identifier's own starting type
 // (see LANGUAGE.md's "Pointers" section), modeled directly on that same
 // untyped-constant precedent but deliberately scoped to pointer types only -
@@ -83,6 +99,8 @@ const (
 	TypeUntypedInt
 	TypeUntypedFloat
 	TypeUntypedNil
+
+	TypeMultiReturn
 )
 
 // TypeInt is a synonym for TypeI32, not a distinct TypeKind value: "int" in
@@ -261,6 +279,16 @@ func (t Type) Equal(u Type) bool {
 			}
 		}
 		return t.Return.Equal(*u.Return)
+	case TypeMultiReturn:
+		if len(t.Params) != len(u.Params) {
+			return false
+		}
+		for i := range t.Params {
+			if !t.Params[i].Equal(u.Params[i]) {
+				return false
+			}
+		}
+		return true
 	default:
 		return true
 	}
@@ -322,6 +350,12 @@ func (t Type) String() string {
 		return "untyped float"
 	case TypeUntypedNil:
 		return "nil"
+	case TypeMultiReturn:
+		parts := make([]string, len(t.Params))
+		for i, p := range t.Params {
+			parts[i] = p.String()
+		}
+		return "(" + strings.Join(parts, ", ") + ")"
 	default:
 		return "<unknown type>"
 	}

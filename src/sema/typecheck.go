@@ -663,6 +663,8 @@ func (c *checker) computeDeclType(decl ast.NodeIndex) Type {
 		return c.checkVarDeclNode(decl)
 	case enums.NodeKinds.ShortVarDecl:
 		return c.checkShortVarDeclNode(decl)
+	case enums.NodeKinds.MultiShortVarDecl:
+		return c.checkMultiShortVarDeclNode(decl)
 	case enums.NodeKinds.Param:
 		return c.typeFromNode(c.tree.Child(decl, 1))
 	default:
@@ -710,6 +712,108 @@ func (c *checker) checkShortVarDeclNode(decl ast.NodeIndex) Type {
 	t := c.defaultIfUntyped(initNode, c.checkValueExpr(initNode))
 	c.checkNoIllegalCopy(initNode, t, true, "short variable declaration")
 	return t
+}
+
+// checkMultiShortVarDeclNode type-checks `a, b := f(...)` (see LANGUAGE.md's
+// "Go-style multi-return values" section) and returns the destructured
+// TypeMultiReturn Type as a whole (mirroring checkShortVarDeclNode's own
+// single-Type result one level up) - each individual name's own component
+// Type is eagerly cached directly against that name's own Ident node here,
+// not left to be computed lazily on first reference the way an ordinary
+// declType entry normally would be: unlike a plain ShortVarDecl (whose sole
+// declared name IS the decl node checkStmt already forces through declType,
+// guaranteeing info.Types gets populated regardless of whether it's ever
+// referenced again), a name declared here has no such guarantee - if it's
+// never referenced again, declType(nameNode) would otherwise never run at
+// all, leaving codegen's own g.info.Types[nameNode] lookup empty. Seeding
+// both declType's memoization cache and info.Types directly, right here,
+// closes that gap unconditionally.
+func (c *checker) checkMultiShortVarDeclNode(decl ast.NodeIndex) Type {
+	names := c.tree.MultiShortVarDeclNames(decl)
+	value := c.tree.MultiShortVarDeclValue(decl)
+	types := c.checkDestructureSource(value, len(names), "short variable declaration")
+
+	for i, nameNode := range names {
+		t := types[i]
+		c.declTypes[nodeRef{c.tree, nameNode}] = t
+		c.info.Types[nameNode] = t
+		c.checkNoIllegalCopy(value, t, true, "short variable declaration")
+	}
+	return Type{
+		Kind:   TypeMultiReturn,
+		Params: types,
+	}
+}
+
+// checkMultiAssignStmt type-checks `a, b = f(...)` - the assignment-form
+// counterpart to checkMultiShortVarDeclNode, checking every target (already
+// existing lvalues - Ident/MemberExpr/IndexExpr/`*p`, exactly like
+// AssignStmt's own single target - see checkLValue) against its own matching
+// component type from the destructured call.
+func (c *checker) checkMultiAssignStmt(n ast.NodeIndex) {
+	targets := c.tree.MultiAssignStmtTargets(n)
+	value := c.tree.MultiAssignStmtValue(n)
+
+	targetTypes := make([]Type, len(targets))
+	allOk := true
+	for i, target := range targets {
+		t, ok := c.checkLValue(target)
+		targetTypes[i] = t
+		allOk = allOk && ok
+	}
+
+	types := c.checkDestructureSource(value, len(targets), "multi-value assignment")
+	if !allOk {
+		return
+	}
+	for i, target := range targets {
+		if c.checkAssignable(target, targetTypes[i], types[i], fmt.Sprintf("assignment target %d", i+1)) {
+			c.checkNoIllegalCopy(target, targetTypes[i], true, fmt.Sprintf("assignment target %d", i+1))
+		}
+	}
+}
+
+// checkDestructureSource type-checks value - a multi-target destructuring
+// statement's (MultiShortVarDecl/MultiAssignStmt) sole right-hand side - and
+// returns the wantCount component types to match against each name/target in
+// order. Per this feature's own deliberate restriction (see LANGUAGE.md's
+// "Go-style multi-return values" section: "destructuring only", no first-
+// class tuple type, no argument-spreading, no Go-style parallel
+// `a, b := 1, 2`), value must be exactly one call expression whose own
+// signature returns exactly wantCount values - never any other expression
+// shape, and never a mismatched count. Every rejection path still returns a
+// same-length, invalidType-filled slice (rather than nil or a short one) so
+// every caller can always safely index it once by position, the same
+// "already reported once, don't cascade" recovery invalidType itself always
+// provides elsewhere in this pass.
+func (c *checker) checkDestructureSource(value ast.NodeIndex, wantCount int, context string) []Type {
+	invalid := make([]Type, wantCount)
+	for i := range invalid {
+		invalid[i] = invalidType
+	}
+
+	if c.tree.Nodes[value].Kind != enums.NodeKinds.CallExpr {
+		c.errorAt(value, "right-hand side of a %s must be exactly one function call", context)
+		c.checkValueExpr(value)
+		return invalid
+	}
+
+	// checkExpr, not checkValueExpr - a TypeMultiReturn result is expected
+	// and legal in this one position; checkValueExpr's own rejection of it
+	// is exactly what every *other* position still needs.
+	t := c.checkExpr(value)
+	if t.IsInvalid() {
+		return invalid
+	}
+	if t.Kind != TypeMultiReturn {
+		c.errorAt(value, "cannot destructure a single-value call result (%s) into %d targets", t, wantCount)
+		return invalid
+	}
+	if len(t.Params) != wantCount {
+		c.errorAt(value, "wrong number of values in %s: call returns %d, got %d target(s)", context, len(t.Params), wantCount)
+		return invalid
+	}
+	return t.Params
 }
 
 // defaultIfUntyped applies Go's own untyped-constant defaulting rule (see
@@ -1015,8 +1119,35 @@ func (c *checker) computeTypeFromNode(n ast.NodeIndex) Type {
 		return c.pointerTypeFromNode(n)
 	case enums.NodeKinds.FuncType:
 		return c.funcTypeFromNode(n)
+	case enums.NodeKinds.MultiReturnType:
+		return c.multiReturnTypeFromNode(n)
 	default:
 		return invalidType
+	}
+}
+
+// multiReturnTypeFromNode converts a MultiReturnType type-position node
+// (a FuncDecl's own `(T1, T2, ...)` return-type list - see LANGUAGE.md's
+// "Go-style multi-return values" section and ast.Node's own MultiReturnType
+// doc comment) into a Type - the multi-return counterpart to
+// funcTypeFromNode/arrayTypeFromNode. The grammar accepts any count
+// (parser.parseFuncDeclReturnType has no arity opinion of its own); this is
+// where the feature's own narrower "2 or more" rule is actually enforced -
+// the same "grammar accepts the general shape, sema enforces the feature's
+// own rule" division of labor a duplicate-arity constructor or a non-empty
+// destructor param list already use.
+func (c *checker) multiReturnTypeFromNode(n ast.NodeIndex) Type {
+	typeNodes := c.tree.Children(n)
+	if len(typeNodes) < 2 {
+		c.errorAt(n, "a multi-return type must declare at least 2 types, got %d", len(typeNodes))
+	}
+	types := make([]Type, len(typeNodes))
+	for i, tn := range typeNodes {
+		types[i] = c.typeFromNode(tn)
+	}
+	return Type{
+		Kind:   TypeMultiReturn,
+		Params: types,
 	}
 }
 
@@ -1191,10 +1322,14 @@ func (c *checker) checkBlock(block ast.NodeIndex) {
 
 func (c *checker) checkStmt(n ast.NodeIndex) {
 	switch c.tree.Nodes[n].Kind {
-	case enums.NodeKinds.VarDecl, enums.NodeKinds.ShortVarDecl:
+	case enums.NodeKinds.VarDecl,
+		enums.NodeKinds.ShortVarDecl,
+		enums.NodeKinds.MultiShortVarDecl:
 		c.declType(n)
 	case enums.NodeKinds.AssignStmt:
 		c.checkAssignStmt(n)
+	case enums.NodeKinds.MultiAssignStmt:
+		c.checkMultiAssignStmt(n)
 	case enums.NodeKinds.IncDecStmt:
 		c.checkIncDecStmt(n)
 	case enums.NodeKinds.ExprStmt:
@@ -1370,9 +1505,18 @@ func (c *checker) checkReturnStmt(n ast.NodeIndex) {
 		return
 	}
 
+	if c.tree.Nodes[value].Kind == enums.NodeKinds.MultiValueExpr {
+		c.checkMultiValueReturn(value, fn)
+		return
+	}
+
 	vt := c.checkValueExpr(value)
 	if !fn.hasReturn {
 		c.errorAt(value, "function does not return a value")
+		return
+	}
+	if fn.ret.Kind == TypeMultiReturn {
+		c.errorAt(value, "function returns %s; return must supply %d values", fn.ret, len(fn.ret.Params))
 		return
 	}
 	if c.checkAssignable(value, fn.ret, vt, "return statement") {
@@ -1381,6 +1525,53 @@ func (c *checker) checkReturnStmt(n ast.NodeIndex) {
 		// construction - see checkNoIllegalCopy's own doc comment for why
 		// this one context allows no exception at all.
 		c.checkNoIllegalCopy(value, fn.ret, false, "return statement")
+	}
+}
+
+// checkMultiValueReturn type-checks `return a, b, ...` (listNode is the
+// MultiValueExpr wrapping the value list - see ast.Node's own doc comment)
+// against fn, the enclosing function's own return context - the multi-value
+// counterpart to checkReturnStmt's own plain single-value tail. Every
+// individual value is an ordinary single-value expression (checkValueExpr),
+// exactly like a single-value `return expr` would check its own one value -
+// there's no argument-spreading here (a further multi-return call among the
+// listed values is rejected the same way any other position rejects one).
+func (c *checker) checkMultiValueReturn(listNode ast.NodeIndex, fn *enclosingFunc) {
+	values := c.tree.Children(listNode)
+
+	if !fn.hasReturn {
+		c.errorAt(listNode, "function does not return a value")
+		for _, v := range values {
+			c.checkValueExpr(v)
+		}
+		return
+	}
+	if fn.ret.Kind != TypeMultiReturn {
+		c.errorAt(listNode, "function returns %s, not multiple values", fn.ret)
+		for _, v := range values {
+			c.checkValueExpr(v)
+		}
+		return
+	}
+
+	want := fn.ret.Params
+	if len(values) != len(want) {
+		c.errorAtNodes(values, listNode, "wrong number of return values: got %d, want %d", len(values), len(want))
+		for _, v := range values {
+			c.checkValueExpr(v)
+		}
+		return
+	}
+
+	for i, v := range values {
+		vt := c.checkValueExpr(v)
+		context := fmt.Sprintf("return value %d", i+1)
+		if c.checkAssignable(v, want[i], vt, context) {
+			// allowFresh=false, same reasoning as checkReturnStmt's own
+			// single-value tail: a multi-value return allows no fresh-
+			// construction exception either.
+			c.checkNoIllegalCopy(v, want[i], false, context)
+		}
 	}
 }
 
@@ -1438,6 +1629,22 @@ func (c *checker) checkValueExpr(n ast.NodeIndex) Type {
 	t := c.checkExpr(n)
 	if t.Kind == TypeVoid {
 		c.errorAt(n, "call does not return a value, cannot be used here")
+		return invalidType
+	}
+	if t.Kind == TypeMultiReturn {
+		// A multi-return call's result (see LANGUAGE.md's "Go-style
+		// multi-return values" section) has deliberately no first-class
+		// tuple type - it can only ever be consumed by immediate
+		// destructuring at the one matching call site (a return statement
+		// matching the enclosing function's own multi-return type -
+		// checkMultiValueReturn - or the sole right-hand side of a matching
+		// multi-target `:=`/`=` - checkDestructureSource), never stored,
+		// passed on, or used as an ordinary single value. Both of those two
+		// consuming positions call checkExpr directly instead of this
+		// function specifically to bypass this rejection - every other
+		// position (a single-name `:=`, a call argument, print, an operator
+		// operand, ...) still goes through checkValueExpr and lands here.
+		c.errorAt(n, "multi-value result %s cannot be used as a single value; it can only be destructured immediately (a, b := ... / a, b = ...) or returned matching a function's own multi-return type", t)
 		return invalidType
 	}
 	return t

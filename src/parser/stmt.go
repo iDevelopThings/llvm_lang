@@ -202,9 +202,20 @@ func (p *Parser) parseVarDecl() ast.NodeIndex {
 // parseSimpleStmt parses whatever can appear as a for-loop init/post clause
 // or a standalone statement that isn't keyword-led: a short-var-decl
 // (`x := expr`), an assignment (`lvalue = expr`, including compound forms
-// and ++/--), or a bare expression used as a statement.
+// and ++/--), a multi-target destructuring form (`a, b := f()` / `a, b =
+// f()` - see LANGUAGE.md's "Go-style multi-return values" section), or a
+// bare expression used as a statement. The multi-target forms are
+// disambiguated with exactly one token of lookahead after the first name/
+// target, the same way Go's own parser does it: a following `,` means "keep
+// collecting names/targets" before `:=`/`=` decides which of the two this
+// turns out to be; anything else falls straight through to the existing
+// single-name/target forms, completely unchanged.
 func (p *Parser) parseSimpleStmt() ast.NodeIndex {
 	expr := p.parseExpr(precLowest)
+
+	if p.at(enums.Lexemes.Comma) {
+		return p.finishMultiTargetStmt(expr)
+	}
 
 	switch {
 	case p.at(enums.Lexemes.ColonEqual):
@@ -216,6 +227,74 @@ func (p *Parser) parseSimpleStmt() ast.NodeIndex {
 	default:
 		return p.tree.NewNode(enums.NodeKinds.ExprStmt, lexer.Token{}, p.tree.SpanOf(expr), expr)
 	}
+}
+
+// finishMultiTargetStmt parses the rest of a multi-target destructuring
+// statement, given its first already-parsed name/target and the `,`
+// following it (see parseSimpleStmt) - collects every remaining name/target,
+// then dispatches on whichever of `:=`/`=` actually follows the full list to
+// decide which of MultiShortVarDecl/MultiAssignStmt this is (see ast.Node's
+// own doc comments for both shapes).
+func (p *Parser) finishMultiTargetStmt(first ast.NodeIndex) ast.NodeIndex {
+	targets := []ast.NodeIndex{first}
+	for {
+		if _, ok := p.accept(enums.Lexemes.Comma); !ok {
+			break
+		}
+		targets = append(targets, p.parseExpr(precLowest))
+	}
+
+	if p.at(enums.Lexemes.ColonEqual) {
+		return p.finishMultiShortVarDecl(targets)
+	}
+	if p.at(enums.Lexemes.Equal) {
+		return p.finishMultiAssignStmt(targets)
+	}
+
+	tok := p.tok
+	p.errorAtSpan(tok.Start, tok.End, "expected := or = after a comma-separated list, found %s", p.describe(tok))
+	return p.badNode(tok)
+}
+
+// finishMultiShortVarDecl parses `:= call` given names already collected by
+// finishMultiTargetStmt - the multi-name counterpart to finishShortVarDecl.
+// Every name must be a plain identifier, same check finishShortVarDecl's own
+// single-name form already makes (Bad is accepted the same already-reported-
+// once way).
+func (p *Parser) finishMultiShortVarDecl(names []ast.NodeIndex) ast.NodeIndex {
+	for _, name := range names {
+		if kind := p.tree.Nodes[name].Kind; kind != enums.NodeKinds.Ident && kind != enums.NodeKinds.Bad {
+			span := p.tree.SpanOf(name)
+			p.errorAtSpan(span.Start, span.End, "left side of := must be an identifier")
+		}
+	}
+	opTok := p.expect(enums.Lexemes.ColonEqual)
+	value := p.parseExpr(precLowest)
+	span := ast.Span{
+		Start: p.tree.SpanOf(names[0]).Start,
+		End:   p.tree.SpanOf(value).End,
+	}
+	children := append(append([]ast.NodeIndex{}, names...), value)
+	return p.tree.NewNode(enums.NodeKinds.MultiShortVarDecl, opTok, span, children...)
+}
+
+// finishMultiAssignStmt parses `= call` given targets already collected by
+// finishMultiTargetStmt - the multi-target counterpart to finishAssignStmt.
+// Only plain `=` is supported here (no compound `+=`-style form makes sense
+// against more than one target at once), so finishMultiTargetStmt only ever
+// reaches this via its own explicit `p.at(enums.Lexemes.Equal)` check.
+func (p *Parser) finishMultiAssignStmt(targets []ast.NodeIndex) ast.NodeIndex {
+	for _, target := range targets {
+		p.checkAssignTarget(target)
+	}
+	opTok := p.expect(enums.Lexemes.Equal)
+	value := p.parseExpr(precLowest)
+	span := ast.Span{
+		Start: p.tree.SpanOf(targets[0]).Start,
+		End:   p.tree.SpanOf(value).End,
+	}
+	children := append(append([]ast.NodeIndex{}, targets...), value)
+	return p.tree.NewNode(enums.NodeKinds.MultiAssignStmt, opTok, span, children...)
 }
 
 func (p *Parser) finishShortVarDecl(name ast.NodeIndex) ast.NodeIndex {
@@ -397,12 +476,34 @@ func (p *Parser) finishThreeClauseFor(kwTok lexer.Token, init ast.NodeIndex, sav
 	return p.tree.NewNode(enums.NodeKinds.ForStmt, kwTok, span, init, cond, post, body)
 }
 
+// parseReturnStmt parses a bare `return`, a plain single-value `return expr`
+// (completely unchanged), or a multi-value `return a, b, ...` (see
+// LANGUAGE.md's "Go-style multi-return values" section) - the latter wraps
+// its comma-separated value list in a MultiValueExpr node occupying
+// ReturnStmt's own single expr slot, the same "wrap the variable part in its
+// own node" convention parseFuncDeclReturnType's MultiReturnType already
+// uses one level up (see ast.Node's own MultiValueExpr doc comment).
 func (p *Parser) parseReturnStmt() ast.NodeIndex {
 	kwTok := p.expectKeyword(enums.Keywords.Return)
 	value := ast.InvalidNode
 	end := kwTok.End
 	if !p.at(enums.Lexemes.Semicolon) && !p.at(enums.Lexemes.RightBrace) && !p.at(enums.Lexemes.EOF) {
-		value = p.parseExpr(precLowest)
+		first := p.parseExpr(precLowest)
+		value = first
+		if p.at(enums.Lexemes.Comma) {
+			values := []ast.NodeIndex{first}
+			for {
+				if _, ok := p.accept(enums.Lexemes.Comma); !ok {
+					break
+				}
+				values = append(values, p.parseExpr(precLowest))
+			}
+			listSpan := ast.Span{
+				Start: p.tree.SpanOf(first).Start,
+				End:   p.tree.SpanOf(values[len(values)-1]).End,
+			}
+			value = p.tree.NewNode(enums.NodeKinds.MultiValueExpr, lexer.Token{}, listSpan, values...)
+		}
 		end = p.tree.SpanOf(value).End
 	}
 	span := ast.Span{

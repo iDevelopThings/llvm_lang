@@ -687,9 +687,40 @@ func (r *resolver) resolveStmt(scope *Scope, n ast.NodeIndex) {
 	case enums.NodeKinds.ShortVarDecl:
 		r.resolveExpr(scope, r.tree.Child(n, 1)) // before declaring - see resolveBlock's comment
 		r.declareLocal(scope, n, r.tree.Child(n, 0), SymVar)
+	case enums.NodeKinds.MultiShortVarDecl:
+		// `a, b := f(...)` (see LANGUAGE.md's "Go-style multi-return values"
+		// section) - the call resolves first, before any of the names it's
+		// about to destructure into are declared, same ordering reasoning
+		// ShortVarDecl's own single-name form already follows (resolveBlock's
+		// doc comment: `x := x + 1` must resolve the right-hand `x` against
+		// whatever was visible *before* this statement). Each name is then
+		// declared directly against its own Ident node - deliberately the
+		// same node for both the Decl and the Ref argument (unlike
+		// ShortVarDecl, which uses the whole statement as Decl): a
+		// destructured name has no single enclosing declaration node holding
+		// its own type annotation the way a Param/ordinary ShortVarDecl does,
+		// so sema instead computes and caches each name's own component type
+		// directly against its own Ident node (see typecheck.go's
+		// checkMultiShortVarDeclNode) - Decl needs to be that same node for
+		// declType(sym.Decl) to ever find it again from a later reference.
+		r.resolveExpr(scope, r.tree.MultiShortVarDeclValue(n))
+		for _, nameNode := range r.tree.MultiShortVarDeclNames(n) {
+			r.declareLocal(scope, nameNode, nameNode, SymVar)
+		}
 	case enums.NodeKinds.AssignStmt:
 		r.resolveExpr(scope, r.tree.Child(n, 0))
 		r.resolveExpr(scope, r.tree.Child(n, 1))
+	case enums.NodeKinds.MultiAssignStmt:
+		// `a, b = f(...)` - every target is an already-existing lvalue (see
+		// ast.Node's own MultiAssignStmt doc comment), resolved exactly like
+		// AssignStmt's own single target; the call resolves the same way
+		// too, in whichever order (unlike MultiShortVarDecl, nothing here is
+		// being freshly declared, so there's no "before declaring" ordering
+		// concern to preserve).
+		for _, target := range r.tree.MultiAssignStmtTargets(n) {
+			r.resolveExpr(scope, target)
+		}
+		r.resolveExpr(scope, r.tree.MultiAssignStmtValue(n))
 	case enums.NodeKinds.IncDecStmt:
 		r.resolveExpr(scope, r.tree.Child(n, 0))
 	case enums.NodeKinds.ExprStmt:
@@ -785,6 +816,13 @@ func (r *resolver) resolveType(scope *Scope, n ast.NodeIndex) {
 		}
 		if ret := r.tree.Child(n, 1); ret != ast.InvalidNode {
 			r.resolveType(scope, ret)
+		}
+	case enums.NodeKinds.MultiReturnType:
+		// A multi-return function's own `(T1, T2, ...)` return-type list (see
+		// LANGUAGE.md's "Go-style multi-return values" section) - each child
+		// is an ordinary type-position node, resolved exactly like any other.
+		for _, typeNode := range r.tree.Children(n) {
+			r.resolveType(scope, typeNode)
 		}
 	}
 }
@@ -890,6 +928,15 @@ func (r *resolver) resolveExpr(scope *Scope, n ast.NodeIndex) {
 			if objSym, ok := r.info.Refs[object]; ok && objSym.Kind == SymPackage {
 				r.resolvePackageMemberExpr(n, objSym)
 			}
+		}
+	case enums.NodeKinds.MultiValueExpr:
+		// A multi-value `return a, b, ...`'s own value list (see
+		// LANGUAGE.md's "Go-style multi-return values" section) - reached via
+		// resolveStmt's ReturnStmt case, whose value slot is this node
+		// instead of a plain expression when there's more than one. Each
+		// child resolves exactly like any other value expression.
+		for _, v := range r.tree.Children(n) {
+			r.resolveExpr(scope, v)
 		}
 	case enums.NodeKinds.ArrayType:
 		// Reachable two ways: a bare array type used where an expression was

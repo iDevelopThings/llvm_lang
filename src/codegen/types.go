@@ -85,6 +85,22 @@ func (g *Generator) llvmType(t sema.Type) llvm.Type {
 		return llvm.ArrayType(g.llvmType(*t.Elem), int(t.Size))
 	case sema.TypeFunc:
 		return g.funcValTy
+	case sema.TypeMultiReturn:
+		// A multi-return function's real LLVM signature returns an anonymous
+		// struct {T1, T2, ...} - exactly the same "return a struct by value"
+		// machinery an ordinary struct-returning function already uses (see
+		// CODEGEN.md's "Go-style multi-return values" section), just built
+		// from this Type's own component Params rather than a StructInfo's
+		// declared fields. No dedicated LLVM type is cached for this the way
+		// stringTy/dynArrTy/funcValTy are - unlike those three (one fixed
+		// shape reused everywhere), every multi-return function's own
+		// component types differ, so there's nothing to precompute once in
+		// setupTypes.
+		fieldTypes := make([]llvm.Type, len(t.Params))
+		for i, pt := range t.Params {
+			fieldTypes[i] = g.llvmType(pt)
+		}
+		return g.ctx.StructType(fieldTypes, false)
 	case sema.TypePointer:
 		// A pointer's own pointee type never matters to its LLVM
 		// representation - g.ptrTy is already the single opaque `ptr` type

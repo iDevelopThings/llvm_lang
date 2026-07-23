@@ -116,7 +116,7 @@ func (p *Parser) parseFuncDecl() ast.NodeIndex {
 
 	returnType := ast.InvalidNode
 	if !p.at(enums.Lexemes.LeftBrace) {
-		returnType = p.parseTypeExpr()
+		returnType = p.parseFuncDeclReturnType()
 	}
 
 	body := p.parseBlock()
@@ -126,6 +126,40 @@ func (p *Parser) parseFuncDecl() ast.NodeIndex {
 		End:   p.tree.SpanOf(body).End,
 	}
 	return p.tree.NewNode(enums.NodeKinds.FuncDecl, kwTok, span, receiver, name, params, returnType, body)
+}
+
+// parseFuncDeclReturnType parses a FuncDecl's own return-type position: a
+// plain type (`func f() int`, completely unchanged - see parseTypeExpr) or a
+// parenthesized, comma-separated list of 2+ types (`func f() (int, bool)` -
+// see LANGUAGE.md's "Go-style multi-return values" section), wrapped in a
+// MultiReturnType node the same way parseParamList wraps FuncDecl's own
+// variable-arity params (see ast.Node's own MultiReturnType doc comment).
+// Deliberately its own function, not folded into parseTypeExpr itself - a
+// bare type position never starts with `(` anywhere else in this grammar
+// (a var's type annotation, a param's type, a struct field's type, an array
+// element type, a FuncType/FuncLit/ExternFuncDecl's own return type all still
+// call parseTypeExpr directly, unchanged), so this new `(` case only ever
+// applies right here, at a FuncDecl's own return-type position - the one
+// place this round's scope actually asked for it.
+//
+// A parenthesized list of fewer than 2 types (`func f() ()`, `func f() (int)`)
+// still parses fine structurally - the same "grammar accepts the general
+// shape, sema enforces the feature's own narrower rule" division of labor
+// this project already uses for a duplicate-arity constructor or a non-empty
+// destructor param list (see sema.checkDestructorDecl) - see
+// sema.multiReturnTypeFromNode for the actual "at least 2" diagnostic.
+func (p *Parser) parseFuncDeclReturnType() ast.NodeIndex {
+	if !p.at(enums.Lexemes.LeftParen) {
+		return p.parseTypeExpr()
+	}
+	openTok := p.expect(enums.Lexemes.LeftParen)
+	types := p.parseCommaList(enums.Lexemes.RightParen, p.parseTypeExpr)
+	closeTok := p.expect(enums.Lexemes.RightParen)
+	span := ast.Span{
+		Start: openTok.Start,
+		End:   closeTok.End,
+	}
+	return p.tree.NewNode(enums.NodeKinds.MultiReturnType, lexer.Token{}, span, types...)
 }
 
 // parseExternFuncDecl parses `extern func Name(params) RetType` - a top-level

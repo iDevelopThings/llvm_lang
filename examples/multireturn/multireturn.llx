@@ -1,0 +1,68 @@
+// multireturn.llx - demonstrates Go-style multi-return values (see
+// LANGUAGE.md's "Go-style multi-return values" section): a function
+// declaring two return values (`(int, bool)`), destructured immediately at
+// the call site - the language's own error-handling idiom now that this
+// exists, mirroring Go's own `v, ok := m[k]` map-lookup shape. Exercises
+// both destructuring forms this feature supports: `:=` (fresh names, the
+// first time each result pair is bound) and `=` (reusing those same
+// already-declared names for a second call).
+//
+// Run with:
+//   .\llvmc.exe examples\multireturn\multireturn.llx
+//   echo $LASTEXITCODE   # (PowerShell) -> 0
+// Expected stdout:
+//   5
+//   division by zero
+//   2
+//   not found
+
+func divide(a int, b int) (int, bool) {
+	if b == 0 {
+		return 0, false
+	}
+	return a / b, true
+}
+
+func find(items []int, target int) (int, bool) {
+	i := 0
+	for i < len(items) {
+		if items[i] == target {
+			return i, true
+		}
+		i++
+	}
+	return -1, false
+}
+
+func main() int {
+	result, ok := divide(10, 2)
+	if ok {
+		print(result)
+	} else {
+		print("division by zero")
+	}
+
+	result, ok = divide(10, 0)
+	if ok {
+		print(result)
+	} else {
+		print("division by zero")
+	}
+
+	items := []int{10, 20, 30, 40, 50}
+	idx, found := find(items, 30)
+	if found {
+		print(idx)
+	} else {
+		print("not found")
+	}
+
+	idx, found = find(items, 99)
+	if found {
+		print(idx)
+	} else {
+		print("not found")
+	}
+
+	return 0
+}

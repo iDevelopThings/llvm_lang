@@ -284,6 +284,32 @@ func TestBinary_GlobalInitExample(t *testing.T) {
 	}
 }
 
+// TestBinary_MultiReturnExample runs examples/multireturn/multireturn.llx end
+// to end via the real binary - the worked dogfooding demo for this round's
+// Go-style multi-return values feature (see LANGUAGE.md's own section of the
+// same name): divide's and find's `(T, bool)` results, each destructured via
+// both supported forms (`:=` for a fresh pair, `=` reusing the same two
+// names for a second call), real stdout output confirming both the
+// found/ok and not-found/division-by-zero paths.
+func TestBinary_MultiReturnExample(t *testing.T) {
+	cmd := exec.Command(llvmcPath, "../../examples/multireturn/multireturn.llx")
+	out, err := cmd.Output()
+	if err != nil {
+		ee, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("running llvmc: %v", err)
+		}
+		t.Fatalf("llvmc exited %v, stderr:\n%s", err, ee.Stderr)
+	}
+
+	normalized := strings.ReplaceAll(string(out), "\r\n", "\n")
+	normalized = strings.TrimRight(normalized, "\n")
+	want := "5\ndivision by zero\n2\nnot found"
+	if normalized != want {
+		t.Errorf("stdout = %q, want %q", normalized, want)
+	}
+}
+
 // TestBinary_MainExitCode covers examples/features/features.llx end to end: its
 // three print calls' real stdout, and its `func main() int` return value
 // coming back as the child process's own exit code.
@@ -402,6 +428,30 @@ func TestBinary_AOT_Features(t *testing.T) {
 	normalized = strings.TrimRight(normalized, "\n")
 	if normalized != "10\n30\n100" {
 		t.Errorf("stdout = %q, want the lines 10, 30, 100", string(out))
+	}
+}
+
+// TestBinary_AOT_MultiReturn AOT-compiles examples/multireturn and confirms
+// identical output to its JIT-executed behavior (TestBinary_MultiReturnExample) -
+// proving the multi-return aggregate-struct-return ABI (see CODEGEN.md's
+// "Go-style multi-return values" section) round-trips correctly through a
+// real, standalone linked executable, not just under JIT execution.
+func TestBinary_AOT_MultiReturn(t *testing.T) {
+	exePath := aotCompile(t, "../../examples/multireturn/multireturn.llx")
+
+	out, err := exec.Command(exePath).Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			t.Fatalf("%s exited %v, stderr:\n%s", exePath, err, ee.Stderr)
+		}
+		t.Fatalf("running %s: %v", exePath, err)
+	}
+
+	normalized := strings.ReplaceAll(string(out), "\r\n", "\n")
+	normalized = strings.TrimRight(normalized, "\n")
+	want := "5\ndivision by zero\n2\nnot found"
+	if normalized != want {
+		t.Errorf("stdout = %q, want %q", normalized, want)
 	}
 }
 

@@ -1057,3 +1057,119 @@ section for the exact message text/values per site, and
 the printed-message assertions added on top of each test's existing
 abnormal-exit assertion - confirming the abort mechanism itself is
 byte-for-byte unchanged, only informative output was added before it.
+
+---
+
+## 2026-07-23 - Go-style multi-return values: destructuring only, no tuple type
+
+**Decision:** add Go-style multi-return values - `func f() (T1, T2, ...)`,
+`a, b := f()` - confirmed directly with the project owner (asked explicitly,
+not inferred) as this language's answer to error handling, now that a
+fallible function has a real way to signal failure besides a sentinel value
+or an out-pointer parameter. Scoped deliberately narrowly, mirroring Go's own
+actual restriction rather than inventing something looser: **there is no
+first-class tuple type** - a multi-return call's result can only ever be
+consumed by destructuring it immediately, at the exact point a matching call
+happens (`a, b := f(...)`/`a, b = f(...)`) - it can never be stored in a
+single variable, passed onward as one value, or used any other way. Every
+other position (a single-name `:=`, a call argument, `print`, an operator
+operand, ...) rejects a multi-return result outright, with a real
+diagnostic, the same way this pass already rejects a `void` result almost
+everywhere.
+
+**Why (destructuring only, no tuple type):** a real tuple type would be a
+substantially larger feature - a new storable `Type` that itself needs its
+own assignability/equality/composite-literal rules, interacting with every
+existing construct that can hold an ordinary value (struct fields, array
+elements, function parameters) - none of which the motivating error-handling
+use case (`v, ok := f(...)`) actually needs. Go itself draws the identical
+line for the identical reason: a multi-value result is a call-site-only
+construct there too, never a real value with its own type. Modeling this as
+`Type{Kind: TypeMultiReturn, Params: []Type}` (reusing the exact same
+`Params []Type` field `TypeFunc` already carries its own parameter types in)
+and rejecting it everywhere except the two consuming positions was the
+smallest change that fully supports the real use case without opening any of
+that larger design surface.
+
+**Why new node kinds, not retrofitted existing ones:** `ReturnStmt` stays
+fixed-arity `[expr]` unchanged - a multi-value return wraps its values in a
+new variable-arity `MultiValueExpr` node sitting in that same slot, mirroring
+`ParamList`'s own established "variable-arity part gets its own wrapper node
+so the containing fixed-arity node doesn't have to change shape" precedent
+exactly. Likewise a multi-return function's return-type position gets a new
+`MultiReturnType` wrapper (sitting in `FuncDecl`'s existing single
+return-type slot), and the two destructuring statement forms
+(`MultiShortVarDecl`/`MultiAssignStmt`) are genuinely new node kinds rather
+than nullable-slot variants of `ShortVarDecl`/`AssignStmt`. This follows the
+same reasoning `ConstructorDecl`/`DestructorDecl`/`ExternFuncDecl` already
+established: every single-value `return`/single-name `:=`/single-target `=`
+call site across `sema`/`codegen` assumes exactly one value/name/target, and
+retrofitting those shapes directly would have rippled a nil-check through all
+of that for zero benefit - a plain single-value `return`/`:=`/`=` needed
+(and got) zero changes to its own existing node shape or codegen path.
+
+**Why each destructured name's own type is eagerly cached, not left lazy:**
+a `MultiShortVarDecl`-declared name's own component type is computed once,
+directly against that name's own `Ident` node (`checkMultiShortVarDeclNode`,
+`sema/typecheck.go`) - both `declType`'s memoization cache and `info.Types`
+are seeded there unconditionally, rather than relying on `declType` being
+invoked lazily the first time some later expression references the name (the
+way an ordinary `Param`'s type effectively is). A destructured name that's
+declared but never referenced again anywhere in the program would otherwise
+never have its own `info.Types` entry populated at all - codegen's own
+`g.info.Types[nameNode]` lookup would silently read the `Type{}` zero value.
+Ordinary `ShortVarDecl` doesn't have this gap only because `checkStmt` itself
+always forces `declType` on the *whole* declaration node directly, unlike a
+multi-declaration's individual names.
+
+**Why the codegen ABI needed nothing new at all:** a multi-return function's
+real LLVM signature returns an anonymous struct `{T1, T2, ...}` - exactly the
+same "struct/array/string passed and returned as a real LLVM aggregate type,
+no manual `sret`/by-ref tricks" convention this project's structs already
+use (see `CODEGEN.md`'s own section of that name), just for an anonymous
+aggregate instead of a named `StructInfo`-backed one. `return a, b` builds
+it via `llvm.Undef` + `CreateInsertValue` (the same runtime-aggregate
+construction `genFuncLit`'s own closure fat-pointer already uses whenever a
+field is a genuine runtime value, not a compile-time constant); destructuring
+reads it back via `CreateExtractValue`, the same instruction a struct's own
+field access already uses. No new LLVM type needed caching in `setupTypes`
+either - unlike `stringTy`/`dynArrTy`/`funcValTy` (one fixed shape reused
+everywhere), every multi-return function's own component types differ, so
+each one's anonymous struct type is simply built fresh, on demand.
+
+**Explicitly out of scope, confirmed directly rather than assumed
+worth adding:**
+
+- **General Go-style parallel multi-assignment** (`a, b := 1, 2`, each side
+  independently evaluated and paired positionally) - a genuinely different,
+  larger feature than destructuring one multi-return call, not needed for
+  the motivating use case. This language's destructuring grammar only ever
+  parses a single expression as the right-hand side of a multi-target
+  `:=`/`=`, so this form isn't even reachable through the new grammar at
+  all - a second comma-separated value left over is simply an ordinary
+  syntax error (an unconsumed token where a statement separator was
+  expected), not a dedicated diagnostic naming this case specifically.
+- **Argument-spreading** (Go's own `f(g())` - forwarding a multi-return
+  call's results onward as multiple arguments to another call). Every
+  argument position is an ordinary single-value context (`checkValueExpr`),
+  so this is rejected the same way any other single-value position rejects
+  a multi-return result - no special-casing needed anywhere.
+- **A blank identifier (`_`) for discarding one of several destructured
+  values.** This language has no blank-identifier concept anywhere yet (see
+  `src/sema/resolve_test.go`'s own existing comment on this) - every
+  destructured value must bind to (or assign into) a real, distinctly-named
+  target this round. Documented in `LANGUAGE.md` as a deliberate,
+  likely-worth-revisiting-later gap, not a silent one.
+
+**Status:** shipped. See `LANGUAGE.md`'s "Functions" section for the full
+language-level rule (including every explicit scope boundary above) and
+`CODEGEN.md`'s new "Go-style multi-return values" section for the lowering.
+New coverage across `src/parser` (`multireturn_test.go` - grammar/`Tree.Dump`
+shape, plus the parallel-multi-assign/missing-assign-op clean-rejection
+cases), `src/sema` (`multireturn_test.go` - the destructuring/return-matching
+type rules and every out-of-scope rejection), and `src/codegen`
+(`multireturn_test.go`, JIT-executed - the `divide`/`find` idiom, mixed-width
+component types, both destructuring forms including non-ident assignment
+targets, and 3+ return values), plus a real worked example
+(`examples/multireturn/multireturn.llx`) exercised end to end - JIT and AOT
+alike - by `cmd/llvmc/main_test.go`.

@@ -202,3 +202,39 @@ func (t *Tree) ExternFuncParamList(decl NodeIndex) NodeIndex {
 func (t *Tree) ExternFuncReturnType(decl NodeIndex) NodeIndex {
 	return t.Child(decl, 2)
 }
+
+// MultiShortVarDeclNames returns decl's (a MultiShortVarDecl's) leading Ident
+// name children - every child except the last (see Node's own
+// MultiShortVarDecl doc comment for the [name0, ..., nameN, call] shape these
+// two accessors index into). A plain slice, not iter.Seq: every real caller
+// (declaring each name, storing each one's own destructured field) needs
+// positional/indexed access paired against the call's own component types,
+// not just a single forward pass.
+func (t *Tree) MultiShortVarDeclNames(decl NodeIndex) []NodeIndex {
+	children := t.Children(decl)
+	return children[:len(children)-1]
+}
+
+// MultiShortVarDeclValue returns decl's (a MultiShortVarDecl's) trailing
+// call-expression child - the sole right-hand side being destructured.
+func (t *Tree) MultiShortVarDeclValue(decl NodeIndex) NodeIndex {
+	children := t.Children(decl)
+	return children[len(children)-1]
+}
+
+// MultiAssignStmtTargets returns n's (a MultiAssignStmt's) leading lvalue
+// target children - every child except the last (see Node's own
+// MultiAssignStmt doc comment for the [target0, ..., targetN, call] shape
+// these two accessors index into) - the assignment-form counterpart to
+// MultiShortVarDeclNames, same reasoning.
+func (t *Tree) MultiAssignStmtTargets(n NodeIndex) []NodeIndex {
+	children := t.Children(n)
+	return children[:len(children)-1]
+}
+
+// MultiAssignStmtValue returns n's (a MultiAssignStmt's) trailing
+// call-expression child - the sole right-hand side being destructured.
+func (t *Tree) MultiAssignStmtValue(n NodeIndex) NodeIndex {
+	children := t.Children(n)
+	return children[len(children)-1]
+}

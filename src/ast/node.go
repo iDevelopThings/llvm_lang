@@ -193,6 +193,48 @@ type Span struct {
 //     after `[`, an optional low expression (absent when the very next token
 //     is `:`), then a `:` disambiguates this from a plain IndexExpr - no `:`
 //     following the first expression means IndexExpr, unchanged.
+//   - MultiReturnType: [type0, type1, ...] - variable arity, each child a bare
+//     type-position node (an Ident, ArrayType, PointerType, or FuncType - no
+//     name, the same shape ParamTypeList's own children already have) - a
+//     multi-return function's declared `(T1, T2, ...)` return-type list (see
+//     LANGUAGE.md's "Go-style multi-return values" section). Sits in
+//     FuncDecl's existing single return-type child slot in place of a plain
+//     type-position node, mirroring how ParamList already wraps FuncDecl's
+//     own variable-arity params inside one fixed slot - FuncReturnType(decl)
+//     keeps returning exactly one node; that node is now sometimes this
+//     wrapper instead. Only ever produced parsing a FuncDecl's own return
+//     type (parser.parseFuncDeclReturnType) - a FuncType/FuncLit/
+//     ExternFuncDecl's return-type slot still only ever parses a single plain
+//     type-position node via parseTypeExpr, unchanged, so this node kind can
+//     never appear there.
+//   - MultiValueExpr: [value0, value1, ...] - variable arity, each child an
+//     ordinary value expression - a multi-value `return a, b, ...` (see
+//     LANGUAGE.md's "Go-style multi-return values" section). Sits in
+//     ReturnStmt's existing single `expr` child slot in place of a plain
+//     value expression, the exact same "wrap the variable-arity case in its
+//     own node so the fixed slot stays fixed" convention MultiReturnType just
+//     above uses - a plain single-value `return expr` is a completely
+//     unchanged ReturnStmt whose expr child is simply that one expression
+//     directly, never this wrapper.
+//   - MultiShortVarDecl: [name0, name1, ..., nameN, call] - variable arity;
+//     every child except the last is a freshly-declared Ident name, the last
+//     is the sole right-hand-side call expression being destructured (see
+//     LANGUAGE.md's "Go-style multi-return values" section) - `a, b := f()`.
+//     At least two names (a single-name `x := f()` is the existing,
+//     completely unchanged ShortVarDecl). Use ast.Tree's
+//     MultiShortVarDeclNames/MultiShortVarDeclValue accessors rather than
+//     indexing directly - the split point (last child vs. everything before
+//     it) isn't a fixed position the way most other variable-arity node's
+//     "special" slot is.
+//   - MultiAssignStmt: [target0, target1, ..., targetN, call] - the
+//     assignment-form counterpart to MultiShortVarDecl, identical shape:
+//     every child except the last is an already-existing lvalue target
+//     (Ident, MemberExpr, IndexExpr, or a `*p` UnaryExpr dereference - exactly
+//     the same shapes plain AssignStmt's own single target already allows),
+//     the last is the sole right-hand-side call expression - `a, b = f()`. At
+//     least two targets (a single-target `x = f()` is the existing,
+//     completely unchanged AssignStmt). Use MultiAssignStmtTargets/
+//     MultiAssignStmtValue, same reasoning as MultiShortVarDecl above.
 //   - a fixed-arity kind may reserve a positional slot as InvalidNode for an
 //     omitted optional child (e.g. VarDecl's type annotation); a
 //     variable-arity kind (Block's statements, CallExpr's arguments) is

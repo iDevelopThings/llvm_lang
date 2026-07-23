@@ -531,7 +531,118 @@ x++
 
 ## Functions
 
-`return` supports a single value only - no `return a, b` tuple returns, at least for now.
+`return` supports either a single value (as always) or, now, several -
+Go-style multi-return values, this language's answer to error handling
+(there is still no exception/panic-recover mechanism anywhere - see
+"Missing return" below and `DECISIONS.md`'s dated entry confirming this
+direction). A function's return-type position may declare a parenthesized,
+comma-separated list of 2 or more types instead of a single type (or no
+return type at all, still completely unchanged):
+
+```go
+func divide(a int, b int) (int, bool) {
+    if b == 0 {
+        return 0, false
+    }
+    return a / b, true
+}
+```
+
+A `return` statement inside such a function must supply exactly that many
+values, in order, each individually assignable to its own matching component
+type (the same per-position assignability check an ordinary single-value
+`return`/argument/assignment already uses):
+
+```go
+func f() (int, bool) {
+    return 1, true   // fine
+    return 1          // error: function returns (int, bool); return must
+                       // supply 2 values
+    return 1, 2, 3     // error: wrong number of return values: got 3, want 2
+    return true, 1     // error: cannot use bool as int in return value 1
+}
+```
+
+### Destructuring only - no first-class tuple type
+
+**There is no tuple type anywhere in this language.** A multi-return call's
+result can only ever be consumed by immediately destructuring it, right at
+the one call expression that produced it - it can never be stored in a
+single variable, passed around as one value, or used any other way. This is
+a deliberate restriction, not a gap - it mirrors Go's own actual rule
+exactly (Go itself has no tuple type either; a multi-value call result is
+just as unstorable there).
+
+Two new statement forms exist purely to destructure one - a multi-name short
+variable declaration (all names freshly declared):
+
+```go
+result, ok := divide(10, 2)   // result == 5, ok == true
+```
+
+and a multi-target assignment (every target already an existing, ordinary
+lvalue - a plain variable, a struct field, or an array/slice element,
+exactly the same shapes a single-target `=` already allows):
+
+```go
+var result int
+var ok bool
+result, ok = divide(10, 0)    // result == 0, ok == false
+
+p.field, arr[0] = divide(20, 4)   // targets don't have to be plain idents
+```
+
+In both forms, **the right-hand side must be exactly one call expression**
+whose callee's own signature returns exactly as many values as there are
+targets on the left - no mixing with other expressions, no partial
+application:
+
+```go
+a, b := f(), g()      // error: right-hand side of a short variable
+                       // declaration must be exactly one function call
+a, b, c := f()         // error (if f returns 2 values): wrong number of
+                        // values in short variable declaration: call
+                        // returns 2, got 3 target(s)
+```
+
+Using a multi-return call's result anywhere else - assigned to a single
+name, passed as an argument, printed directly, or any other single-value
+position - is a compile error, not a panic or a silently-truncated value:
+
+```go
+func f() (int, bool) { return 1, true }
+
+x := f()        // error: multi-value result (int, bool) cannot be used as
+                 // a single value; it can only be destructured immediately
+                 // (a, b := ... / a, b = ...) or returned matching a
+                 // function's own multi-return type
+print(f())       // error, same reason
+```
+
+**Deliberately out of scope this round** - each a real, separate feature in
+its own right, not needed for the motivating error-handling use case:
+
+- **General Go-style parallel multi-assignment** (`a, b := 1, 2` - each side
+  individually evaluated and paired positionally, nothing to do with a
+  multi-return call at all). This language's own destructuring grammar only
+  ever accepts a *single* expression as the right-hand side of a
+  multi-target `:=`/`=` - a second, comma-separated value is simply a syntax
+  error (a plain "expected `;`", not a dedicated diagnostic naming this
+  specifically), not a supported form quietly doing something else.
+- **Argument-spreading** (Go's own `f(g())`, forwarding a multi-return
+  call's results onward as multiple arguments to another call). Every
+  argument position is an ordinary single-value context, so a multi-return
+  call there is rejected exactly like any other single-value position.
+- **A blank identifier (`_`) for discarding one of several destructured
+  values.** This language has no blank-identifier concept anywhere yet (see
+  `src/sema/resolve_test.go`'s own note on this) - every destructured value
+  must bind to (or assign into) a real, distinctly-named target. Likely
+  worth revisiting once/if a blank identifier is ever added generally, but a
+  deliberate, documented gap for now, not an oversight.
+
+`main` needs no special-casing for any of this: it already only accepts "no
+return type or exactly `int`" (see below), so a multi-return-typed `main` is
+simply rejected by that exact same existing check, unchanged.
 
 ### The `main` function's return type
 
