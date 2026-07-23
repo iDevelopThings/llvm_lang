@@ -1,0 +1,99 @@
+// mathutil.llx - std/mathutil: a small math standard-library package, built
+// entirely as ordinary .llx code (see LANGUAGE.md's "Standard library"
+// section) - no compiler changes, just this project's own existing
+// `extern func` FFI (LANGUAGE.md's "External functions (FFI)" section) for
+// the handful of operations libc's <math.h> already provides, plus a few
+// pure-.llx helpers that don't need libc at all.
+//
+// Named "mathutil" (not "mathutils") deliberately, distinct from
+// examples/imports/mathutils's own unrelated demo package of the same
+// near-name - imports in this language are resolved by relative path, not a
+// global package registry (see LANGUAGE.md's "Imports" section), so the two
+// could never actually collide either way; the naming is just to avoid any
+// human confusion between "the real std package" and "an example fixture"
+// when skimming directory listings side by side.
+//
+// Every extern binds the exact real libc symbol name (lowercase, matching
+// <math.h> itself - "the declared name is the linked symbol name, verbatim",
+// per LANGUAGE.md), which also means the raw binding is unexported (a
+// lowercase top-level name is never visible through a package qualifier -
+// see LANGUAGE.md's "Imports" section) and so can't be dialed cross-package
+// on its own. Each one gets an ordinary, capitalized wrapper function right
+// underneath it - a one-line pass-through - purely to give it an exported,
+// callable-as-mathutil.Sqrt(...) name; this isn't renaming the extern itself
+// (still not supported, see LANGUAGE.md), just an exported facade in front
+// of an unexported binding, same pattern any Go package uses to expose a
+// lowercase-named C import under a nicer public name.
+//
+// All five all taking/returning f64, all part of mingw64's default C
+// runtime - already always linked into this project's own JIT-hosting
+// process (see CODEGEN.md), so no special linking/loading step is needed
+// here, same as examples/scope_timer's own kernel32 extern calls.
+
+extern func sqrt(x f64) f64
+extern func pow(base f64, exp f64) f64
+extern func floor(x f64) f64
+extern func ceil(x f64) f64
+extern func fabs(x f64) f64
+
+func Sqrt(x f64) f64 {
+    return sqrt(x)
+}
+
+func Pow(base f64, exp f64) f64 {
+    return pow(base, exp)
+}
+
+func Floor(x f64) f64 {
+    return floor(x)
+}
+
+func Ceil(x f64) f64 {
+    return ceil(x)
+}
+
+func Fabs(x f64) f64 {
+    return fabs(x)
+}
+
+// AbsInt/MinInt/MaxInt/MinF64/MaxF64 below need no libc call at all - plain
+// comparison-based arithmetic, exactly as cheap in this language as in any
+// other, so there's no reason to route them through an extern the way the
+// five functions above have to (there's no libc "int abs" this project could
+// bind that's any cheaper than the comparison itself, and no min/max at all
+// in <math.h> for either int or float widths).
+
+func AbsInt(x int) int {
+    if x < 0 {
+        return -x
+    }
+    return x
+}
+
+func MinInt(a int, b int) int {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+func MaxInt(a int, b int) int {
+    if a > b {
+        return a
+    }
+    return b
+}
+
+func MinF64(a f64, b f64) f64 {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+func MaxF64(a f64, b f64) f64 {
+    if a > b {
+        return a
+    }
+    return b
+}

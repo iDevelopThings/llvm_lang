@@ -1,0 +1,44 @@
+// mathutil_demo.llx - exercises every function std/mathutil exports: the
+// five libc <math.h> wrappers (Sqrt, Pow, Floor, Ceil, Fabs) and the five
+// pure-.llx helpers (AbsInt, MinInt, MaxInt, MinF64, MaxF64) - see
+// LANGUAGE.md's "Standard library" section and std/mathutil/mathutil.llx
+// itself for what each wraps and why.
+//
+// Every printed value below is hand-verifiable:
+//   Sqrt(16.0)        == 4.0     (4*4 == 16)
+//   Pow(2.0, 10.0)    == 1024.0  (2^10)
+//   Floor(3.7)        == 3.0
+//   Ceil(3.2)         == 4.0
+//   Fabs(-5.5)        == 5.5
+//   AbsInt(-7)        == 7
+//   MinInt(3, 9)      == 3
+//   MaxInt(3, 9)      == 9
+//   MinF64(2.5, 1.5)  == 1.5
+//   MaxF64(2.5, 1.5)  == 2.5
+//
+// Run with:
+//   .\llvmc.exe examples\mathutil_demo\mathutil_demo.llx
+//   echo $LASTEXITCODE   # (PowerShell) -> 19  (AbsInt(-7) + MinInt(3,9) + MaxInt(3,9) == 7+3+9)
+
+import "../../std/mathutil"
+
+func main() int {
+    print(mathutil.Sqrt(16.0))         // 4.000000
+    print(mathutil.Pow(2.0, 10.0))     // 1024.000000
+    print(mathutil.Floor(3.7))         // 3.000000
+    print(mathutil.Ceil(3.2))          // 4.000000
+    print(mathutil.Fabs(-5.5))         // 5.500000
+
+    absResult := mathutil.AbsInt(-7)
+    print(absResult)                    // 7
+
+    minResult := mathutil.MinInt(3, 9)
+    maxResult := mathutil.MaxInt(3, 9)
+    print(minResult)                    // 3
+    print(maxResult)                    // 9
+
+    print(mathutil.MinF64(2.5, 1.5))   // 1.500000
+    print(mathutil.MaxF64(2.5, 1.5))   // 2.500000
+
+    return absResult + minResult + maxResult   // 7 + 3 + 9 = 19
+}

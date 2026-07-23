@@ -1275,3 +1275,62 @@ functions, struct-by-value ABI marshaling/rename syntax for the linked symbol
 name, and any platform other than Windows. See `DECISIONS.md` for why this
 round is scoped this narrowly, and `CODEGEN.md` for how an extern func
 declaration actually lowers.
+
+## Standard library
+
+A "standard library" in this project is nothing more than ordinary `.llx`
+packages living under a top-level `std/` directory, imported the exact same
+way as any other package (see "Imports" above) - there is no separate
+"builtin module" concept, no special resolution rule for `std/`, and no
+compiler change involved in any of it. `std/` is a plain sibling of
+`examples/` at the repo root; a program reaches into it with an ordinary
+relative `import` path, exactly like reaching into any other project's own
+helper package:
+
+```go
+import "../../std/mathutil"
+import "../../std/strings"
+import "../../std/time"
+```
+
+**What's available so far:**
+
+- **`std/mathutil`** - thin wrappers around five libc `<math.h>` functions
+  (`Sqrt`, `Pow`, `Floor`, `Ceil`, `Fabs`, all `f64`-in/`f64`-out, bound via
+  `extern func` - see "External functions (FFI)" above), plus five pure-`.llx`
+  helpers needing no libc call at all: `AbsInt`, `MinInt`, `MaxInt` (`int`),
+  and `MinF64`/`MaxF64` (`f64`, comparison-based). Named "mathutil", not
+  "mathutils", to read distinctly from `examples/imports`'s own unrelated
+  same-named demo fixture - not that a real collision was ever possible,
+  since imports here resolve by relative path, not a global package
+  registry.
+- **`std/strings`** - `Contains`, `IndexOf` (mirroring Go's own
+  `strings.Index`, `-1` when not found), `HasPrefix`, `HasSuffix`,
+  `TrimSpace` (ASCII space, `0x20`, only - not full Unicode whitespace),
+  `Split` (Go-`strings.Split` semantics exactly, edge cases included:
+  `Split("", "")` is an empty slice, `Split(s, "")` splits into single-byte
+  pieces, a `sep` that never occurs returns a length-1 slice holding `s`
+  itself unchanged), `ToUpper`/`ToLower` (ASCII `a`-`z`/`A`-`Z` only), and two
+  number-formatting helpers: `IntToString` (handles `0` and the smallest
+  representable `int` correctly) and `F64ToString` (a fixed 4-decimal-place
+  format, not a general shortest-round-tripping float formatter). Every one
+  of these is hand-written using only this language's own existing
+  primitives (slicing, `len`, `==`, `+`, loops) - deliberately zero `extern
+  func` anywhere in this package, since `string`'s own `{ptr, i32}`
+  representation has no real C-ABI shape `extern func`'s type restriction
+  would even accept (see "External functions (FFI)" above).
+- **`std/time`** - `Now() i64` (a raw performance-counter tick count) and
+  `ElapsedSeconds(startTicks i64) f64`, a nicer API on top of the exact same
+  `QueryPerformanceCounter`/`QueryPerformanceFrequency` externs
+  `examples/scope_timer.llx` already binds directly - that example is left
+  untouched; this package is an additive convenience layer, not a
+  replacement for it. The tick frequency is cached once via a non-constant
+  top-level `var` initializer (see "Global `var` initializers" above).
+
+**Deliberately deferred, not built this round:** Unicode-aware string
+handling (everything above is ASCII-only, matching this language having no
+Unicode awareness anywhere else yet), a general/shortest-round-tripping
+float-to-string formatter (`F64ToString` above is a simple fixed-precision
+one instead), file I/O, and anything else not listed above - `std/` is
+expected to keep growing incrementally, the same way any other part of this
+language does.

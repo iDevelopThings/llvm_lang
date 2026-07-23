@@ -1,0 +1,291 @@
+// strings.llx - std/strings: string helpers, built entirely as ordinary
+// .llx code (see LANGUAGE.md's "Standard library" section) - deliberately
+// with NO extern func anywhere in this file. This project's own `string` is
+// a `{ptr, i32}` fat struct (see CODEGEN.md's "string representation"
+// section), not a null-terminated C string - it has no representation a
+// real C function could receive at all, and extern func's own type
+// restriction already rejects `string` outright (see LANGUAGE.md's
+// "External functions (FFI)" section). So everything here is hand-written
+// using only this language's own existing string primitives: slicing
+// (`s[a:b]`), `len`, `==`, `+` concatenation, and ordinary loops - no
+// per-byte indexing exists for `string` (only a fixed-size/dynamic *array*
+// supports `[i]` - see sema's checkIndexExpr), so a "current character" is
+// always a length-1 *slice* (`s[i:i+1]`), compared with `==`/`<`/`<=` (a
+// string's own ordering operators are already real byte-by-byte lexicographic
+// comparisons - see LANGUAGE.md's "Operators" section), never a byte value.
+//
+// Every exported name here is capitalized (`Contains`, `IndexOf`, ...),
+// not the lowercase spelling Go's own real `strings` package uses for the
+// same operation (`strings.Index`, ...) - this project's own Go-style
+// name-case visibility rule (LANGUAGE.md's "Imports" section) means an
+// unexported name simply isn't reachable through a package qualifier at
+// all, and the entire point of this package is to be called from another
+// package's code, so every one of these has to be exported.
+//
+// ASCII-only throughout, deliberately - this language has no Unicode
+// awareness anywhere yet (no rune type, no UTF-8-aware iteration), so
+// "a character" here always means exactly one byte/one string index unit.
+
+// Contains reports whether substr appears anywhere within s (including as
+// the empty string, which is considered to appear in any s - matching Go's
+// own strings.Contains("", "") == true / strings.Contains("abc", "") == true).
+func Contains(s string, substr string) bool {
+    return IndexOf(s, substr) >= 0
+}
+
+// IndexOf returns the index of substr's first occurrence in s, or -1 if it
+// never occurs - mirroring Go's own strings.Index exactly, edge cases
+// included: an empty substr is always found, at index 0, regardless of s
+// (even an empty s) - matching Go's own strings.Index(s, "") == 0 for any s.
+// A substr longer than s can never occur, so that's rejected up front
+// without ever needing the search loop below to run.
+func IndexOf(s string, substr string) int {
+    if len(substr) == 0 {
+        return 0
+    }
+    if len(substr) > len(s) {
+        return -1
+    }
+
+    i := 0
+    for i <= len(s) - len(substr) {
+        if s[i:i+len(substr)] == substr {
+            return i
+        }
+        i++
+    }
+    return -1
+}
+
+// HasPrefix reports whether s begins with prefix - an empty prefix always
+// matches (matching Go's own strings.HasPrefix(s, "") == true for any s).
+func HasPrefix(s string, prefix string) bool {
+    if len(prefix) > len(s) {
+        return false
+    }
+    return s[0:len(prefix)] == prefix
+}
+
+// HasSuffix reports whether s ends with suffix - an empty suffix always
+// matches, same reasoning as HasPrefix above.
+func HasSuffix(s string, suffix string) bool {
+    if len(suffix) > len(s) {
+        return false
+    }
+    return s[len(s)-len(suffix):len(s)] == suffix
+}
+
+// TrimSpace trims leading/trailing ASCII space characters (` `, 0x20) only -
+// deliberately not full Go-style Unicode-whitespace trimming (tab, newline,
+// carriage return, ...): this language has no Unicode awareness anywhere
+// yet, and going beyond the literal space character would need a small
+// hand-rolled "is this whitespace" table anyway, which isn't obviously worth
+// it for a first standard-library round. Document this narrowness at the
+// call site if a caller actually needs tab/newline trimming too.
+func TrimSpace(s string) string {
+    start := 0
+    end := len(s)
+
+    for start < end && s[start:start+1] == " " {
+        start++
+    }
+    for end > start && s[end-1:end] == " " {
+        end--
+    }
+
+    return s[start:end]
+}
+
+// Split splits s on every occurrence of sep, Go-style - matching Go's own
+// real strings.Split behavior exactly, including its two documented edge
+// cases:
+//   - Split(s, "") splits s into its individual one-byte pieces (there's no
+//     rune/UTF-8 concept here, so this is a byte split, not Go's own
+//     UTF-8-sequence split) - except Split("", "") specifically, which
+//     returns an empty slice (len 0), matching Go's own
+//     strings.Split("", "") == []string{} rather than []string{""}.
+//   - Split(s, sep) with a non-empty sep that never occurs in s (including
+//     s == "") returns a length-1 slice containing s itself unchanged,
+//     matching Go's own strings.Split("abc", ",") == []string{"abc"} and
+//     strings.Split("", ",") == []string{""}.
+func Split(s string, sep string) []string {
+    result := make([]string, 0)
+
+    if len(sep) == 0 {
+        if len(s) == 0 {
+            return result
+        }
+        i := 0
+        for i < len(s) {
+            result = append(result, s[i:i+1])
+            i++
+        }
+        return result
+    }
+
+    start := 0
+    i := 0
+    for i <= len(s) - len(sep) {
+        if s[i:i+len(sep)] == sep {
+            result = append(result, s[start:i])
+            i = i + len(sep)
+            start = i
+        } else {
+            i++
+        }
+    }
+    result = append(result, s[start:len(s)])
+    return result
+}
+
+// lowerAlphabet/upperAlphabet are the two case-mapping tables ToUpper/
+// ToLower both share - see the comment on toCaseUsing below for why a table
+// lookup (via IndexOf, itself already defined above) reads better here than
+// a 26-branch if/else chain: this language has no way to turn a character
+// into its underlying byte value at all (no rune/byte conversion, no
+// numeric cast from string - see LANGUAGE.md's "Explicit conversions"
+// section, scoped to numeric-to-numeric only), so any case mapping has to
+// go character-string to character-string directly, and a parallel-table
+// lookup is the natural way to do that with only the primitives this
+// language actually has.
+var lowerAlphabet string = "abcdefghijklmnopqrstuvwxyz"
+var upperAlphabet string = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+// toCaseUsing rebuilds s one character at a time: for each character, look
+// it up in `from`'s table (IndexOf on a single character against a 26-char
+// table is a handful of comparisons at worst, plenty cheap for a hobby
+// language's own standard library) and, if found, substitute the same
+// index's character out of `to` instead; anything not found (already the
+// target case, a digit, punctuation, a space, ...) passes through
+// unchanged.
+func toCaseUsing(s string, from string, to string) string {
+    result := ""
+    i := 0
+    for i < len(s) {
+        c := s[i:i+1]
+        idx := IndexOf(from, c)
+        if idx >= 0 {
+            result = result + to[idx:idx+1]
+        } else {
+            result = result + c
+        }
+        i++
+    }
+    return result
+}
+
+// ToUpper upper-cases every ASCII a-z character in s; anything else (already
+// uppercase, digits, punctuation, spaces) passes through unchanged.
+func ToUpper(s string) string {
+    return toCaseUsing(s, lowerAlphabet, upperAlphabet)
+}
+
+// ToLower lower-cases every ASCII A-Z character in s; anything else passes
+// through unchanged, symmetric with ToUpper above.
+func ToLower(s string) string {
+    return toCaseUsing(s, upperAlphabet, lowerAlphabet)
+}
+
+// digitChars is IntToString's own single-digit lookup table - the same
+// "index into a small fixed string" trick toCaseUsing above uses, here to
+// turn a 0-9 remainder into its printable character without ever needing a
+// byte-value/rune concept this language doesn't have.
+var digitChars string = "0123456789"
+
+// IntToString converts n to its base-10 decimal string, handling both traps
+// a naively-ported "while n > 0" itoa hits:
+//   - n == 0 is special-cased up front, returning "0" directly - the
+//     reverse-digit-extraction loop below never runs at all for 0 (its own
+//     condition is `value > 0`), so without this early return it would
+//     silently produce "" instead.
+//   - a negative n has its sign recorded and stripped before the same
+//     extraction loop runs on the (now non-negative) magnitude, with "-"
+//     prepended to the result at the very end.
+//
+// The magnitude is computed in i64, not i32, specifically so that
+// n == the smallest representable int (i32's own minimum, -2147483648)
+// doesn't overflow when negated: i64(n) first sign-extends n into a much
+// wider range, and negating *that* never overflows i64 (2147483648 fits
+// comfortably in i64's own far larger range) the way negating it directly
+// in i32 would (there's no representable positive i32 for -2147483648's
+// exact magnitude in two's complement).
+//
+// Digits are extracted least-significant-first (the classic n%10 / n/10
+// loop) and built into the result by prepending each new digit to whatever's
+// already been accumulated (`digitChars[d:d+1] + result`, not
+// `result + digitChars[d:d+1]`) - string concatenation is the only
+// "buffer" primitive this language's string type actually offers (no
+// mutable byte buffer / in-place reverse to do instead), so building the
+// correctly-ordered string directly this way, rather than accumulating in
+// reverse and reversing afterwards, is the simplest option available.
+func IntToString(n int) string {
+    if n == 0 {
+        return "0"
+    }
+
+    negative := n < 0
+    value := i64(n)
+    if negative {
+        value = -value
+    }
+
+    result := ""
+    for value > 0 {
+        d := i32(value % 10)
+        result = digitChars[d:d+1] + result
+        value = value / 10
+    }
+
+    if negative {
+        result = "-" + result
+    }
+    return result
+}
+
+// F64ToString renders x as a fixed-precision decimal string with always
+// exactly 4 digits after the decimal point (e.g. "3.1416", "-1.5000",
+// "0.0000") - a deliberately simple fixed-precision format, not a general
+// shortest-round-tripping float formatter (Go's own strconv.FormatFloat
+// with a real precision/rounding-mode search is a lot more machinery than
+// is worth building for this round - see AGENTS.md's task description for
+// this being explicitly a "don't force it" nice-to-have).
+//
+// The whole and fractional parts are computed directly with plain
+// arithmetic - no libc call/no std/mathutil dependency needed at all: since
+// the value is made non-negative up front (sign handled separately, same
+// pattern IntToString above uses), `i32(v)` (float -> int, truncates toward
+// zero per LANGUAGE.md's "Explicit conversions" section) already behaves
+// exactly like floor for a non-negative operand, so there's no reason to
+// reach for std/mathutil's own Floor for this.
+//
+// Rounding to 4 decimal places is the classic "add half a unit in the last
+// place, then truncate" trick (`frac*10000.0 + 0.5`, then i32(...) to
+// truncate) - which can occasionally round the fractional part up to
+// exactly 10000 (e.g. x very slightly below the next whole number), so
+// that's detected and carried into the integer part explicitly afterwards.
+func F64ToString(x f64) string {
+    negative := x < 0.0
+    v := x
+    if negative {
+        v = -v
+    }
+
+    intPart := i32(v)
+    frac := v - f64(intPart)
+    scaled := i32(frac * 10000.0 + 0.5)
+    if scaled >= 10000 {
+        scaled = scaled - 10000
+        intPart = intPart + 1
+    }
+
+    fracStr := IntToString(scaled)
+    for len(fracStr) < 4 {
+        fracStr = "0" + fracStr
+    }
+
+    result := IntToString(intPart) + "." + fracStr
+    if negative {
+        result = "-" + result
+    }
+    return result
+}

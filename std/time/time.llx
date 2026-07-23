@@ -1,0 +1,54 @@
+// time.llx - std/time: a small, nicer-API wrapper around the exact same
+// Windows QueryPerformanceCounter/QueryPerformanceFrequency externs
+// examples/scope_timer.llx already binds directly (see that file, and
+// LANGUAGE.md's "External functions (FFI)" section for the general
+// mechanism) - built entirely as ordinary .llx code, no compiler changes.
+// examples/scope_timer itself is deliberately left completely untouched: it
+// stands on its own as a dogfooding example of the raw extern mechanism,
+// this package is a separate, additive convenience layer on top, not a
+// replacement for it.
+//
+// Frequency below is cached via a non-constant top-level `var` initializer
+// (LANGUAGE.md's "Global variable initializers" section confirms this is
+// real, supported behavior - a global's initializer may be any well-typed
+// expression, including a function call, not just a compile-time constant;
+// see CODEGEN.md's "Global var initializers" section for the actual
+// `@llvm.global_ctors`/`llvm_lang.global_init` mechanism this compiles down
+// to) rather than lazily computed on first use - QueryPerformanceFrequency
+// is documented by Windows itself to never change while the system is
+// running, so there's no correctness reason to defer it, and a plain
+// eagerly-run-once global initializer is simpler than hand-rolling a
+// "compute once, remember you already did" lazy-init check on every single
+// Now()/ElapsedSeconds() call.
+
+extern func QueryPerformanceCounter(counter *i64) bool
+extern func QueryPerformanceFrequency(freq *i64) bool
+
+func queryFrequency() i64 {
+    f := i64(0)
+    QueryPerformanceFrequency(&f)
+    return f
+}
+
+var frequency i64 = queryFrequency()
+
+// Now returns the current raw performance-counter tick count - meaningless
+// as an absolute value (it's not a wall-clock timestamp), only meaningful as
+// a difference between two calls, exactly like QueryPerformanceCounter
+// itself.
+func Now() i64 {
+    t := i64(0)
+    QueryPerformanceCounter(&t)
+    return t
+}
+
+// ElapsedSeconds converts a tick count previously returned by Now() into a
+// real elapsed-seconds duration since then, dividing by the cached
+// frequency (ticks per second) - both operands are converted to f64 first
+// since this project's `/` on two `i64` operands would otherwise be integer
+// division (see LANGUAGE.md's "Operators" section: `- * /` work on any
+// numeric width, int division truncating same as every C-family language).
+func ElapsedSeconds(startTicks i64) f64 {
+    elapsedTicks := Now() - startTicks
+    return f64(elapsedTicks) / f64(frequency)
+}

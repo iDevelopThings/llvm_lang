@@ -1,0 +1,90 @@
+// strings_demo.llx - exercises every function std/strings exports,
+// including the documented edge cases: empty-string inputs, a substring
+// that's never found, and a substring sitting at the very start/end of its
+// haystack. See std/strings/strings.llx itself for the exact semantics each
+// function follows (mirroring Go's own real strings package edge cases,
+// documented case by case there).
+//
+// Every printed/returned value below is hand-verifiable - see the inline
+// comments next to each print for the expected value.
+//
+// Run with:
+//   .\llvmc.exe examples\strings_demo\strings_demo.llx
+//   echo $LASTEXITCODE   # (PowerShell) -> 13  (len(Split("a,b,c", ",")) [3] + IndexOf("hello world", "d") [10])
+
+import "../../std/strings"
+
+func main() int {
+    // --- Contains / IndexOf ---
+    print(strings.Contains("hello world", "world"))   // true
+    print(strings.Contains("hello world", "xyz"))      // false  (never found)
+    print(strings.Contains("", ""))                     // true   (empty substr always "found")
+    print(strings.Contains("abc", ""))                  // true
+    print(strings.Contains("", "a"))                    // false  (empty haystack)
+
+    print(strings.IndexOf("hello world", "hello"))     // 0      (substr at the very start)
+    dIdx := strings.IndexOf("hello world", "d")
+    print(dIdx)                                          // 10     (substr at the very end)
+    print(strings.IndexOf("hello world", "xyz"))        // -1     (not found)
+    print(strings.IndexOf("", ""))                       // 0
+    print(strings.IndexOf("", "a"))                      // -1     (substr longer than haystack)
+
+    // --- HasPrefix / HasSuffix ---
+    print(strings.HasPrefix("hello world", "hello"))    // true
+    print(strings.HasPrefix("hello world", "world"))    // false
+    print(strings.HasPrefix("", ""))                     // true
+    print(strings.HasPrefix("", "a"))                    // false
+
+    print(strings.HasSuffix("hello world", "world"))    // true
+    print(strings.HasSuffix("hello world", "hello"))     // false
+    print(strings.HasSuffix("", ""))                      // true
+    print(strings.HasSuffix("", "a"))                     // false
+
+    // --- TrimSpace ---
+    print(strings.TrimSpace("  hello  "))   // "hello"
+    print(strings.TrimSpace("hello"))        // "hello"  (nothing to trim)
+    print(strings.TrimSpace("   "))          // ""       (all spaces)
+    print(strings.TrimSpace(""))             // ""       (empty input)
+
+    // --- Split ---
+    parts := strings.Split("a,b,c", ",")
+    print(parts)                             // [a b c]
+    partsLen := len(parts)
+    print(partsLen)                          // 3
+
+    chars := strings.Split("abc", "")
+    print(chars)                             // [a b c]   (empty sep splits into single-char pieces)
+    print(len(chars))                        // 3
+
+    print(len(strings.Split("", "")))        // 0         (both s and sep empty -> empty slice)
+    print(len(strings.Split("", ",")))        // 1         (sep not found in s -> [s] itself, even s=="")
+    print(len(strings.Split("abc", ",")))     // 1         (sep never occurs -> [s] itself)
+
+    // --- ToUpper / ToLower ---
+    print(strings.ToUpper("Hello, World! 123"))   // "HELLO, WORLD! 123"
+    print(strings.ToLower("Hello, World! 123"))   // "hello, world! 123"
+    print(strings.ToUpper(""))                      // ""
+    print(strings.ToLower("ALREADY"))               // "already"
+
+    // --- IntToString ---
+    print(strings.IntToString(0))          // "0"     (the classic itoa off-by-one trap)
+    print(strings.IntToString(42))          // "42"
+    print(strings.IntToString(-42))         // "-42"
+    print(strings.IntToString(999999))      // "999999"
+
+    // The smallest representable int (i32's own minimum) - built via
+    // arithmetic (-2147483647 - 1), never written as the bare literal
+    // 2147483648 (which doesn't itself fit i32), specifically to exercise
+    // IntToString's own i64-widened-magnitude safeguard against negating
+    // the smallest i32 value directly (see its own doc comment).
+    minInt32 := -2147483647 - 1
+    print(strings.IntToString(minInt32))    // "-2147483648"
+
+    // --- F64ToString ---
+    print(strings.F64ToString(3.14159))     // "3.1416"  (5th decimal 9 rounds the 4th up)
+    print(strings.F64ToString(-1.5))         // "-1.5000"
+    print(strings.F64ToString(0.0))          // "0.0000"
+    print(strings.F64ToString(2.0))          // "2.0000"
+
+    return partsLen + dIdx   // 3 + 10 = 13
+}
