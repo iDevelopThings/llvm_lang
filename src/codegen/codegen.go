@@ -305,6 +305,8 @@ type Generator struct {
 	memsetFn   llvm.Value
 	trapType   llvm.Type
 	trapFn     llvm.Value
+	fflushType llvm.Type
+	fflushFn   llvm.Value
 	fmtInt     llvm.Value
 	fmtInt64   llvm.Value
 	fmtFloat   llvm.Value

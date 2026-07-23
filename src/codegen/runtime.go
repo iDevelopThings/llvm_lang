@@ -64,6 +64,21 @@ func (g *Generator) setupRuntime() {
 	g.trapType = llvm.FunctionType(g.voidTy, nil, false)
 	g.trapFn = llvm.AddFunction(g.mod, "llvm.trap", g.trapType)
 
+	// fflush(NULL) - called immediately before every g.trapFn call (see
+	// genBoundsCheck/genSliceRangeCheck, expr.go, and genMakeSizeCheck,
+	// below) so the informative message each of those just printf'd is
+	// actually visible. Without this, libc's own stdio buffering (fully
+	// buffered whenever stdout isn't a live console - a redirected pipe, a
+	// log file, anything a real deployed AOT binary's output usually is)
+	// means the message sits in an unflushed buffer that a hard
+	// illegal-instruction abort never gets a chance to drain, so it's
+	// silently lost - the process still crashes, just with no visible
+	// diagnostic, defeating the entire point of printing one. `NULL` is
+	// libc's own defined "flush every open output stream" argument, not
+	// just stdout specifically, so this needs no stdout-specific plumbing.
+	g.fflushType = llvm.FunctionType(g.i32Ty, []llvm.Type{g.ptrTy}, false)
+	g.fflushFn = llvm.AddFunction(g.mod, "fflush", g.fflushType)
+
 	g.setupArena()
 
 	// print always appends a trailing newline (see AGENTS.md's "print
@@ -457,6 +472,7 @@ func (g *Generator) genMakeSizeCheck(nVal, capVal llvm.Value) {
 
 	g.builder.SetInsertPointAtEnd(trapBB)
 	g.builder.CreateCall(g.printfType, g.printfFn, []llvm.Value{g.fmtMakeSizeTrap, nVal, capVal}, "")
+	g.builder.CreateCall(g.fflushType, g.fflushFn, []llvm.Value{llvm.ConstNull(g.ptrTy)}, "")
 	g.builder.CreateCall(g.trapType, g.trapFn, nil, "")
 	g.builder.CreateUnreachable()
 
