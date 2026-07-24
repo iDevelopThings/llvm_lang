@@ -679,7 +679,9 @@ func (g *Generator) recordMapProbeCandidate(candFoundAddr, candIdxAddr, idx llvm
 // accepts is implemented directly here instead.
 func (g *Generator) genMapKeyEqual(t sema.Type, lv, rv llvm.Value) llvm.Value {
 	switch t.Kind {
-	case sema.TypeI8, sema.TypeI16, sema.TypeI32, sema.TypeI64, sema.TypeBool:
+	case sema.TypeI8, sema.TypeI16, sema.TypeI32, sema.TypeI64,
+		sema.TypeU8, sema.TypeU16, sema.TypeU32, sema.TypeU64,
+		sema.TypeBool:
 		return g.builder.CreateICmp(llvm.IntEQ, lv, rv, "")
 	case sema.TypeF32, sema.TypeF64:
 		return g.builder.CreateFCmp(llvm.FloatOEQ, lv, rv, "")
@@ -763,11 +765,11 @@ func (g *Generator) genHashInto(t sema.Type, v, seed llvm.Value) llvm.Value {
 	switch t.Kind {
 	case sema.TypeI8, sema.TypeI16:
 		return g.fnvMix(seed, g.builder.CreateSExt(v, g.i32Ty, ""))
-	case sema.TypeI32:
-		return g.fnvMix(seed, v)
-	case sema.TypeBool:
+	case sema.TypeU8, sema.TypeU16, sema.TypeBool:
 		return g.fnvMix(seed, g.builder.CreateZExt(v, g.i32Ty, ""))
-	case sema.TypeI64:
+	case sema.TypeI32, sema.TypeU32:
+		return g.fnvMix(seed, v)
+	case sema.TypeI64, sema.TypeU64:
 		lo := g.builder.CreateTrunc(v, g.i32Ty, "")
 		hi := g.builder.CreateTrunc(g.builder.CreateLShr(v, llvm.ConstInt(g.i64Ty, 32, false), ""), g.i32Ty, "")
 		return g.fnvMix(g.fnvMix(seed, lo), hi)

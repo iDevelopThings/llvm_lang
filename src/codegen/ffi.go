@@ -36,13 +36,13 @@ import (
 // TypeKind reachable here has a well-defined size.
 func (g *Generator) abiSizeAlign(t sema.Type) (size, align uint64) {
 	switch t.Kind {
-	case sema.TypeI8, sema.TypeBool:
+	case sema.TypeI8, sema.TypeU8, sema.TypeBool:
 		return 1, 1
-	case sema.TypeI16:
+	case sema.TypeI16, sema.TypeU16:
 		return 2, 2
-	case sema.TypeI32, sema.TypeF32:
+	case sema.TypeI32, sema.TypeU32, sema.TypeF32:
 		return 4, 4
-	case sema.TypeI64, sema.TypeF64, sema.TypePointer, sema.TypeCString, sema.TypeCFunc:
+	case sema.TypeI64, sema.TypeU64, sema.TypeF64, sema.TypePointer, sema.TypeCString, sema.TypeCFunc:
 		// cfunc lowers to a bare function pointer - same size/align as ptr.
 		return 8, 8
 	case sema.TypeArray:

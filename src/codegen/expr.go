@@ -766,6 +766,14 @@ func (g *Generator) genNumberLit(n ast.NodeIndex) llvm.Value {
 		return g.genIntLit(n, text, g.i32Ty, 32)
 	case sema.TypeI64:
 		return g.genIntLit(n, text, g.i64Ty, 64)
+	case sema.TypeU8:
+		return g.genUIntLit(n, text, g.i8Ty, 8)
+	case sema.TypeU16:
+		return g.genUIntLit(n, text, g.i16Ty, 16)
+	case sema.TypeU32:
+		return g.genUIntLit(n, text, g.i32Ty, 32)
+	case sema.TypeU64:
+		return g.genUIntLit(n, text, g.i64Ty, 64)
 	case sema.TypeF32:
 		return g.genFloatLit(text, g.f32Ty)
 	case sema.TypeF64:
@@ -787,6 +795,20 @@ func (g *Generator) genIntLit(n ast.NodeIndex, text string, llt llvm.Type, bits 
 		return llvm.ConstInt(llt, 0, true)
 	}
 	return llvm.ConstInt(llt, uint64(v), true)
+}
+
+// genUIntLit is genIntLit's unsigned counterpart: a bits-wide unsigned range
+// (0..2^bits-1) via ParseUint rather than the signed ParseInt, so e.g. 255
+// fits u8 and 200 is in range where a signed 8-bit parse would reject it. text
+// is always the bare digit sequence (a leading `-` is a UnaryExpr, rejected as
+// a constant in genUnaryExpr).
+func (g *Generator) genUIntLit(n ast.NodeIndex, text string, llt llvm.Type, bits int) llvm.Value {
+	v, err := strconv.ParseUint(text, 10, bits)
+	if err != nil {
+		g.errorAt(n, "integer literal %q is out of range for a %d-bit unsigned int", text, bits)
+		return llvm.ConstInt(llt, 0, false)
+	}
+	return llvm.ConstInt(llt, v, false)
 }
 
 // genFloatLit parses text (a decimal-point/exponent literal) into a
@@ -829,6 +851,13 @@ func (g *Generator) genUnaryExpr(n ast.NodeIndex) llvm.Value {
 		if g.info.Types[operand].IsFloatKind() {
 			return g.builder.CreateFNeg(v, "")
 		}
+		if g.info.Types[operand].IsUnsigned() && g.isConstFoldable(operand) {
+			// Negating an unsigned constant yields a value with no unsigned
+			// representation - a compile error, matching Go. A runtime unsigned
+			// value instead wraps (two's-complement CreateNeg below).
+			g.errorAt(n, "negation of unsigned constant is out of range for %s", g.info.Types[operand])
+			return v
+		}
 		return g.builder.CreateNeg(v, "")
 	case "!":
 		return g.builder.CreateNot(v, "")
@@ -862,14 +891,18 @@ func (g *Generator) genBinaryExpr(n ast.NodeIndex) llvm.Value {
 	rv := g.genExpr(rNode)
 	lt := g.info.Types[lNode]
 	isFloat := lt.IsFloatKind()
+	isUnsigned := lt.IsUnsigned()
 
 	switch op {
 	case "+", "-", "*", "/":
 		if op == "+" && lt.Kind == sema.TypeString {
 			return g.genStringConcat(lv, rv)
 		}
-		return g.genArithOp(op, lv, rv, isFloat)
+		return g.genArithOp(op, lv, rv, isFloat, isUnsigned)
 	case "%":
+		if isUnsigned {
+			return g.builder.CreateURem(lv, rv, "")
+		}
 		return g.builder.CreateSRem(lv, rv, "")
 	case "&":
 		return g.builder.CreateAnd(lv, rv, "")
@@ -906,14 +939,16 @@ func (g *Generator) genBinaryExpr(n ast.NodeIndex) llvm.Value {
 		if isFloat {
 			return g.genFloatOrder(op, lv, rv)
 		}
-		return g.genIntOrder(op, lv, rv)
+		return g.genIntOrder(op, lv, rv, isUnsigned)
 	default:
 		panic("codegen: unsupported binary operator " + op)
 	}
 }
 
 // genArithOp lowers `+ - * /` for an already-evaluated operand pair (lv, rv),
-// dispatching to the matching float instruction whenever isFloat - shared by
+// dispatching to the matching float instruction whenever isFloat (and to udiv
+// over sdiv when isUnsigned - the only op whose integer form is signedness-
+// sensitive; add/sub/mul are identical either way) - shared by
 // genBinaryExpr, genAssignStmt's compound-assignment cases (`+= -= *= /=`),
 // and genIncDecStmt (`++`/`--`, which only ever passes "+"/"-"), so this
 // float-vs-int dispatch lives in exactly one place instead of three
@@ -921,7 +956,7 @@ func (g *Generator) genBinaryExpr(n ast.NodeIndex) llvm.Value {
 // section). String concatenation (`+`'s other overload) isn't handled here -
 // every caller special-cases it first, since only some of them (genBinaryExpr,
 // genAssignStmt's `+=`) ever see a string operand at all.
-func (g *Generator) genArithOp(op string, lv, rv llvm.Value, isFloat bool) llvm.Value {
+func (g *Generator) genArithOp(op string, lv, rv llvm.Value, isFloat, isUnsigned bool) llvm.Value {
 	switch op {
 	case "+":
 		if isFloat {
@@ -942,15 +977,31 @@ func (g *Generator) genArithOp(op string, lv, rv llvm.Value, isFloat bool) llvm.
 		if isFloat {
 			return g.builder.CreateFDiv(lv, rv, "")
 		}
+		if isUnsigned {
+			return g.builder.CreateUDiv(lv, rv, "")
+		}
 		return g.builder.CreateSDiv(lv, rv, "")
 	default:
 		panic("codegen: genArithOp called with unsupported operator " + op)
 	}
 }
 
-// genIntOrder lowers `< <= > >=` for two already-evaluated, same-type signed
-// integer operands (any width - see AGENTS.md's Operators section).
-func (g *Generator) genIntOrder(op string, lv, rv llvm.Value) llvm.Value {
+// genIntOrder lowers `< <= > >=` for two already-evaluated, same-type integer
+// operands (any width - see AGENTS.md's Operators section), using unsigned
+// predicates (ULT/ULE/UGT/UGE) over the signed ones when isUnsigned.
+func (g *Generator) genIntOrder(op string, lv, rv llvm.Value, isUnsigned bool) llvm.Value {
+	if isUnsigned {
+		switch op {
+		case "<":
+			return g.builder.CreateICmp(llvm.IntULT, lv, rv, "")
+		case "<=":
+			return g.builder.CreateICmp(llvm.IntULE, lv, rv, "")
+		case ">":
+			return g.builder.CreateICmp(llvm.IntUGT, lv, rv, "")
+		default:
+			return g.builder.CreateICmp(llvm.IntUGE, lv, rv, "")
+		}
+	}
 	switch op {
 	case "<":
 		return g.builder.CreateICmp(llvm.IntSLT, lv, rv, "")
@@ -1006,7 +1057,9 @@ func (g *Generator) genFloatOrder(op string, lv, rv llvm.Value) llvm.Value {
 // chosen - see AGENTS.md.
 func (g *Generator) genValueEqual(t sema.Type, lv, rv llvm.Value) llvm.Value {
 	switch t.Kind {
-	case sema.TypeI8, sema.TypeI16, sema.TypeI32, sema.TypeI64, sema.TypeBool:
+	case sema.TypeI8, sema.TypeI16, sema.TypeI32, sema.TypeI64,
+		sema.TypeU8, sema.TypeU16, sema.TypeU32, sema.TypeU64,
+		sema.TypeBool:
 		return g.builder.CreateICmp(llvm.IntEQ, lv, rv, "")
 	case sema.TypeF32, sema.TypeF64:
 		// OEQ alone (never UNE) is correct here even for the enclosing `!=`
@@ -1445,9 +1498,10 @@ func (g *Generator) isConversionCall(calleeNode ast.NodeIndex) bool {
 // of info.Types with no re-derivation of their own. A same-Kind "conversion"
 // (`i32(someI32Value)`) passes the value through unchanged rather than
 // emitting a pointless instruction; otherwise the correct lowering is chosen
-// for the source/target pair - sign-extend for a wider integer, truncate for
-// a narrower one (every integer here is signed - see AGENTS.md's Types
-// section), int-to-float/float-to-int via CreateSIToFP/CreateFPToSI,
+// for the source/target pair - extend for a wider integer (sign- or zero-,
+// per the source's signedness), truncate for a narrower one, int-to-float/
+// float-to-int via CreateSIToFP/CreateFPToSI (or the U variants for an
+// unsigned end - see IsUnsigned),
 // extend/truncate between float widths via CreateFPExt/CreateFPTrunc, or
 // genStringToCString/genCStringToString (runtime.go) for the two FFI
 // crossings.
@@ -1472,12 +1526,23 @@ func (g *Generator) genConversion(n, argNode ast.NodeIndex) llvm.Value {
 	switch {
 	case from.IsIntegerKind() && to.IsIntegerKind():
 		if to.Bits() > from.Bits() {
+			// Widening zero-extends an unsigned source, sign-extends a signed
+			// one; narrowing (trunc) is bit-pattern-only, signedness-agnostic.
+			if from.IsUnsigned() {
+				return g.builder.CreateZExt(v, toLLT, "")
+			}
 			return g.builder.CreateSExt(v, toLLT, "")
 		}
 		return g.builder.CreateTrunc(v, toLLT, "")
 	case from.IsIntegerKind() && to.IsFloatKind():
+		if from.IsUnsigned() {
+			return g.builder.CreateUIToFP(v, toLLT, "")
+		}
 		return g.builder.CreateSIToFP(v, toLLT, "")
 	case from.IsFloatKind() && to.IsIntegerKind():
+		if to.IsUnsigned() {
+			return g.builder.CreateFPToUI(v, toLLT, "")
+		}
 		return g.builder.CreateFPToSI(v, toLLT, "")
 	case from.IsFloatKind() && to.IsFloatKind():
 		if to.Bits() > from.Bits() {

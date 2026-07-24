@@ -20,10 +20,14 @@ import (
 //     just another already-reported error.
 //
 // TypeI8/TypeI16/TypeI32/TypeI64 are real, distinct signed integer widths;
-// TypeF32/TypeF64 are real, distinct floating-point widths (see AGENTS.md's
-// Types section). There is no separate TypeInt constant - see TypeInt's own
-// doc comment below for why "int" is a synonym for TypeI32, not a second
-// TypeKind value that merely happens to compare equal to it.
+// TypeU8/TypeU16/TypeU32/TypeU64 are their unsigned counterparts, identical
+// in every way except signedness (see IsUnsigned and LANGUAGE.md's Types
+// section); TypeF32/TypeF64 are real, distinct floating-point widths. There
+// is no separate TypeInt constant - see TypeInt's own doc comment below for
+// why "int" is a synonym for TypeI32, not a second TypeKind value that merely
+// happens to compare equal to it. There is deliberately no unsigned analogue:
+// "int" is special only as this language's oldest int type, and no single
+// unsigned width holds that role.
 //
 // TypeFunc is a first-class function value's type - a free function
 // referenced without being called (`add`, not `add(...)`), or a variable/
@@ -131,6 +135,11 @@ const (
 	TypeI32
 	TypeI64
 
+	TypeU8
+	TypeU16
+	TypeU32
+	TypeU64
+
 	TypeF32
 	TypeF64
 
@@ -232,6 +241,11 @@ var (
 	i32Type = Type{Kind: TypeI32}
 	i64Type = Type{Kind: TypeI64}
 
+	u8Type  = Type{Kind: TypeU8}
+	u16Type = Type{Kind: TypeU16}
+	u32Type = Type{Kind: TypeU32}
+	u64Type = Type{Kind: TypeU64}
+
 	f32Type = Type{Kind: TypeF32}
 	f64Type = Type{Kind: TypeF64}
 
@@ -258,16 +272,38 @@ func (t Type) Underlying() Type {
 	return t
 }
 
-// IsIntegerKind reports whether t is a signed integer type of any width
-// (i8/i16/i32/i64 - "int" is exactly i32, see TypeInt's doc comment) or the
-// untyped-int constant kind.
+// IsIntegerKind reports whether t is an integer type of any width, signed
+// (i8/i16/i32/i64 - "int" is exactly i32, see TypeInt's doc comment) or
+// unsigned (u8/u16/u32/u64), or the untyped-int constant kind. Two integer
+// kinds sharing IsIntegerKind is not enough to interoperate: a binary op
+// still requires exact Type equality (see Equal/resolveNumericOperands), so
+// an i32 and a u32 no more mix implicitly than an i32 and an i64.
 func (t Type) IsIntegerKind() bool {
 	switch t.Kind {
 	case TypeI8,
 		TypeI16,
 		TypeI32,
 		TypeI64,
+		TypeU8,
+		TypeU16,
+		TypeU32,
+		TypeU64,
 		TypeUntypedInt:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsUnsigned reports whether t is an unsigned integer type (u8/u16/u32/u64) -
+// codegen uses this to pick unsigned instructions (udiv/urem/zext/unsigned
+// compares) over their signed defaults.
+func (t Type) IsUnsigned() bool {
+	switch t.Kind {
+	case TypeU8,
+		TypeU16,
+		TypeU32,
+		TypeU64:
 		return true
 	default:
 		return false
@@ -307,13 +343,13 @@ func (t Type) IsUntyped() bool {
 // comparing two Bits() results; never called on an untyped/non-numeric Type.
 func (t Type) Bits() int {
 	switch t.Kind {
-	case TypeI8:
+	case TypeI8, TypeU8:
 		return 8
-	case TypeI16:
+	case TypeI16, TypeU16:
 		return 16
-	case TypeI32:
+	case TypeI32, TypeU32:
 		return 32
-	case TypeI64:
+	case TypeI64, TypeU64:
 		return 64
 	case TypeF32:
 		return 32
@@ -401,6 +437,14 @@ func (t Type) String() string {
 		return "int"
 	case TypeI64:
 		return "i64"
+	case TypeU8:
+		return "u8"
+	case TypeU16:
+		return "u16"
+	case TypeU32:
+		return "u32"
+	case TypeU64:
+		return "u64"
 	case TypeF32:
 		return "f32"
 	case TypeF64:

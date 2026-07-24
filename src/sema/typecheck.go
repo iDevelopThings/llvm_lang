@@ -860,7 +860,9 @@ func (c *checker) cfuncIsFFISafe(t Type) bool {
 // representation in this compiler.
 func isFFISafeScalar(t Type) bool {
 	switch t.Kind {
-	case TypeI8, TypeI16, TypeI32, TypeI64, TypeF32, TypeF64, TypeBool, TypeCString, TypePointer:
+	case TypeI8, TypeI16, TypeI32, TypeI64,
+		TypeU8, TypeU16, TypeU32, TypeU64,
+		TypeF32, TypeF64, TypeBool, TypeCString, TypePointer:
 		return true
 	default:
 		return false
@@ -1874,6 +1876,14 @@ func (c *checker) typeFromSymbol(sym *Symbol) Type {
 			return i16Type
 		case "i64":
 			return i64Type
+		case "u8":
+			return u8Type
+		case "u16":
+			return u16Type
+		case "u32":
+			return u32Type
+		case "u64":
+			return u64Type
 		case "f32":
 			return f32Type
 		case "f64":
@@ -3012,7 +3022,9 @@ func (c *checker) checkMatchDispatch(n ast.NodeIndex, checkArm func(body ast.Nod
 // checkEnumMatchStmt by checkMatchStmt).
 func isValueMatchType(t Type) bool {
 	switch t.Kind {
-	case TypeI8, TypeI16, TypeI32, TypeI64, TypeBool, TypeString:
+	case TypeI8, TypeI16, TypeI32, TypeI64,
+		TypeU8, TypeU16, TypeU32, TypeU64,
+		TypeBool, TypeString:
 		return true
 	default:
 		return false

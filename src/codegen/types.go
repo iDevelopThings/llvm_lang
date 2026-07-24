@@ -82,6 +82,16 @@ func (g *Generator) llvmType(t sema.Type) llvm.Type {
 		return g.i32Ty
 	case sema.TypeI64:
 		return g.i64Ty
+	// Unsigned widths share their signed counterpart's LLVM type - LLVM ints
+	// carry no signedness; the sema Type drives instruction selection instead.
+	case sema.TypeU8:
+		return g.i8Ty
+	case sema.TypeU16:
+		return g.i16Ty
+	case sema.TypeU32:
+		return g.i32Ty
+	case sema.TypeU64:
+		return g.i64Ty
 	case sema.TypeF32:
 		return g.f32Ty
 	case sema.TypeF64:
