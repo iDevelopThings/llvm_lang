@@ -509,3 +509,77 @@ func main() {
 		t.Fatalf("captured stdout = %q, want %q (continue must not destruct r; it survives across iterations and destructs once, at the end, with its final value)", out, want)
 	}
 }
+
+// TestForLoopPostDeclaredDestructorFiresPerIteration covers a for-loop's post
+// clause declaring its own destructor-owning local (`for ...; ...; x :=
+// Resource(i) {}` - legal since post is parsed via parseSimpleStmt, same as
+// init). Unlike the loop body, which goes through genBlock and so already
+// unwinds its own locals on every fall-through, post used to be generated via
+// a bare genStmt with nothing unwinding its pushed entry in between - x's
+// entries just accumulated on the flat stack across iterations, and only the
+// loop's own final endBB unwind ever called a destructor, once, against
+// whatever address the last iteration happened to leave behind. x must
+// instead destruct once per iteration, right after that iteration's post
+// runs, before the condition is re-checked.
+func TestForLoopPostDeclaredDestructorFiresPerIteration(t *testing.T) {
+	jm := compileAndJIT(t, `
+struct Resource {
+	id int
+	constructor(v int) {
+		this.id = v
+	}
+	destructor() {
+		print(this.id)
+	}
+}
+func main() {
+	for i := 0; i < 3; x := Resource(i) {
+		i = i + 1
+	}
+	print(200)
+}
+`)
+	out := captureStdout(t, func() {
+		jm.runInt32(t, "main")
+	})
+	want := "1\n2\n3\n200\n"
+	if out != want {
+		t.Fatalf("captured stdout = %q, want %q (x must destruct once per iteration, right after each post runs)", out, want)
+	}
+}
+
+// TestForLoopPostDeclaredDestructorFiresOnContinue covers the post-clause fix
+// against a `continue` (loopCtx.continueTarget is postBB, so continue skips
+// straight to the post-clause without ever reaching the loop's own body-end)
+// - x must still destruct exactly once per iteration even on the iteration
+// that continued past its own print(100).
+func TestForLoopPostDeclaredDestructorFiresOnContinue(t *testing.T) {
+	jm := compileAndJIT(t, `
+struct Resource {
+	id int
+	constructor(v int) {
+		this.id = v
+	}
+	destructor() {
+		print(this.id)
+	}
+}
+func main() {
+	for i := 0; i < 3; x := Resource(i) {
+		i = i + 1
+		if i == 2 {
+			continue
+		}
+		print(100)
+	}
+	print(200)
+}
+`)
+	out := captureStdout(t, func() {
+		jm.runInt32(t, "main")
+	})
+	want := "100\n1\n2\n100\n3\n200\n"
+	if out != want {
+		t.Fatalf("captured stdout = %q, want %q (x must destruct once per iteration even when continue skips the rest of the body)", out, want)
+	}
+}

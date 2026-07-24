@@ -1363,7 +1363,16 @@ func (g *Generator) genForStmt(n ast.NodeIndex) bool {
 		g.locals[loopVarSym] = loopVarOrigAddr
 	}
 	if postNode != ast.InvalidNode {
+		// postNode is a bare statement (parseSimpleStmt), never a Block, so
+		// unlike the body it doesn't go through genBlock's own unwind - a
+		// ShortVarDecl post-clause (`for ...; ...; x := Resource(i) {}`)
+		// would otherwise leave x's destructor entry sitting on the flat
+		// stack across iterations instead of firing once per iteration.
+		// parseSimpleStmt can't produce a return/break/continue, so postNode
+		// never terminates this block.
+		postBase := g.snapshotDestructorScope()
 		g.genStmt(postNode)
+		g.unwindDestructorsToScope(postBase)
 	}
 	g.builder.CreateBr(condBB)
 
