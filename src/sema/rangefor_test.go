@@ -103,6 +103,18 @@ func TestRangeForOverStringIsError(t *testing.T) {
 	expectCheckErrors(t, "func f() {\n\ts := \"hi\"\n\tfor range s {\n\t}\n}\n", 1)
 }
 
+// TestRangeForNonCopyableValueBindingRejected covers the illegal-copy rule
+// (see checkRangeForStmt's own doc comment): every iteration's value binding
+// is a genuine copy out of the array's own storage, exactly like any other
+// short-var-decl destructuring a call/index result (`v := m[k]`), so a
+// destructor-owning (non-copyable) element type must be rejected here too -
+// a clean diagnostic, never a panic, and never a silent extra destructor
+// call on a value the type's own copy rule says should never be duplicated.
+func TestRangeForNonCopyableValueBindingRejected(t *testing.T) {
+	src := "struct Resource {\n\tid int\n\tconstructor(x int) {\n\t\tthis.id = x\n\t}\n\tdestructor() {\n\t}\n}\n\nfunc f() {\n\tarr := [3]Resource{Resource(1), Resource(2), Resource(3)}\n\tfor _, r := range arr {\n\t}\n}\n"
+	expectCheckErrors(t, src, 1)
+}
+
 // --- break/continue legality ---
 
 func TestBreakInsideRangeForIsFine(t *testing.T) {

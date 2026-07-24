@@ -209,16 +209,16 @@ func sumSkip() int {
 	}
 }
 
-// TestRangeForValueBindingDestructsEachIteration covers destructor
-// unwinding for a non-copyable value binding (see bindRangeVar's own doc
-// comment): a fixed array of a destructor-owning struct type is legal (see
-// sema's typeIsNonCopyable - only a DYNAMIC array element type is rejected
-// outright), so each iteration's own `r` binding is a fresh copy that must
-// be destructed before the next iteration's copy is bound - ranging over
-// all 3 elements with no early exit must fire the destructor exactly 3
-// times, once per iteration, never more (a double-destruct) or fewer (a
-// leaked entry left on Generator.destructors).
-func TestRangeForValueBindingDestructsEachIteration(t *testing.T) {
+// TestRangeForBodyLocalDestructsEachIteration covers destructor unwinding
+// for a local declared *inside* a range-for's own body (not the range
+// binding itself, which can never be a destructor-owning type - see
+// sema's TestRangeForNonCopyableValueBindingRejected): each iteration's own
+// `r` must be destructed before the next iteration begins, exactly like any
+// other loop's own body-local - ranging over all 3 elements with no early
+// exit must fire the destructor exactly 3 times, once per iteration, never
+// more (a double-destruct) or fewer (a leaked entry left on
+// Generator.destructors).
+func TestRangeForBodyLocalDestructsEachIteration(t *testing.T) {
 	jm := compileAndJIT(t, `
 struct Resource {
 	id int
@@ -233,22 +233,23 @@ struct Resource {
 var calls int = 0
 
 func runAll() int {
-	arr := [3]Resource{Resource(1), Resource(2), Resource(3)}
-	for _, r := range arr {
+	arr := [3]int{1, 2, 3}
+	for _, v := range arr {
+		r := Resource(v)
 	}
 	return calls
 }
 `)
 	if got := jm.runInt32(t, "runAll"); got != 3 {
-		t.Errorf("runAll() = %d, want 3 (one destructor call per iteration's own value binding)", got)
+		t.Errorf("runAll() = %d, want 3 (one destructor call per iteration's own body-local)", got)
 	}
 }
 
 // TestRangeForBreakDestructsCurrentIterationOnly is
-// TestRangeForValueBindingDestructsEachIteration's break-unwind counterpart:
+// TestRangeForBodyLocalDestructsEachIteration's break-unwind counterpart:
 // breaking out on the second iteration (index 1) must still destruct that
-// iteration's own already-bound `r` (break unwinds to the loop's own
-// destructorBase, captured right before key/value are bound - see
+// iteration's own already-constructed body-local `r` (break unwinds to the
+// loop's own destructorBase, captured right before key/value are bound - see
 // genRangeForArray's own doc comment) before leaving the loop, but never
 // reaches the third element at all - exactly 2 destructor calls, not 3 (the
 // full count) and not 1 (missing the breaking iteration's own unwind) - a
@@ -270,8 +271,9 @@ struct Resource {
 var calls int = 0
 
 func runBreakEarly() int {
-	arr := [3]Resource{Resource(1), Resource(2), Resource(3)}
-	for i, r := range arr {
+	arr := [3]int{1, 2, 3}
+	for i, v := range arr {
+		r := Resource(v)
 		if i == 1 {
 			break
 		}
@@ -280,6 +282,6 @@ func runBreakEarly() int {
 }
 `)
 	if got := jm.runInt32(t, "runBreakEarly"); got != 2 {
-		t.Errorf("runBreakEarly() = %d, want 2 (index 0's and index 1's own value bindings, never index 2's)", got)
+		t.Errorf("runBreakEarly() = %d, want 2 (index 0's and index 1's own body-locals, never index 2's)", got)
 	}
 }

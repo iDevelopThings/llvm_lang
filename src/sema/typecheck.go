@@ -2139,6 +2139,16 @@ func (c *checker) checkForStmt(n ast.NodeIndex) {
 // their own (mirroring MultiShortVarDecl's identical binding shape - see
 // checkMultiShortVarDeclNode), so their Type is seeded directly here rather
 // than computed lazily via declType.
+//
+// Every iteration's key/value is a genuine copy out of the map/array's own
+// storage (see codegen's bindRangeVar) - exactly like any other short-var-decl
+// destructuring a call/index result - so a non-copyable K/V is rejected here
+// too (checkNoIllegalCopy, allowFresh=false: an existing element read out of
+// a container is never a fresh construction), the same rule `v := m[k]`/
+// `v := arr[i]` already enforce. Without this, ranging over a container of a
+// destructor-having element type would silently produce an extra, illegal
+// destructor call per iteration on a value the type's own copy rule says
+// should never exist as a duplicate at all.
 func (c *checker) checkRangeForStmt(n ast.NodeIndex) {
 	keyNode := c.tree.RangeForKey(n)
 	valueNode := c.tree.RangeForValue(n)
@@ -2148,11 +2158,11 @@ func (c *checker) checkRangeForStmt(n ast.NodeIndex) {
 
 	switch subjType.Kind {
 	case TypeMap:
-		c.seedRangeBinding(keyNode, *subjType.Key)
-		c.seedRangeBinding(valueNode, *subjType.Elem)
+		c.seedRangeBindingChecked(keyNode, *subjType.Key, "range key binding")
+		c.seedRangeBindingChecked(valueNode, *subjType.Elem, "range value binding")
 	case TypeArray:
 		c.seedRangeBinding(keyNode, i32Type)
-		c.seedRangeBinding(valueNode, *subjType.Elem)
+		c.seedRangeBindingChecked(valueNode, *subjType.Elem, "range value binding")
 	case TypeInvalid:
 		c.seedRangeBinding(keyNode, invalidType)
 		c.seedRangeBinding(valueNode, invalidType)
@@ -2178,6 +2188,16 @@ func (c *checker) seedRangeBinding(nameNode ast.NodeIndex, t Type) {
 	}
 	c.declTypes[nodeRef{c.tree, nameNode}] = t
 	c.info.Types[nameNode] = t
+}
+
+// seedRangeBindingChecked is seedRangeBinding plus checkNoIllegalCopy - see
+// checkRangeForStmt's own doc comment for why every real (non-omitted)
+// key/value binding needs this and a plain array index (always int) doesn't.
+func (c *checker) seedRangeBindingChecked(nameNode ast.NodeIndex, t Type, context string) {
+	c.seedRangeBinding(nameNode, t)
+	if nameNode != ast.InvalidNode {
+		c.checkNoIllegalCopy(nameNode, t, false, context)
+	}
 }
 
 func (c *checker) checkCondition(n ast.NodeIndex) {
