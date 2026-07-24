@@ -144,7 +144,9 @@ func (g *Generator) genStmt(n ast.NodeIndex) bool {
 	case enums.NodeKinds.ForStmt:
 		return g.genForStmt(n)
 	case enums.NodeKinds.MatchStmt:
-		return g.genMatchStmt(n)
+		return g.genMatchStmt(n, nil)
+	case enums.NodeKinds.YieldStmt:
+		return g.genYieldStmt(n)
 	default:
 		return false
 	}
@@ -585,6 +587,41 @@ func (g *Generator) genContinueStmt(n ast.NodeIndex) bool {
 	top := g.loopStack[len(g.loopStack)-1]
 	g.unwindDestructorsTo(top.destructorBase)
 	g.builder.CreateBr(top.continueTarget)
+	return true
+}
+
+// genYieldStmt lowers `yield expr` (see ast.Node's own YieldStmt doc
+// comment) - genReturnStmt/genBreakStmt/genContinueStmt's own match-
+// expression-scoped counterpart: evaluates expr, unwinds every destructor
+// declared since the enclosing match expression's own entry
+// (top.destructorBase - deliberately NOT 0/the whole function, and not any
+// enclosing loop's own base either, only what this specific match
+// expression itself introduced, exactly the way break/continue only ever
+// unwind back to their own enclosing loop's destructorBase, never
+// further), records (value, current block) onto the enclosing match
+// expression's own frame for its mergeBB's eventual phi, and branches
+// there - terminating this block exactly like return/break/continue
+// already do, which is what lets genBlock's own existing terminated-block
+// bookkeeping (and genMatchStmt's own per-arm "did this arm terminate"
+// tracking) keep working with zero changes there. An empty matchExprStack
+// here means the tree wasn't actually valid per sema (see
+// checkYieldStmt's own "yield outside a match expression" rejection) -
+// this whole package already assumes that never happens (see the package
+// doc comment), so this is a panic, exactly like genBreakStmt/
+// genContinueStmt's own identical empty-stack case.
+func (g *Generator) genYieldStmt(n ast.NodeIndex) bool {
+	if len(g.matchExprStack) == 0 {
+		panic("codegen: yield outside a match expression - sema.Check should have rejected this")
+	}
+	top := g.matchExprStack[len(g.matchExprStack)-1]
+
+	valueNode := g.tree.Child(n, 0)
+	v := g.genExpr(valueNode)
+	g.unwindDestructorsTo(top.destructorBase)
+
+	top.incomingVals = append(top.incomingVals, v)
+	top.incomingBlocks = append(top.incomingBlocks, g.builder.GetInsertBlock())
+	g.builder.CreateBr(top.mergeBB)
 	return true
 }
 

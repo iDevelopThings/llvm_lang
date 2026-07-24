@@ -50,3 +50,5 @@ values:
     string: "enum"
   - name: Match
     string: "match"
+  - name: Yield
+    string: "yield"

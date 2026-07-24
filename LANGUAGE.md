@@ -752,9 +752,36 @@ match x {
 }
 ```
 
+### `match` as an expression
+
+`match` can also be used anywhere an expression is legal - a `:=` right-hand side, a `return`, a function call argument, nested inside another expression - not just as a side-effecting statement. The two surface forms share the identical subject/pattern grammar; only the arm body's own shape differs:
+
+```go
+x := match s {
+    "s" => {
+        if special {
+            yield "small-but-special"
+        }
+        yield "small"
+    }
+    "m", "l" => {
+        yield "medium-or-large"
+    }
+    _ => "unknown"
+}
+```
+
+Each arm picks its own body shape independently:
+
+- **A bare expression** (`pattern => expr`, no braces) - the value *is* `expr` directly.
+- **A block** (`pattern => { ... }`) - ordinary statements, `if`/`for`/whatever, with every reachable path ending in a `yield expr` statement. `yield` can appear at any nesting depth inside the block (inside an `if`, a loop, ...) - exactly like `return` can appear anywhere inside a function body.
+
+**`yield` is a distinct keyword from `return`, deliberately** - a match-expression arm's block can contain an ordinary `return`, which still exits the *whole enclosing function* (never the match expression) exactly as it always has. Reusing `return` to also mean "produce this arm's value" would make the same keyword mean two different things depending on which lexical context it appears in - see `DECISIONS.md` for the exact ambiguity this was chosen to avoid. A missing `yield` on some reachable path through a block-bodied arm is a clean "match arm does not yield a value on every path" diagnostic, not a silent gap - mirroring this language's own "missing return" check.
+
+**Exhaustiveness needs nothing new** - the existing enum-match (every variant covered, or a wildcard) and value-match (mandatory wildcard) rules already guarantee every match, statement or expression, covers every reachable case. A match expression where no arm's yield is ever actually reached (every arm instead ends in a `return`/`break`/`continue` of its own) is its own separate diagnostic - "match expression has no arm that ever yields a value" - since a `return`-ending arm is a legal dead end (it never needs to produce a value at all), but a whole match expression that never yields anywhere has nothing to bind its own result to.
+
 ### Explicitly deferred - not built this round
 
-- **`match` as an expression producing a value** (`x := match shape { ... }`). This round is a `match` *statement* only, each arm's body an ordinary side-effecting `Block`, not something that yields a value back to an enclosing expression.
 - **Binding-unification across several differently-shaped enum-variant patterns sharing one arm** (`Shape.Circle(r), Shape.Rectangle(w, h) => { ... }`) - a real, separate feature (deciding what a shared arm body may even reference when each pattern binds different names/types), deliberately not bundled into this round's multi-pattern-arm grammar, which stays enum-match-arm-restricted to exactly one pattern (see "Enum matching" above).
 
 ## Pointers

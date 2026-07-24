@@ -444,30 +444,42 @@ func (g *Generator) genPrintEnumVariant(variant *sema.EnumVariant, payload llvm.
 	g.genPrintLiteral(close)
 }
 
-// genMatchStmt lowers a `match subject { pattern => body, ... }` statement
-// (see LANGUAGE.md's "match" section), dispatching on the subject's own
-// type to one of two genuinely different lowering strategies (see
-// CODEGEN.md's "match codegen" section): an enum subject gets a real LLVM
-// `switch` on its compile-time-constant discriminant (this function, below -
-// unchanged from before this round), while a plain scalar (int/bool/string)
-// subject is routed to genValueMatchStmt instead - a value pattern isn't a
+// genMatchStmt lowers a `match subject { pattern => body, ... }` (see
+// LANGUAGE.md's "match" section), dispatching on the subject's own type to
+// one of two genuinely different lowering strategies (see CODEGEN.md's
+// "match codegen" section): an enum subject gets a real LLVM `switch` on
+// its compile-time-constant discriminant (this function, below - unchanged
+// from before this round), while a plain scalar (int/bool/string) subject
+// is routed to genValueMatchStmt instead - a value pattern isn't a
 // compile-time-constant discriminant LLVM's `switch` instruction needs, so
 // it needs a genuinely different runtime-comparison-chain lowering, kept in
 // its own dedicated function rather than tangled into this one (see AGENTS.md's
 // layering/no-mixing-concerns standard).
 //
+// frame is nil for an ordinary statement-position match (genStmt's own
+// dispatch calls this with nil, exactly as before this round) - non-nil
+// only when genMatchExpr (this file, below) is lowering an expression-
+// position match instead, in which case every arm's own merge point is
+// frame's own shared mergeBB (matchMergeBB) rather than a fresh one created
+// here, so that every yield anywhere in either lowering strategy's own arms
+// branches into the exact same block genMatchExpr will build its final phi
+// against. This is the ONLY thing frame changes about this function's own
+// switch-construction logic below - reused completely unchanged otherwise,
+// per AGENTS.md's no-duplication standard (see genMatchExpr's own doc
+// comment for the full reasoning).
+//
 // The enum path: load the discriminant, then a real multi-way branch
 // (LLVM's own `switch` instruction, matching against each variant's own
 // assigned discriminant index) - each arm's block extracts/loads the
 // payload into its bound local names (if any), runs the arm's body, then
-// branches to the match statement's own single merge/exit block. The
-// wildcard arm (if present) becomes the switch's default destination; if no
-// wildcard exists (a fully-exhaustive match - sema's own checkEnumMatchStmt
-// already guarantees this on a tree that passed sema.Check), the default
+// branches to the match's own single merge/exit block. The wildcard arm
+// (if present) becomes the switch's default destination; if no wildcard
+// exists (a fully-exhaustive match - sema's own checkEnumMatchStmt already
+// guarantees this on a tree that passed sema.Check), the default
 // destination is `unreachable`, matching this project's own existing
 // "genuinely impossible per sema's own guarantee" convention already used
 // elsewhere for defensive backstops (see emitFallbackTerminator, func.go).
-func (g *Generator) genMatchStmt(n ast.NodeIndex) bool {
+func (g *Generator) genMatchStmt(n ast.NodeIndex, frame *matchExprCodegenCtx) bool {
 	subjectNode := g.tree.MatchSubject(n)
 	subjType := g.info.Types[subjectNode]
 
@@ -476,7 +488,7 @@ func (g *Generator) genMatchStmt(n ast.NodeIndex) bool {
 		enumType = *enumType.Elem
 	}
 	if enumType.Kind != sema.TypeEnum {
-		return g.genValueMatchStmt(n, subjType)
+		return g.genValueMatchStmt(n, subjType, frame)
 	}
 
 	var enumVal llvm.Value
@@ -501,7 +513,7 @@ func (g *Generator) genMatchStmt(n ast.NodeIndex) bool {
 	preMatch := g.snapshotDestructors()
 
 	arms := g.tree.MatchArms(n)
-	mergeBB := g.ctx.AddBasicBlock(g.curFn, "match.merge")
+	mergeBB := g.matchMergeBB(frame, "match.merge")
 
 	var wildcardArm ast.NodeIndex = ast.InvalidNode
 	variantArms := make([]ast.NodeIndex, 0, len(arms))
@@ -560,21 +572,90 @@ func (g *Generator) genMatchStmt(n ast.NodeIndex) bool {
 	g.restoreDestructors(preMatch)
 
 	// mergeBB is unreachable itself only when every arm (including the
-	// wildcard, if any) always terminates - sema's own checkEnumMatchStmt
-	// already guarantees exhaustiveness, so the only remaining question
-	// codegen itself needs to answer is whether every reachable arm body
+	// wildcard, if any) always terminates AND this is a genuine statement-
+	// position match (frame == nil) - sema's own checkEnumMatchStmt already
+	// guarantees exhaustiveness, so the only remaining question codegen
+	// itself needs to answer there is whether every reachable arm body
 	// actually terminates; if so, nothing ever branches into mergeBB, but
 	// LLVM still requires every basic block that exists at all to end in a
 	// real terminator (see AGENTS.md's "Missing return" section and
 	// emitFallbackTerminator, func.go, for this project's own identical
 	// "genuinely impossible per sema's own guarantee, so unreachable
 	// documents it directly" convention) - matching isTerminatingStmt's own
-	// sema-side verdict (matchStmtTerminates) exactly.
+	// sema-side verdict (matchStmtTerminates) exactly. When frame != nil
+	// (an expression-position match - see genMatchExpr), mergeBB is instead
+	// genuinely reachable - every yield anywhere in any arm branches
+	// straight into it (genYieldStmt) regardless of this function's own
+	// allTerminated bookkeeping, which genMatchExpr's own caller ignores
+	// entirely - so it must never be marked unreachable here; genMatchExpr
+	// itself finishes it with a real CreatePHI once every arm is done.
 	g.builder.SetInsertPointAtEnd(mergeBB)
-	if allTerminated {
+	if frame == nil && allTerminated {
 		g.builder.CreateUnreachable()
 	}
 	return allTerminated
+}
+
+// matchMergeBB returns the basic block a match's own arms should all
+// eventually branch into once done - frame's own mergeBB (already created by
+// genMatchExpr before dispatching here, shared across the enum/value
+// dispatch so a yield's own genYieldStmt branches into the SAME block
+// regardless of which of the two lowering strategies actually produced the
+// arm it's inside) when this match is being lowered in expression mode, or
+// a fresh block otherwise (name is only used for the fresh-block case - a
+// frame's own mergeBB already has its own name from when genMatchExpr
+// created it).
+func (g *Generator) matchMergeBB(frame *matchExprCodegenCtx, name string) llvm.BasicBlock {
+	if frame != nil {
+		return frame.mergeBB
+	}
+	return g.ctx.AddBasicBlock(g.curFn, name)
+}
+
+// genMatchExpr lowers a `match` used in EXPRESSION position (see
+// LANGUAGE.md's "match" section's "match as an expression" subsection) -
+// reached via genExpr's own dispatch (a MatchStmt node reached there is
+// always this flavor; a statement-position match is genStmt's own
+// MatchStmt case, genMatchStmt(n, nil), completely unchanged - see
+// ast.Node's own MatchStmt doc comment for how the two are told apart, and
+// the regression test proving a bare top-level `match x {...}` statement
+// still goes through the unchanged path).
+//
+// Pushes a fresh matchExprCodegenCtx frame (destructorBase = len(g.destructors)
+// right now, this match expression's own entry point - not the enclosing
+// function's, not any enclosing loop's, see genYieldStmt) with its own
+// fresh mergeBB, then reuses genMatchStmt's entire existing enum-vs-value
+// dispatch/switch/comparison-chain lowering completely unchanged, just
+// threading this frame through instead of nil - see genMatchStmt's own doc
+// comment for exactly what sharing that gets: nothing here duplicates the
+// switch-on-discriminant or comparison-chain construction (AGENTS.md's
+// layering/no-duplication standard), only genMatchExpr's own tail is
+// genuinely new: a real CreatePHI collecting every yield's contributed
+// value, built and populated in one batched AddIncoming call once every arm
+// has finished generating - matching every other phi call site in this
+// package (genEnumEqual/genHashEnumInto just above, expr.go's short-circuit
+// `&&`, maps.go, runtime.go: none of them call AddIncoming incrementally
+// either, every one batches its full incoming slices into one call at the
+// end) rather than an incremental per-yield AddIncoming call. The builder is
+// left positioned at mergeBB when this returns, exactly like any other
+// phi-producing expression in this package - mergeBB is never marked
+// unreachable (see genMatchStmt/genValueMatchStmt's own frame != nil
+// carve-out): it's genuinely reachable code, hosting the phi and whatever
+// the caller emits next.
+func (g *Generator) genMatchExpr(n ast.NodeIndex) llvm.Value {
+	frame := &matchExprCodegenCtx{
+		destructorBase: len(g.destructors),
+		mergeBB:        g.ctx.AddBasicBlock(g.curFn, "match.expr.merge"),
+	}
+	g.matchExprStack = append(g.matchExprStack, frame)
+	g.genMatchStmt(n, frame)
+	g.matchExprStack = g.matchExprStack[:len(g.matchExprStack)-1]
+
+	g.builder.SetInsertPointAtEnd(frame.mergeBB)
+	resultTy := g.llvmType(g.info.Types[n])
+	phi := g.builder.CreatePHI(resultTy, "")
+	phi.AddIncoming(frame.incomingVals, frame.incomingBlocks)
+	return phi
 }
 
 // genValueMatchStmt lowers a `match subject { pattern0, pattern1 => body,
@@ -599,13 +680,15 @@ func (g *Generator) genMatchStmt(n ast.NodeIndex) bool {
 // genMatchStmt's own enum path already uses, at every arm and once more
 // after the whole statement - see that function's own doc comment for why:
 // every arm here is an independent, mutually exclusive branch generated
-// sequentially against the same shared Generator.destructors slice.
-func (g *Generator) genValueMatchStmt(n ast.NodeIndex, subjType sema.Type) bool {
+// sequentially against the same shared Generator.destructors slice. frame
+// is genMatchStmt's own frame parameter, threaded straight through
+// unchanged - see that function's own doc comment for what it means.
+func (g *Generator) genValueMatchStmt(n ast.NodeIndex, subjType sema.Type, frame *matchExprCodegenCtx) bool {
 	subjectNode := g.tree.MatchSubject(n)
 	subjVal := g.genExpr(subjectNode)
 
 	arms := g.tree.MatchArms(n)
-	mergeBB := g.ctx.AddBasicBlock(g.curFn, "match.merge")
+	mergeBB := g.matchMergeBB(frame, "match.merge")
 
 	var wildcardArm ast.NodeIndex = ast.InvalidNode
 	valueArms := make([]ast.NodeIndex, 0, len(arms))
@@ -675,13 +758,17 @@ func (g *Generator) genValueMatchStmt(n ast.NodeIndex, subjType sema.Type) bool 
 	g.restoreDestructors(preMatch)
 
 	// mergeBB is unreachable itself only when every arm (including the
-	// wildcard) always terminates - matching genMatchStmt's own enum-path
-	// reasoning and matchStmtTerminates' identical sema-side verdict exactly
-	// (see AGENTS.md's "Missing return" section and emitFallbackTerminator,
+	// wildcard) always terminates AND this is a genuine statement-position
+	// match (frame == nil) - matching genMatchStmt's own enum-path reasoning
+	// and matchStmtTerminates' identical sema-side verdict exactly (see
+	// AGENTS.md's "Missing return" section and emitFallbackTerminator,
 	// func.go, for this project's own "genuinely impossible per sema's own
-	// guarantee, so unreachable documents it directly" convention).
+	// guarantee, so unreachable documents it directly" convention) - see
+	// genMatchStmt's own identical frame != nil carve-out just above for why
+	// an expression-position match's mergeBB must never be marked
+	// unreachable here regardless of allTerminated.
 	g.builder.SetInsertPointAtEnd(mergeBB)
-	if allTerminated {
+	if frame == nil && allTerminated {
 		g.builder.CreateUnreachable()
 	}
 	return allTerminated

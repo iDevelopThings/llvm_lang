@@ -44,9 +44,10 @@ type Span struct {
 //   - ShortVarDecl, MultiShortVarDecl: the `:=` token
 //   - VarDecl, FuncDecl, StructDecl, IfStmt, ForStmt, ReturnStmt, BreakStmt,
 //     ContinueStmt, FuncType, ConstructorDecl, DestructorDecl, FuncLit,
-//     NewExpr, DeleteStmt, ExternFuncDecl, EnumDecl, MatchStmt: the leading
-//     keyword token (EnumDecl's is `enum`, MatchStmt's is `match` - see
-//     LANGUAGE.md's "Enums"/"match" sections)
+//     NewExpr, DeleteStmt, ExternFuncDecl, EnumDecl, MatchStmt, YieldStmt:
+//     the leading keyword token (EnumDecl's is `enum`, MatchStmt's is
+//     `match`, YieldStmt's is `yield` - see LANGUAGE.md's "Enums"/"match"
+//     sections)
 //   - EnumVariant: the variant's own name identifier token
 //     (ExternFuncDecl's is the `extern` keyword, not the `func` that follows
 //     it - see LANGUAGE.md's "External functions (FFI)" section; FuncType's
@@ -100,6 +101,23 @@ type Span struct {
 //   - IncDecStmt: [target] - fixed arity
 //   - ExprStmt, ReturnStmt: [expr] - fixed arity; ReturnStmt's expr may be
 //     InvalidNode (bare `return`)
+//   - YieldStmt: [expr] - fixed arity, ReturnStmt's direct structural analog
+//     for `yield expr` (see LANGUAGE.md's "match" section: "match as an
+//     expression") - expr is always present (there is no bare `yield`,
+//     unlike a bare `return`). Legal only inside a match-expression arm's
+//     own block - enforced by sema (checkYieldStmt), not this grammar,
+//     exactly the way `break`/`continue` are grammatically legal anywhere
+//     but sema-rejected outside a loop (checkBreakOrContinue's c.loopDepth
+//     check is the model - checkYieldStmt's own c.matchExprStack is its
+//     stack-shaped counterpart, since yield additionally needs live access
+//     to its enclosing match expression's own running result type, not just
+//     a yes/no "am I nested deep enough" counter). Produced two ways: a
+//     `yield expr` the user actually wrote inside a block-bodied arm, or a
+//     synthetic node the parser itself builds (parseMatchExprArm) when an
+//     arm's body is a bare expression with no braces - both shapes reach
+//     sema/codegen identically, so a match expression's arm body is always
+//     exactly one canonical shape by the time either pass sees it: a Block
+//     whose every reachable path ends in a YieldStmt.
 //   - BreakStmt, ContinueStmt: no children (leaves)
 //   - Block: [stmt0, stmt1, ...] - variable arity
 //   - IfStmt: [cond, then, else] - fixed arity; else may be InvalidNode.
@@ -264,9 +282,18 @@ type Span struct {
 //     sufficient to tell a tuple variant from a struct variant - see
 //     ast.Tree's EnumVariantKind-classifying accessor.
 //   - MatchStmt: [subject, arm0, arm1, ...] - variable arity, subject (the
-//     value being matched) always first (see LANGUAGE.md's "match" section) -
-//     a statement, not an expression, this round. Each arm is a MatchArm
-//     node, in source order.
+//     value being matched) always first (see LANGUAGE.md's "match" section).
+//     Reached two genuinely different ways now, both producing this exact
+//     same node shape - checkStmt/genStmt's own dispatch for a bare
+//     statement-position `match x {...}` (checkMatchStmt/genMatchStmt,
+//     unchanged since match was first introduced), or checkExpr/genExpr's
+//     own dispatch when it appears anywhere an expression is legal instead
+//     (checkMatchExprStmt/genMatchExpr - see LANGUAGE.md's "match" section's
+//     "match as an expression" subsection) - which of the two a given node
+//     was parsed as depends purely on which grammar rule reached it
+//     (parseMatchStmt vs. parseMatchExpr, parser/stmt.go vs. parser/expr.go),
+//     never a flag on the node itself. Each arm is a MatchArm node, in
+//     source order.
 //   - MatchArm: [pattern0, pattern1, ..., patternN, body] - variable arity,
 //     at least one pattern always present, body always last (see ast.Tree's
 //     MatchArmPatterns/MatchArmPattern/MatchArmBody accessors). Multiple
@@ -300,7 +327,24 @@ type Span struct {
 //     enum-variant pattern, not an ordinary expression - the calls inside are
 //     fresh bindings, not references" apart from an ordinary construction use
 //     of the identical shape, or an ordinary value-expression use of it.
-//     body is an ordinary Block.
+//     body is an ordinary Block for a statement-position match's arm
+//     (parseMatchArm), always. For an expression-position match's arm
+//     (parseMatchExprArm - see LANGUAGE.md's "match" section's "match as an
+//     expression" subsection), body is ALSO always a Block by the time
+//     sema/codegen see it, but may have gotten there either way a user
+//     actually wrote it: a real brace-delimited `{ ... }` the user wrote
+//     (parsed via parseBlock, completely unchanged - may contain `yield`
+//     anywhere inside, at any nesting depth, alongside ordinary
+//     if/for/whatever), or a bare expression with no braces at all
+//     (`pattern => expr`), which the parser itself desugars into a
+//     synthetic single-statement Block wrapping a synthetic YieldStmt around
+//     that expression - mirroring ForStmt's own init/post slots, which
+//     already hold "whatever parseStmt/a dedicated rule produced," not
+//     always the exact same node kind. This desugaring exists purely so
+//     sema/codegen only ever have to handle ONE canonical arm-body shape ("a
+//     Block whose every reachable path must yield") regardless of which
+//     surface form the user actually wrote - see YieldStmt's own doc
+//     comment above.
 //   - MultiAssignStmt: [target0, target1, ..., targetN, value] - the
 //     assignment-form counterpart to MultiShortVarDecl, identical shape:
 //     every child except the last is an already-existing lvalue target

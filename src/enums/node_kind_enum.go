@@ -65,6 +65,7 @@ const (
 	NodeKindEnumVariant       NodeKind = 49
 	NodeKindMatchStmt         NodeKind = 50
 	NodeKindMatchArm          NodeKind = 51
+	NodeKindYieldStmt         NodeKind = 52
 )
 
 type NodeKindContainer struct {
@@ -120,6 +121,7 @@ type NodeKindContainer struct {
 	EnumVariant       NodeKind
 	MatchStmt         NodeKind
 	MatchArm          NodeKind
+	YieldStmt         NodeKind
 }
 
 // NodeKinds is the entry point for the NodeKind enum.
@@ -176,6 +178,7 @@ var NodeKinds = NodeKindContainer{
 	EnumVariant:       NodeKindEnumVariant,
 	MatchStmt:         NodeKindMatchStmt,
 	MatchArm:          NodeKindMatchArm,
+	YieldStmt:         NodeKindYieldStmt,
 }
 
 // NodeKindInfo is the static metadata attached to a NodeKind.
@@ -393,6 +396,10 @@ var nodeKindInfos = map[NodeKind]NodeKindInfo{
 		NodeKind: NodeKindMatchArm,
 		Name:     "MatchArm",
 	},
+	NodeKindYieldStmt: {
+		NodeKind: NodeKindYieldStmt,
+		Name:     "YieldStmt",
+	},
 }
 
 var nodeKindValues = []NodeKind{
@@ -448,6 +455,7 @@ var nodeKindValues = []NodeKind{
 	NodeKindEnumVariant,
 	NodeKindMatchStmt,
 	NodeKindMatchArm,
+	NodeKindYieldStmt,
 }
 
 var nodeKindByName = map[string]NodeKind{
@@ -503,6 +511,7 @@ var nodeKindByName = map[string]NodeKind{
 	"enumvariant":       NodeKindEnumVariant,
 	"matchstmt":         NodeKindMatchStmt,
 	"matcharm":          NodeKindMatchArm,
+	"yieldstmt":         NodeKindYieldStmt,
 }
 
 // Values returns every declared value in declaration order.

@@ -926,6 +926,13 @@ func (r *resolver) resolveStmt(scope *Scope, n ast.NodeIndex) {
 		r.resolveForStmt(scope, n)
 	case enums.NodeKinds.MatchStmt:
 		r.resolveMatchStmt(scope, n)
+	case enums.NodeKinds.YieldStmt:
+		// `yield expr` (see LANGUAGE.md's "match" section's "match as an
+		// expression" subsection) - expr is an ordinary value expression,
+		// resolved exactly like ReturnStmt's own value slot just above.
+		// Legality (only inside a match-expression arm's own block) is a
+		// sema.Check-time concern (checkYieldStmt), not Resolve's.
+		r.resolveExpr(scope, r.tree.Child(n, 0))
 	}
 }
 
@@ -1356,6 +1363,11 @@ func (r *resolver) resolveExpr(scope *Scope, n ast.NodeIndex) {
 		// would be if `new` weren't there at all, via the same CallExpr/
 		// CompositeLit cases just above.
 		r.resolveExpr(scope, r.tree.Child(n, 0))
+	case enums.NodeKinds.MatchStmt:
+		// Expression-position match resolves identically to the statement
+		// form - same subject/arm/binding logic, no expression-specific
+		// handling needed.
+		r.resolveMatchStmt(scope, n)
 	}
 }
 

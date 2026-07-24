@@ -1,0 +1,116 @@
+// match_expr.llx - `match` as an EXPRESSION (see LANGUAGE.md's "match"
+// section's "match as an expression" subsection): a match's own value can
+// now be produced directly, wherever an expression is legal - a `:=`
+// right-hand side, a `return`, a function call argument - not just as a
+// side-effecting statement (see examples/match_values and examples/enums
+// for that, unchanged, statement form). Each arm picks its own body shape
+// independently, and both are exercised here, freely mixed in the very same
+// match:
+//   - a bare expression arm (`pattern => expr`) - the value IS expr
+//     directly (desugared internally into an implicit `yield expr`, but
+//     that's invisible from the source).
+//   - a block arm (`pattern => { ... }`) - every reachable path through the
+//     block must end in an explicit `yield expr` statement, which may
+//     appear anywhere inside it (nested inside an if/for/whatever), exactly
+//     like `return` can appear anywhere inside an ordinary function body.
+//
+// Covers a value-match subject (string/int/bool - describe/classify/toggle)
+// and an enum-match subject (sizeName) alike - exhaustiveness is already
+// guaranteed by the existing enum/value-match rules either way, nothing new
+// needed there (see LANGUAGE.md).
+//
+// Run with:
+//   .\llvmc.exe examples\match_expr\match_expr.llx
+//   echo $LASTEXITCODE   # (PowerShell) -> 0
+// Expected stdout:
+//   small
+//   small-but-special
+//   medium-or-large
+//   medium-or-large
+//   unknown
+//   low
+//   mid
+//   high
+//   yes
+//   large
+
+enum Size {
+    Small,
+    Medium,
+    Large,
+}
+
+// describe classifies a size string via match-as-an-expression, used as a
+// `:=` right-hand side: "s" is a block-bodied arm with its own nested
+// if/multiple yields (the LANGUAGE.md motivating example this feature
+// shipped for, adapted here almost verbatim), "m"/"l" share a second
+// block-bodied arm, and the wildcard is a bare-expression arm - all three
+// arm shapes coexisting in one match.
+func describe(s string, special bool) string {
+    x := match s {
+        "s" => {
+            if special {
+                yield "small-but-special"
+            }
+            yield "small"
+        }
+        "m", "l" => {
+            yield "medium-or-large"
+        }
+        _ => "unknown"
+    }
+    return x
+}
+
+// classify demonstrates `return match ... {}` directly - the match
+// expression's own value flows straight out as the function's return value,
+// with no intermediate `:=` at all. Mixes a bare-expression arm (the
+// multi-pattern "1, 2, 3" one), a block-bodied arm ("4, 5"), and a bare-
+// expression wildcard.
+func classify(n int) string {
+    return match n {
+        1, 2, 3 => "low"
+        4, 5 => {
+            yield "mid"
+        }
+        _ => "high"
+    }
+}
+
+// sizeName is the enum-match counterpart to describe/classify above - the
+// same "match as an expression" machinery composes with an exhaustive
+// enum match (every one of Size's own three variants covered, no wildcard
+// needed) with zero extra rules of its own.
+func sizeName(sz Size) string {
+    return match sz {
+        Size.Small => "small"
+        Size.Medium => {
+            yield "medium"
+        }
+        Size.Large => "large"
+    }
+}
+
+func main() int {
+    print(describe("s", false))   // small
+    print(describe("s", true))    // small-but-special
+    print(describe("m", false))   // medium-or-large
+    print(describe("l", false))   // medium-or-large
+    print(describe("xl", false))  // unknown
+
+    print(classify(1))   // low
+    print(classify(5))   // mid
+    print(classify(9))   // high
+
+    // match-as-an-expression used directly as a function call argument,
+    // proving it's a genuine expression, not special-cased to `:=`/`return`
+    // alone.
+    print(match true {
+        true => "yes"
+        _ => "no"
+    })
+
+    print(sizeName(Size.Large))   // large - proves the enum-match path too
+
+    return 0
+}

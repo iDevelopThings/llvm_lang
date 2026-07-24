@@ -47,6 +47,8 @@ func (p *Parser) parseStmt() ast.NodeIndex {
 		return p.parseDeleteStmt()
 	case p.atKeyword(enums.Keywords.Match):
 		return p.parseMatchStmt()
+	case p.atKeyword(enums.Keywords.Yield):
+		return p.parseYieldStmt()
 	default:
 		return p.parseSimpleStmt()
 	}
@@ -611,6 +613,29 @@ func (p *Parser) parseReturnStmt() ast.NodeIndex {
 		End:   end,
 	}
 	return p.tree.NewNode(enums.NodeKinds.ReturnStmt, kwTok, span, value)
+}
+
+// parseYieldStmt parses `yield expr` (see LANGUAGE.md's "match" section:
+// "match as an expression") - its own dedicated statement form, the same
+// way break/continue/return already are, rather than reusing return's own
+// meaning: yield exits just its own enclosing match-expression arm,
+// producing expr as that whole match expression's own value - never the
+// enclosing function (see DECISIONS.md's dated entry for this round for the
+// exact ambiguity a plain `return`-reuse would have introduced). Legal
+// anywhere inside a match-expression arm's own block - nested inside an if,
+// a loop, whatever - exactly like `return` is already legal anywhere inside
+// a function body; sema (checkYieldStmt), not this grammar, enforces "only
+// inside a match-expression arm", mirroring break/continue's own loop-only
+// enforcement (checkBreakOrContinue). Unlike a bare `return`, there is no
+// bare `yield` - a value expression is always required.
+func (p *Parser) parseYieldStmt() ast.NodeIndex {
+	kwTok := p.expectKeyword(enums.Keywords.Yield)
+	value := p.parseExpr(precLowest)
+	span := ast.Span{
+		Start: kwTok.Start,
+		End:   p.tree.SpanOf(value).End,
+	}
+	return p.tree.NewNode(enums.NodeKinds.YieldStmt, kwTok, span, value)
 }
 
 func (p *Parser) parseBreakStmt() ast.NodeIndex {

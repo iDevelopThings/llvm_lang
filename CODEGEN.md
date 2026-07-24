@@ -1571,6 +1571,16 @@ for why (every arm here is an independent, mutually exclusive branch
 generated sequentially against the same shared `Generator.destructors`
 slice).
 
+### `match` as an expression: a shared `frame`, one `phi` at the merge block
+
+`genMatchStmt`/`genValueMatchStmt` both take a `frame *matchExprCodegenCtx` parameter - `nil` for an ordinary statement-position match (`genStmt`'s own dispatch), non-nil only when `genMatchExpr` (`enum.go`) is lowering an expression-position match instead. This is the *only* thing `frame` changes about either function's own switch/comparison-chain construction - both lowering strategies above are reused completely unchanged, per AGENTS.md's no-duplication standard, rather than a second copy for the expression case.
+
+`genMatchExpr` pushes a `matchExprCodegenCtx` frame (`Generator.matchExprStack`, mirroring `loopStack`/`loopCtx` one construct over - reset per function alongside it in `beginSyntheticFunc`) carrying: `destructorBase` (the match expression's own entry depth, for `yield`'s own unwind - see below), a shared `mergeBB`, and `incomingVals`/`incomingBlocks` accumulators. Every arm's own `yield` (`genYieldStmt`, `stmt.go`) - however deeply nested inside an `if`/`for` - evaluates its expression, `unwindDestructorsTo(frame.destructorBase)` (not 0, not any enclosing loop's own base - only what this match expression itself introduced, exactly like `break`/`continue` only unwind to their own loop's `destructorBase`), appends `(value, currentBlock)` to the frame's accumulators, and branches to `mergeBB` - terminating that block exactly like `return`/`break`/`continue` already do, so the existing per-arm "did this arm terminate" bookkeeping needs no changes. Once every arm has finished generating, `genMatchExpr` builds one `CreatePHI` at `mergeBB` and a single batched `AddIncoming(frame.incomingVals, frame.incomingBlocks)` call - matching every other `phi` call site in this package (`genEnumEqual`, the short-circuit `&&`, maps, the arena), none of which call `AddIncoming` incrementally either.
+
+The one place both lowering functions' own existing "mark `mergeBB` unreachable when every arm terminates" logic needs to know about `frame`: when `frame != nil`, `mergeBB` is genuinely reachable (every `yield` branches there) regardless of whether the statement-mode `allTerminated` bookkeeping would otherwise call it dead code - so that `unreachable`-marking is gated on `frame == nil` too.
+
+A bare-expression arm (`pattern => expr`, no `yield` in the source at all) is parsed as an implicit `{ yield expr }` (see `LANGUAGE.md`'s "match as an expression" and `parser/expr.go`'s `parseMatchExprArm`) - by the time codegen sees it, every arm body is the identical shape (a `Block` ending in a real `YieldStmt`), so `genYieldStmt` is the only new codegen entry point this feature needed at all.
+
 ### `==`/`!=` and `print()`: a real runtime discriminant dispatch
 
 Unlike a struct (whose every field is always present, so `genValueEqual`/

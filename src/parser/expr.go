@@ -182,6 +182,8 @@ func parseIdentExpr(p *Parser) ast.NodeIndex {
 		return p.parseFuncLit()
 	case enums.Keywords.New:
 		return p.parseNewExpr()
+	case enums.Keywords.Match:
+		return p.parseMatchExpr()
 	case "":
 		p.advance()
 		ident := p.tree.NewNode(enums.NodeKinds.Ident, tok, tokenSpan(tok))
@@ -247,6 +249,94 @@ func (p *Parser) parseNewExpr() ast.NodeIndex {
 		End:   p.tree.SpanOf(inner).End,
 	}
 	return p.tree.NewNode(enums.NodeKinds.NewExpr, kwTok, span, inner)
+}
+
+// parseMatchExpr parses `match` in EXPRESSION position (see LANGUAGE.md's
+// "match" section: "match as an expression") - reachable anywhere an
+// expression is legal (a `:=` right-hand side, a function call argument,
+// nested inside another expression), unlike parseMatchStmt (stmt.go), which
+// only ever fires at statement-start (parseStmt's own keyword-dispatch
+// checks Match before ever falling through to expression parsing at all -
+// see parseStmt's own doc comment - so a bare top-level `match x {...}`
+// statement is completely unaffected by this, still parsed via
+// parseMatchStmt, unchanged). Shares parseMatchStmt's own subject-parsing
+// logic verbatim, including the exprLev = -1 composite-literal-
+// disambiguation escape hatch (a bare `match shape {` would otherwise be
+// ambiguous with a composite literal `shape{...}`) - the one real grammar
+// difference between the two is each arm's own body shape, parsed here by
+// parseMatchExprArm instead of parseMatchArm's own always-a-block shape.
+// Produces the exact same MatchStmt/MatchArm node kinds the statement form
+// does (see ast.Node's own MatchStmt doc comment) - sema/codegen tell the
+// two apart purely by which dispatch reached the node (checkStmt/genStmt's
+// vs. checkExpr/genExpr's), never by any grammar-level marker on the node
+// itself.
+func (p *Parser) parseMatchExpr() ast.NodeIndex {
+	kwTok := p.expectKeyword(enums.Keywords.Match)
+
+	savedLev := p.exprLev
+	p.exprLev = -1
+	subject := p.parseExpr(precLowest)
+	p.exprLev = savedLev
+
+	p.expect(enums.Lexemes.LeftBrace)
+	arms := p.parseSemiList(enums.Lexemes.RightBrace, p.parseMatchExprArm)
+	closeTok := p.expect(enums.Lexemes.RightBrace)
+
+	span := ast.Span{
+		Start: kwTok.Start,
+		End:   closeTok.End,
+	}
+	children := append([]ast.NodeIndex{subject}, arms...)
+	return p.tree.NewNode(enums.NodeKinds.MatchStmt, kwTok, span, children...)
+}
+
+// parseMatchExprArm parses one expression-mode match arm:
+// `pattern0, pattern1, ... => body` - the pattern-list grammar itself is
+// identical to parseMatchArm's own (see that function's own doc comment for
+// what each pattern shape can be), but body may now be either of two
+// surface shapes:
+//
+//   - a real brace-delimited block (`{ ... }`) - parsed via parseBlock,
+//     completely unchanged, and may contain `yield` anywhere inside, at any
+//     nesting depth, alongside ordinary if/for/whatever statements.
+//   - a bare expression with no braces at all (`pattern => expr`) - desugared
+//     right here into a synthetic single-statement Block wrapping a
+//     synthetic YieldStmt around that expression (see ast.Node's own
+//     MatchArm doc comment: this extends the exact same "sometimes a Block,
+//     sometimes not" convention ForStmt's own init/post slots already use).
+//
+// This desugaring is purely a parser-level convenience: it means sema and
+// codegen only ever have to handle ONE canonical arm-body shape ("a Block
+// whose every reachable path must yield") regardless of which surface form
+// the user actually wrote. The synthetic Block/YieldStmt nodes carry the
+// wrapped expression's own span and no token of their own - there's no
+// `{`/`}`/`yield` keyword anywhere in the source for either to point at.
+func (p *Parser) parseMatchExprArm() ast.NodeIndex {
+	patterns := []ast.NodeIndex{p.parseExpr(precLowest)}
+	for {
+		if _, ok := p.accept(enums.Lexemes.Comma); !ok {
+			break
+		}
+		patterns = append(patterns, p.parseExpr(precLowest))
+	}
+	p.expect(enums.Lexemes.FatArrow)
+
+	var body ast.NodeIndex
+	if p.at(enums.Lexemes.LeftBrace) {
+		body = p.parseBlock()
+	} else {
+		value := p.parseExpr(precLowest)
+		valueSpan := p.tree.SpanOf(value)
+		yieldStmt := p.tree.NewNode(enums.NodeKinds.YieldStmt, lexer.Token{}, valueSpan, value)
+		body = p.tree.NewNode(enums.NodeKinds.Block, lexer.Token{}, valueSpan, yieldStmt)
+	}
+
+	span := ast.Span{
+		Start: p.tree.SpanOf(patterns[0]).Start,
+		End:   p.tree.SpanOf(body).End,
+	}
+	children := append(patterns, body)
+	return p.tree.NewNode(enums.NodeKinds.MatchArm, lexer.Token{}, span, children...)
 }
 
 func parseNumberExpr(p *Parser) ast.NodeIndex {

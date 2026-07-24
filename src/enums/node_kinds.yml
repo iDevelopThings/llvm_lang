@@ -60,3 +60,4 @@ values:
   - name: EnumVariant
   - name: MatchStmt
   - name: MatchArm
+  - name: YieldStmt

@@ -707,6 +707,8 @@ func (g *Generator) genExpr(n ast.NodeIndex) llvm.Value {
 		return g.genFuncLit(n)
 	case enums.NodeKinds.NewExpr:
 		return g.genNewExpr(n)
+	case enums.NodeKinds.MatchStmt:
+		return g.genMatchExpr(n)
 	default:
 		panic("codegen: cannot generate an expression of kind " + g.tree.Nodes[n].Kind.String())
 	}

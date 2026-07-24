@@ -60,6 +60,43 @@ type loopCtx struct {
 	destructorBase int
 }
 
+// matchExprCodegenCtx is one live expression-mode match's own codegen
+// state - pushed onto Generator.matchExprStack for the duration of
+// genMatchExpr, mirroring loopCtx's identical per-construct-instance
+// stacking one type above (see its own doc comment) - a nested match
+// expression (a `yield`'s own expr that is itself another match expression)
+// pushes its own frame on top, so a nested yield's own incoming pair is
+// recorded against ITS OWN frame, never the enclosing one's.
+type matchExprCodegenCtx struct {
+	// destructorBase is len(Generator.destructors) at the point this match
+	// expression's own arms started generating - see genYieldStmt's own
+	// unwindDestructorsTo call and LANGUAGE.md's "Destructors" section: a
+	// yield only unwinds locals declared since entering the match
+	// expression itself, never anything declared in an enclosing scope
+	// outside it (that scope isn't being exited at all) - exactly loopCtx's
+	// own destructorBase, one construct over.
+	destructorBase int
+
+	// mergeBB is this match expression's own single merge block - every
+	// yield anywhere in any arm (however deeply nested inside an if/for)
+	// branches here (genYieldStmt), and this is where genMatchExpr builds
+	// the real CreatePHI collecting every one of their contributed values
+	// once every arm has finished generating.
+	mergeBB llvm.BasicBlock
+
+	// incomingVals/incomingBlocks accumulate one (value, block) pair per
+	// yield actually generated across every arm (genYieldStmt appends to
+	// both, in whatever order codegen happens to generate each arm) -
+	// batched into one CreatePHI/AddIncoming call at the very end
+	// (genMatchExpr), matching every other phi call site already in this
+	// package (see enum.go's genEnumEqual/genHashEnumInto, expr.go's
+	// short-circuit `&&`, maps.go, runtime.go - none of them call
+	// AddIncoming incrementally either; every one builds its full incoming
+	// slices first, then calls CreatePHI+AddIncoming exactly once).
+	incomingVals   []llvm.Value
+	incomingBlocks []llvm.BasicBlock
+}
+
 // destructorEntry is one local variable's or parameter's own symbol, plus
 // the already-resolved destructor function to call for it (fn/fnTy - see
 // destructorFuncFor, func.go, which resolves either a struct's or an enum's
@@ -312,6 +349,15 @@ type Generator struct {
 	curFunc     *funcCtx
 	loopStack   []loopCtx
 	curReceiver llvm.Value
+
+	// matchExprStack is loopStack's expression-mode-match counterpart - one
+	// live frame per currently-being-generated match expression, innermost
+	// last (see matchExprCodegenCtx's own doc comment) - pushed/popped by
+	// genMatchExpr (enum.go), read by genYieldStmt (stmt.go). Reset to nil
+	// per function alongside loopStack (see beginSyntheticFunc, func.go): a
+	// match expression's own frame never needs to survive past the function
+	// body it's generated inside of.
+	matchExprStack []*matchExprCodegenCtx
 
 	// curCtxPtr/curCaptureIndex/curCaptureTy describe the function currently
 	// being generated only when it's itself a lambda's own synthesized

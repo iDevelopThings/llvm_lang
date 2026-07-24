@@ -431,6 +431,46 @@ func TestBinary_MatchValuesExample(t *testing.T) {
 	}
 }
 
+// matchExprWant is the expected stdout for examples/match_expr/match_expr.llx
+// (see that file's own inline comments) - shared by the JIT and AOT tests
+// below, exactly like every other worked-example test pair in this file.
+const matchExprWant = "small\n" +
+	"small-but-special\n" +
+	"medium-or-large\n" +
+	"medium-or-large\n" +
+	"unknown\n" +
+	"low\n" +
+	"mid\n" +
+	"high\n" +
+	"yes\n" +
+	"large"
+
+// TestBinary_MatchExprExample runs examples/match_expr/match_expr.llx end to
+// end via the real binary - the worked dogfooding demo for this round's
+// `match` as an expression (see LANGUAGE.md's "match" section's "match as an
+// expression" subsection): a bare-expression arm and a block arm (with its
+// own nested if/multiple yields) coexisting in the same match, used as a
+// `:=` right-hand side, a bare `return`, and a function-call argument, over
+// both a value-match subject (string/int/bool) and an enum-match subject.
+// Its own `main() int` returns 0.
+func TestBinary_MatchExprExample(t *testing.T) {
+	cmd := exec.Command(llvmcPath, "../../examples/match_expr/match_expr.llx")
+	out, err := cmd.Output()
+	if err != nil {
+		ee, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("running llvmc: %v", err)
+		}
+		t.Fatalf("llvmc exited %v, stderr:\n%s", err, ee.Stderr)
+	}
+
+	normalized := strings.ReplaceAll(string(out), "\r\n", "\n")
+	normalized = strings.TrimRight(normalized, "\n")
+	if normalized != matchExprWant {
+		t.Errorf("stdout = %q, want %q", normalized, matchExprWant)
+	}
+}
+
 // TestBinary_MainExitCode covers examples/features/features.llx end to end: its
 // three print calls' real stdout, and its `func main() int` return value
 // coming back as the child process's own exit code.
@@ -669,6 +709,32 @@ func TestBinary_AOT_MatchValues(t *testing.T) {
 	normalized = strings.TrimRight(normalized, "\n")
 	if normalized != matchValuesWant {
 		t.Errorf("stdout = %q, want %q", normalized, matchValuesWant)
+	}
+}
+
+// TestBinary_AOT_MatchExpr AOT-compiles examples/match_expr and confirms
+// identical output/exit code to its JIT-executed behavior
+// (TestBinary_MatchExprExample) - proving genMatchExpr's own phi-based
+// value-producing lowering (as opposed to genMatchStmt's own plain
+// unreachable-or-fall-through merge point for the statement form - see
+// CODEGEN.md's "match codegen" section) round-trips correctly through a
+// real, standalone linked executable, not just under JIT execution.
+func TestBinary_AOT_MatchExpr(t *testing.T) {
+	exePath := aotCompile(t, "../../examples/match_expr/match_expr.llx")
+
+	cmd := exec.Command(exePath)
+	out, err := cmd.Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			t.Fatalf("%s exited %v, stderr:\n%s", exePath, err, ee.Stderr)
+		}
+		t.Fatalf("running %s: %v", exePath, err)
+	}
+
+	normalized := strings.ReplaceAll(string(out), "\r\n", "\n")
+	normalized = strings.TrimRight(normalized, "\n")
+	if normalized != matchExprWant {
+		t.Errorf("stdout = %q, want %q", normalized, matchExprWant)
 	}
 }
 

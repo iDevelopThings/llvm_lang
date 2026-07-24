@@ -55,6 +55,17 @@ type enclosingFunc struct {
 	ret       Type // meaningful only when hasReturn is true
 }
 
+// matchExprCheckCtx is one live expression-mode match's own running result
+// type - see checker.matchExprStack's own doc comment for why this needs a
+// real stack rather than a bare counter. resultTypeSet distinguishes "no
+// yield checked yet" from "a yield already fixed resultType" - resultType's
+// own zero value (Type{}) is otherwise indistinguishable from a genuinely
+// checked-but-invalid type.
+type matchExprCheckCtx struct {
+	resultType    Type
+	resultTypeSet bool
+}
+
 // nodeRef pairs a NodeIndex with the Tree it's relative to. Every per-node
 // memoization cache below used to be keyed by a bare ast.NodeIndex, which
 // was fine when there was only ever one Tree in play; now that Check can
@@ -138,6 +149,23 @@ type checker struct {
 	// to distinguish *which* enclosing loop (that's codegen's loopStack's
 	// job, once this pass has already guaranteed one exists at all).
 	loopDepth int
+
+	// matchExprStack is the expression-mode-match counterpart to loopDepth -
+	// a real stack, not just a counter, since a `yield` needs live access to
+	// its own enclosing match expression's own running result type (the
+	// first yield seen anywhere in the whole match fixes it; every
+	// subsequent one, in any arm, must unify against it - see
+	// checkYieldStmt), not just a yes/no "am I nested deep enough" answer.
+	// Pushed once for the whole arms-checking pass of an expression-mode
+	// match (checkMatchExprStmt), popped once after every arm has been
+	// checked - a nested match expression (a `yield match other {...}`'s
+	// own wrapped match) pushes its own fresh frame on top, so its own
+	// yields unify against ITS OWN frame, never leaking into the enclosing
+	// one's. A plain statement-position match (checkMatchStmt) never
+	// touches this at all - it has no result type to unify, and its own
+	// arm bodies are checked via plain checkBlock, exactly as before this
+	// round.
+	matchExprStack []*matchExprCheckCtx
 
 	// computingCopyable is structCopyable's own cycle guard - a struct's
 	// Copyable can depend (transitively, through a field) on another
@@ -1793,7 +1821,43 @@ func (c *checker) checkStmt(n ast.NodeIndex) {
 		c.checkForStmt(n)
 	case enums.NodeKinds.MatchStmt:
 		c.checkMatchStmt(n)
+	case enums.NodeKinds.YieldStmt:
+		c.checkYieldStmt(n)
 	}
+}
+
+// checkYieldStmt type-checks `yield expr` (see ast.Node's own YieldStmt doc
+// comment and LANGUAGE.md's "match" section's "match as an expression"
+// subsection) - legal only inside a match-expression arm's own block,
+// enforced here exactly the way checkBreakOrContinue enforces break/
+// continue's own loop-only legality, c.matchExprStack being c.loopDepth's
+// stack-shaped counterpart (see that field's own doc comment for why a
+// stack, not a counter). The first yield seen anywhere across the WHOLE
+// enclosing match expression (any arm, not just this one) fixes its result
+// type; every subsequent yield, anywhere in any arm, must be assignable to
+// that already-established type - checkAssignable itself reports the clean
+// diagnostic on a mismatch (naming both types), exactly like every other
+// assignability-checked position in this file.
+func (c *checker) checkYieldStmt(n ast.NodeIndex) {
+	if len(c.matchExprStack) == 0 {
+		c.errorAt(n, "yield outside a match expression")
+		c.checkValueExpr(c.tree.Child(n, 0))
+		return
+	}
+	frame := c.matchExprStack[len(c.matchExprStack)-1]
+
+	value := c.tree.Child(n, 0)
+	vt := c.defaultIfUntyped(value, c.checkValueExpr(value))
+	if vt.IsInvalid() {
+		return
+	}
+
+	if !frame.resultTypeSet {
+		frame.resultType = vt
+		frame.resultTypeSet = true
+		return
+	}
+	c.checkAssignable(value, frame.resultType, vt, "match arm yield")
 }
 
 // checkBreakOrContinue verifies n (a BreakStmt or ContinueStmt) actually
@@ -2069,18 +2133,89 @@ func (c *checker) checkCondition(n ast.NodeIndex) {
 	}
 }
 
-// checkMatchStmt type-checks a `match subject { pattern => body, ... }`
-// statement (see LANGUAGE.md's "match" section), dispatching on the
+// checkMatchStmt type-checks a bare statement-position `match subject {
+// pattern => body, ... }` (see LANGUAGE.md's "match" section) - reached only
+// via checkStmt's own dispatch, never checkExpr's (an expression-position
+// match is checkMatchExprStmt, wired at checkExpr/inferExpr's own dispatch
+// instead - see that function's own doc comment). A thin wrapper around
+// checkMatchDispatch, passing checkBlock as the "how do I check one arm's
+// own body" callback - exactly what this function's own body always did,
+// before checkMatchExprStmt needed the identical dispatch logic with a
+// different arm-body checker layered on top instead of re-implementing it.
+func (c *checker) checkMatchStmt(n ast.NodeIndex) {
+	c.checkMatchDispatch(n, c.checkBlock)
+}
+
+// checkMatchExprStmt type-checks a `match` used in EXPRESSION position
+// (`x := match subject {...}`, a function call argument, nested inside
+// another expression - see LANGUAGE.md's "match" section's "match as an
+// expression" subsection) - reached via checkExpr/inferExpr's own dispatch,
+// never checkStmt's. Reuses checkMatchDispatch's entire dispatch-on-
+// subject-type/exhaustiveness/duplicate-arm/wildcard machinery verbatim
+// (the same one checkMatchStmt uses, completely unchanged) - the only
+// genuinely new behavior layered on top is (1) pushing/popping a
+// matchExprCheckCtx frame around the whole arms-checking pass, so a `yield`
+// anywhere in any arm can unify a running result type across every arm (see
+// checker.matchExprStack's own doc comment), and (2) checking, per arm,
+// that every reachable path through its own block actually yields
+// (checkMatchExprArmBody, this function's own checkArm callback).
+//
+// A match expression with no reachable yield at all (every arm's every path
+// returns/breaks/continues instead - mustYieldEveryPath still accepts that,
+// mirroring isTerminatingStmt's own treatment of return/break/continue, see
+// that function's own doc comment) never establishes a result type; rather
+// than silently letting an untyped/zero-value Type leak into Info.Types
+// (which the AGENTS.md review process exists specifically to catch - a
+// silently-wrong type is worse than a loud diagnostic), this is reported
+// directly here as its own clean error, and invalidType is returned so
+// downstream cascading checks (an enclosing `:=`'s own declType, say) still
+// have something to compare against without a second, unrelated diagnostic.
+func (c *checker) checkMatchExprStmt(n ast.NodeIndex) Type {
+	frame := &matchExprCheckCtx{}
+	c.matchExprStack = append(c.matchExprStack, frame)
+	c.checkMatchDispatch(n, c.checkMatchExprArmBody)
+	c.matchExprStack = c.matchExprStack[:len(c.matchExprStack)-1]
+
+	if !frame.resultTypeSet {
+		c.errorAt(n, "match expression has no arm that ever yields a value")
+		return invalidType
+	}
+	return frame.resultType
+}
+
+// checkMatchExprArmBody is checkMatchExprStmt's own checkArm callback (see
+// checkMatchDispatch/checkEnumMatchStmt/checkValueMatchStmt/
+// checkMatchArmFallback's shared checkArm parameter): checks body exactly
+// like the statement-mode checkBlock does, then additionally requires every
+// reachable path through it to end in a yield (mustYieldEveryPath) - the one
+// new rule an expression-mode match's arm body must satisfy that a
+// statement-mode one never did (see LANGUAGE.md's "match" section's "match
+// as an expression" subsection).
+func (c *checker) checkMatchExprArmBody(body ast.NodeIndex) {
+	c.checkBlock(body)
+	if !mustYieldEveryPath(c.tree, c.info, body) {
+		c.errorAt(body, "match arm does not yield a value on every path")
+	}
+}
+
+// checkMatchDispatch is checkMatchStmt/checkMatchExprStmt's own shared
+// dispatch core (see LANGUAGE.md's "match" section) - dispatching on the
 // subject's own resolved type to one of two genuinely different checked
 // shapes - an enum value (checkEnumMatchStmt, the original exhaustiveness-
-// checked feature) or a plain scalar value (checkValueMatchStmt, this
-// round's Go-`switch`-style generalization - see isValueMatchType). The
-// subject may be an enum value directly, or a pointer to one (`this` inside
-// a method - see checkThisExpr) - auto-dereferenced here, the same
-// auto-deref every other struct/enum-receiver access in this language
-// already gets; a value-match subject is never a pointer (isValueMatchType
-// only admits scalar leaf kinds, and a pointer is never one).
-func (c *checker) checkMatchStmt(n ast.NodeIndex) {
+// checked feature) or a plain scalar value (checkValueMatchStmt, the
+// Go-`switch`-style generalization - see isValueMatchType). The subject may
+// be an enum value directly, or a pointer to one (`this` inside a method -
+// see checkThisExpr) - auto-dereferenced here, the same auto-deref every
+// other struct/enum-receiver access in this language already gets; a
+// value-match subject is never a pointer (isValueMatchType only admits
+// scalar leaf kinds, and a pointer is never one). checkArm is how each arm's
+// own body gets checked - plain checkBlock for a statement-position match,
+// or checkMatchExprArmBody's extra "every path yields" rule for an
+// expression-position one - threaded down into checkEnumMatchStmt/
+// checkValueMatchStmt/checkMatchArmFallback so none of that dispatch/
+// exhaustiveness logic needs re-implementing for the expression-mode case at
+// all.
+func (c *checker) checkMatchDispatch(n ast.NodeIndex, checkArm func(body ast.NodeIndex)) {
 	subjectNode := c.tree.MatchSubject(n)
 	subjType := c.checkValueExpr(subjectNode)
 
@@ -2091,13 +2226,13 @@ func (c *checker) checkMatchStmt(n ast.NodeIndex) {
 
 	if enumType.IsInvalid() {
 		for _, arm := range c.tree.MatchArms(n) {
-			c.checkMatchArmFallback(arm)
+			c.checkMatchArmFallback(arm, checkArm)
 		}
 		return
 	}
 
 	if enumType.Kind == TypeEnum {
-		c.checkEnumMatchStmt(n, enumType)
+		c.checkEnumMatchStmt(n, enumType, checkArm)
 		return
 	}
 
@@ -2117,12 +2252,12 @@ func (c *checker) checkMatchStmt(n ast.NodeIndex) {
 	if !isValueMatchType(subjType) {
 		c.errorAt(subjectNode, "match requires an enum value, or an int/bool/string value to switch on, got %s", subjType)
 		for _, arm := range c.tree.MatchArms(n) {
-			c.checkMatchArmFallback(arm)
+			c.checkMatchArmFallback(arm, checkArm)
 		}
 		return
 	}
 
-	c.checkValueMatchStmt(n, subjectNode, subjType)
+	c.checkValueMatchStmt(n, subjectNode, subjType, checkArm)
 }
 
 // isValueMatchType reports whether t is a legal value-match subject type
@@ -2155,8 +2290,9 @@ func isValueMatchType(t Type) bool {
 // shared arm body (unifying their bindings) is a real, separate feature,
 // deliberately deferred rather than silently only checking pattern 0 or
 // guessing which variant's own shape the body's bindings should follow (see
-// DECISIONS.md's dated entry for this round).
-func (c *checker) checkEnumMatchStmt(n ast.NodeIndex, enumType Type) {
+// DECISIONS.md's dated entry for this round). checkArm is checkMatchDispatch's
+// own "how do I check one arm's own body" callback (see its own doc comment).
+func (c *checker) checkEnumMatchStmt(n ast.NodeIndex, enumType Type, checkArm func(body ast.NodeIndex)) {
 	info := enumType.Enum
 	covered := make(map[string]bool, len(info.Order))
 	hasWildcard := false
@@ -2170,7 +2306,7 @@ func (c *checker) checkEnumMatchStmt(n ast.NodeIndex, enumType Type) {
 				c.errorAt(patterns[0], "match has more than one wildcard (_) arm")
 			}
 			hasWildcard = true
-			c.checkBlock(body)
+			checkArm(body)
 			continue
 		}
 
@@ -2179,7 +2315,7 @@ func (c *checker) checkEnumMatchStmt(n ast.NodeIndex, enumType Type) {
 			for _, pattern := range patterns {
 				c.checkMatchArmPatternBindingsFallback(pattern)
 			}
-			c.checkBlock(body)
+			checkArm(body)
 			continue
 		}
 
@@ -2190,7 +2326,7 @@ func (c *checker) checkEnumMatchStmt(n ast.NodeIndex, enumType Type) {
 			}
 			covered[variant.Name] = true
 		}
-		c.checkBlock(body)
+		checkArm(body)
 	}
 
 	if hasWildcard {
@@ -2223,8 +2359,9 @@ func (c *checker) checkEnumMatchStmt(n ast.NodeIndex, enumType Type) {
 // `default` and no matching case to just silently fall through doing
 // nothing (see DECISIONS.md's dated entry for this round for why match
 // stays a real safety net instead of mirroring that particular Go
-// looseness).
-func (c *checker) checkValueMatchStmt(n, subjectNode ast.NodeIndex, subjType Type) {
+// looseness). checkArm is checkMatchDispatch's own "how do I check one arm's
+// own body" callback (see its own doc comment).
+func (c *checker) checkValueMatchStmt(n, subjectNode ast.NodeIndex, subjType Type, checkArm func(body ast.NodeIndex)) {
 	hasWildcard := false
 	seenLiterals := make(map[literalPatternKey]ast.NodeIndex)
 
@@ -2236,7 +2373,7 @@ func (c *checker) checkValueMatchStmt(n, subjectNode ast.NodeIndex, subjType Typ
 				c.errorAt(c.tree.MatchArmPatterns(arm)[0], "match has more than one wildcard (_) arm")
 			}
 			hasWildcard = true
-			c.checkBlock(body)
+			checkArm(body)
 			continue
 		}
 
@@ -2247,7 +2384,7 @@ func (c *checker) checkValueMatchStmt(n, subjectNode ast.NodeIndex, subjType Typ
 				c.checkDuplicateValuePattern(pattern, seenLiterals)
 			}
 		}
-		c.checkBlock(body)
+		checkArm(body)
 	}
 
 	if !hasWildcard {
@@ -2292,11 +2429,16 @@ func (c *checker) checkDuplicateValuePattern(pattern ast.NodeIndex, seen map[lit
 // determined at all - there's nothing to validate any pattern against, but
 // its fresh bindings and body are still real code worth checking (mirroring
 // checkCompositeLitElemFallback's identical reasoning one construct over).
-func (c *checker) checkMatchArmFallback(arm ast.NodeIndex) {
+// checkArm is checkMatchDispatch's own "how do I check one arm's own body"
+// callback (see its own doc comment) - this recovery path needs its own
+// expression-mode equivalent too (checkMatchExprArmBody still requires
+// "every path yields" even when the subject itself couldn't be resolved),
+// exactly like checkEnumMatchStmt/checkValueMatchStmt do.
+func (c *checker) checkMatchArmFallback(arm ast.NodeIndex, checkArm func(body ast.NodeIndex)) {
 	for _, pattern := range c.tree.MatchArmPatterns(arm) {
 		c.checkMatchArmPatternBindingsFallback(pattern)
 	}
-	c.checkBlock(c.tree.MatchArmBody(arm))
+	checkArm(c.tree.MatchArmBody(arm))
 }
 
 // checkMatchArmPatternBindingsFallback seeds pattern's own fresh binding
@@ -2557,6 +2699,10 @@ func (c *checker) inferExpr(n ast.NodeIndex) Type {
 		return c.checkFuncLit(n)
 	case enums.NodeKinds.NewExpr:
 		return c.checkNewExpr(n)
+	case enums.NodeKinds.MatchStmt:
+		// Always expression-position here - statement-position match is
+		// dispatched by checkStmt directly, never through checkExpr.
+		return c.checkMatchExprStmt(n)
 	case enums.NodeKinds.ArrayType:
 		// Reachable two ways (see resolve.go's resolveExpr, which documents
 		// the same two paths for its own ArrayType case): a bare array type
@@ -4494,35 +4640,50 @@ func isTerminatingStmt(tree *ast.Tree, info *Info, n ast.NodeIndex) bool {
 
 // matchStmtTerminates reports whether a MatchStmt is a terminating statement
 // in isTerminatingStmt's sense (see its own doc comment and LANGUAGE.md's
-// "Missing return" section): every arm's own body must itself terminate,
-// AND the match itself must be exhaustive - what "exhaustive" means depends
-// on the subject's own type, generalized this round alongside
-// checkMatchStmt's identical enum-vs-value split:
+// "Missing return" section) - a thin wrapper around matchArmsAllTerminate,
+// passing isTerminatingStmt itself as "how does one arm's own body
+// terminate" (see that function's own doc comment for why this is
+// parameterized at all: mustYieldEveryPath, just below, needs the identical
+// per-arm-termination-and-exhaustiveness logic, generalized to accept
+// YieldStmt as an additional terminating leaf, and sharing this one core
+// rather than hand-rolling the same exhaustiveness walk twice is exactly
+// the kind of duplication AGENTS.md's review process exists to catch).
+func matchStmtTerminates(tree *ast.Tree, info *Info, n ast.NodeIndex) bool {
+	return matchArmsAllTerminate(tree, info, n, func(body ast.NodeIndex) bool {
+		return isTerminatingStmt(tree, info, body)
+	})
+}
+
+// matchArmsAllTerminate is matchStmtTerminates' own parameterized core -
+// every arm's own body must satisfy armTerminates, AND the match itself
+// must be exhaustive - what "exhaustive" means depends on the subject's own
+// type, mirroring checkMatchDispatch's identical enum-vs-value split:
 //   - an enum match: a wildcard `_` arm present, or every one of the
 //     subject enum's own variants covered by some arm.
 //   - a value match (int/bool/string - see isValueMatchType):
 //     checkValueMatchStmt already guarantees a wildcard `_` arm is present
 //     for one of these to have passed sema.Check at all - but this function
 //     is a pure, deliberately uncached recomputation of an already-checked
-//     tree (see this function's own doc comment one paragraph up), so it
-//     re-derives that fact directly here too, rather than blindly trusting
-//     the guarantee: termination reduces to "every arm terminates" (already
-//     confirmed by the loop below) AND a wildcard arm is genuinely present.
+//     tree (see matchStmtTerminates' own doc comment one paragraph up), so
+//     it re-derives that fact directly here too, rather than blindly
+//     trusting the guarantee: termination reduces to "every arm terminates"
+//     (already confirmed by the loop below) AND a wildcard arm is genuinely
+//     present.
 //
 // An inexhaustive match always leaves a real fall-through path, exactly like
 // an `if` with no `else` never terminates. This recomputes the identical
-// exhaustiveness fact checkMatchStmt itself already validated (with real
-// diagnostics) - deliberately not cached anywhere: isTerminatingStmt is a
-// pure function of an already-checked tree, with no *checker receiver to
-// memoize onto, mirroring forHasOwnBreak's own identical no-caching
-// precedent one construct over.
-func matchStmtTerminates(tree *ast.Tree, info *Info, n ast.NodeIndex) bool {
+// exhaustiveness fact checkMatchDispatch itself already validated (with real
+// diagnostics) - deliberately not cached anywhere: isTerminatingStmt/
+// mustYieldEveryPath are both pure functions of an already-checked tree,
+// with no *checker receiver to memoize onto, mirroring forHasOwnBreak's own
+// identical no-caching precedent one construct over.
+func matchArmsAllTerminate(tree *ast.Tree, info *Info, n ast.NodeIndex, armTerminates func(body ast.NodeIndex) bool) bool {
 	arms := tree.MatchArms(n)
 	if len(arms) == 0 {
 		return false
 	}
 	for _, arm := range arms {
-		if !isTerminatingStmt(tree, info, tree.MatchArmBody(arm)) {
+		if !armTerminates(tree.MatchArmBody(arm)) {
 			return false
 		}
 	}
@@ -4552,6 +4713,76 @@ func matchStmtTerminates(tree *ast.Tree, info *Info, n ast.NodeIndex) bool {
 		}
 	}
 	return len(covered) == len(subjType.Enum.Order)
+}
+
+// mustYieldEveryPath reports whether n is a "yield-terminating" statement -
+// isTerminatingStmt's exact recursive shape (ReturnStmt/ForStmt/IfStmt/
+// MatchStmt/Block cases identical), generalized with one new base case:
+// YieldStmt terminates too (see ast.Node's own YieldStmt doc comment - it
+// exits just its own enclosing match-expression arm, exactly the way
+// `break` exits its own enclosing loop, but from this function's "does
+// control ever fall past this statement" perspective it's exactly as
+// terminating as return/break/continue already are treated, or not treated,
+// throughout this file). This is checkMatchExprArmBody's own per-arm "every
+// reachable path yields" rule (see LANGUAGE.md's "match" section's "match
+// as an expression" subsection): every arm's block must satisfy this, or
+// its own arm-body check reports "match arm does not yield a value on every
+// path". A `return` inside an arm (exiting the whole enclosing function,
+// never producing a match value at all) still satisfies this exactly like
+// isTerminatingStmt already treats it - that path never needs a yield of
+// its own, since control never returns to consume the match expression's
+// result along it, the same reasoning an `if` branch ending in `return`
+// needs no further statement after it.
+//
+// Never descends into an expression - only ever into another nested
+// STATEMENT shape (Block/IfStmt/ForStmt/MatchStmt), exactly like
+// isTerminatingStmt itself - so a match expression nested somewhere inside
+// an expression (a `yield match other {...}`'s own wrapped match, a `:=`
+// initializer, a call argument, ...) is never visited by this walk at all;
+// YieldStmt is a base case here that returns true unconditionally, without
+// ever inspecting its own wrapped expression, so there's nothing to
+// recurse into even for that shape. Its own arms are checked completely
+// separately, by their own checkMatchExprStmt call (its own pushed
+// matchExprCheckCtx frame - see checker.matchExprStack) whenever checkExpr
+// happens to reach that expression, entirely independent of this walk. A
+// MatchStmt node reached HERE (via a Block's own direct statement child)
+// is always the statement-mode flavor (parseStmt's own keyword-first
+// dispatch guarantees a bare `match x {...}` at statement start can never be
+// anything else - see parser/stmt.go's own parseStmt doc comment), so
+// recursing into its own arm bodies below (matchArmsAllTerminate) is exactly
+// matchStmtTerminates' own existing reasoning, just yield-aware too.
+func mustYieldEveryPath(tree *ast.Tree, info *Info, n ast.NodeIndex) bool {
+	if n == ast.InvalidNode {
+		return false
+	}
+	switch tree.Nodes[n].Kind {
+	case enums.NodeKinds.YieldStmt:
+		return true
+	case enums.NodeKinds.ReturnStmt:
+		return true
+	case enums.NodeKinds.ForStmt:
+		cond := tree.Child(n, 1)
+		body := tree.Child(n, 3)
+		return cond == ast.InvalidNode && !forHasOwnBreak(tree, body)
+	case enums.NodeKinds.IfStmt:
+		elseBranch := tree.Child(n, 2)
+		if elseBranch == ast.InvalidNode {
+			return false
+		}
+		return mustYieldEveryPath(tree, info, tree.Child(n, 1)) && mustYieldEveryPath(tree, info, elseBranch)
+	case enums.NodeKinds.MatchStmt:
+		return matchArmsAllTerminate(tree, info, n, func(body ast.NodeIndex) bool {
+			return mustYieldEveryPath(tree, info, body)
+		})
+	case enums.NodeKinds.Block:
+		stmts := tree.Children(n)
+		if len(stmts) == 0 {
+			return false
+		}
+		return mustYieldEveryPath(tree, info, stmts[len(stmts)-1])
+	default:
+		return false
+	}
 }
 
 // patternVariantSym returns the Symbol a match arm's own pattern resolved to

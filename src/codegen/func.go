@@ -132,9 +132,10 @@ func (g *Generator) declareExternFuncSignature(decl ast.NodeIndex) {
 }
 
 // beginSyntheticFunc resets Generator's per-function generation fields
-// (curFn/entryBlock/locals/loopStack/destructors, plus curReceiver/curCtxPtr/
-// curCaptureIndex/curCaptureTy back to "no receiver, no lambda capture
-// context") to lower fn's own body from scratch, leaving fn's own fresh
+// (curFn/entryBlock/locals/loopStack/matchExprStack/destructors, plus
+// curReceiver/curCtxPtr/curCaptureIndex/curCaptureTy back to "no receiver,
+// no lambda capture context") to lower fn's own body from scratch, leaving
+// fn's own fresh
 // entry block as the builder's current insert point - the reset shape
 // genFuncBody/genConstructorBody/genDestructorBody/buildGlobalInitFn
 // (globalinit.go)/buildArgsInitFn (args.go)/genLambdaFunc (expr.go) all need,
@@ -150,6 +151,7 @@ func (g *Generator) declareExternFuncSignature(decl ast.NodeIndex) {
 func (g *Generator) beginSyntheticFunc(fn llvm.Value) (restore func()) {
 	savedFn, savedEntry, savedLocals := g.curFn, g.entryBlock, g.locals
 	savedLoopStack, savedDestructors := g.loopStack, g.destructors
+	savedMatchExprStack := g.matchExprStack
 	savedReceiver := g.curReceiver
 	savedCtxPtr, savedCaptureIndex, savedCaptureTy := g.curCtxPtr, g.curCaptureIndex, g.curCaptureTy
 
@@ -158,6 +160,7 @@ func (g *Generator) beginSyntheticFunc(fn llvm.Value) (restore func()) {
 	g.builder.SetInsertPointAtEnd(g.entryBlock)
 	g.locals = make(map[*sema.Symbol]llvm.Value)
 	g.loopStack = nil
+	g.matchExprStack = nil
 	g.destructors = nil
 	g.curReceiver = llvm.Value{}
 	g.curCtxPtr = llvm.Value{}
@@ -167,6 +170,7 @@ func (g *Generator) beginSyntheticFunc(fn llvm.Value) (restore func()) {
 	return func() {
 		g.curFn, g.entryBlock, g.locals = savedFn, savedEntry, savedLocals
 		g.loopStack, g.destructors = savedLoopStack, savedDestructors
+		g.matchExprStack = savedMatchExprStack
 		g.curReceiver = savedReceiver
 		g.curCtxPtr, g.curCaptureIndex, g.curCaptureTy = savedCtxPtr, savedCaptureIndex, savedCaptureTy
 	}
