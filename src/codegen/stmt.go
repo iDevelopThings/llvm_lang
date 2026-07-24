@@ -1096,13 +1096,14 @@ func (g *Generator) genRangeGeneratorCallbackFunc(keyNode, bodyNode ast.NodeInde
 // genScopedStmt generates n giving it the identical destructor-unwind
 // treatment a real Block gets (genBlock), whether or not n actually is one -
 // several grammar positions allow a single bare statement in place of a
-// Block (an if's own `if cond: stmt` then-branch, a for-loop's own init/post
-// clauses - all parsed via parseSimpleStmt/parseIfStmt), and a bare
+// Block (an if's own `if cond: stmt` then-branch, a for-loop's own post
+// clause - both parsed via parseSimpleStmt/parseIfStmt), and a bare
 // statement never goes through genBlock on its own: a destructor-owning
 // local declared directly in one of those positions would otherwise be
 // pushed onto Generator.destructors but never popped with a real destructor
-// call. Every one of those call sites shares this single helper rather than
-// each re-deriving the identical snapshot-before/unwind-after shape by hand.
+// call. NOT used for a for-loop's own init clause - that declaration must
+// persist across the whole loop, unwound only at the loop's own exit, a
+// genuinely different lifetime from "unwind immediately after running."
 func (g *Generator) genScopedStmt(n ast.NodeIndex) bool {
 	if g.tree.Nodes[n].Kind == enums.NodeKinds.Block {
 		return g.genBlock(n)
