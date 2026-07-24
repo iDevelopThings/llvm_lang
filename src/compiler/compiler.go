@@ -283,6 +283,14 @@ func finishPipeline(trees []*ast.Tree, diags map[*ast.Tree]*diag.Bag, infos map[
 		}
 	}
 
+	// Pin the module's data layout and target triple to the host TM before
+	// RunPasses / object emit - required for correct C ABI aggregate
+	// lowering on extern boundaries (see CODEGEN.md FFI / AOT sections).
+	td := tm.CreateTargetData()
+	mod.LLVM.SetDataLayout(td.String())
+	td.Dispose()
+	mod.LLVM.SetTarget(tm.Triple())
+
 	if optimize {
 		pbo := llvm.NewPassBuilderOptions()
 		err := mod.LLVM.RunPasses(optimizationPipeline, tm, pbo)

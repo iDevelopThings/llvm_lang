@@ -127,19 +127,6 @@ func TestExternFuncStringReturnIsError(t *testing.T) {
 	expectCheckErrors(t, src, 1)
 }
 
-func TestExternFuncStructByValueParamIsError(t *testing.T) {
-	src := "struct Point {\n" +
-		"\tx int\n" +
-		"\ty int\n\n" +
-		"\tconstructor(px int, py int) {\n" +
-		"\t\tthis.x = px\n" +
-		"\t\tthis.y = py\n" +
-		"\t}\n" +
-		"}\n" +
-		"extern func Foo(p Point) int\n"
-	expectCheckErrors(t, src, 1)
-}
-
 func TestExternFuncDynamicArrayReturnIsError(t *testing.T) {
 	src := "extern func Foo() []int\n"
 	expectCheckErrors(t, src, 1)
@@ -158,6 +145,114 @@ func TestExternFuncFuncTypeParamIsError(t *testing.T) {
 func TestExternFuncPointerToDisallowedElemIsLegal(t *testing.T) {
 	src := "extern func Foo(p *string) int\n"
 	checkSrc(t, src)
+}
+
+// --- Struct-by-value FFI safety (see LANGUAGE.md's "External functions
+// (FFI)" section): a named struct type may cross an extern signature iff
+// every field, recursively, is itself FFI-safe (isFFISafeType/
+// isFFISafeStructField, typecheck.go). ---
+
+// TestExternFuncPODStructParamIsLegal covers the base allowlist case: a
+// struct made entirely of numeric fields crosses an extern signature (both
+// as a parameter and a return type) cleanly.
+func TestExternFuncPODStructParamIsLegal(t *testing.T) {
+	src := "struct Point {\n" +
+		"\tx int\n" +
+		"\ty int\n" +
+		"}\n" +
+		"extern func Foo(p Point) Point\n"
+	checkSrc(t, src)
+}
+
+// TestExternFuncStructWithStringFieldIsError covers propagation: a struct
+// containing even one non-FFI-safe field (string's own {ptr,i32} fat
+// struct) is rejected, the same as string crossing directly.
+func TestExternFuncStructWithStringFieldIsError(t *testing.T) {
+	src := "struct Bad {\n" +
+		"\ts string\n" +
+		"}\n" +
+		"extern func Foo(b Bad) int\n"
+	expectCheckErrors(t, src, 1)
+}
+
+// TestExternFuncStructWithDynamicArrayFieldIsError mirrors the string case
+// for a dynamic-array field.
+func TestExternFuncStructWithDynamicArrayFieldIsError(t *testing.T) {
+	src := "struct Bad {\n" +
+		"\txs []int\n" +
+		"}\n" +
+		"extern func Foo(b Bad) int\n"
+	expectCheckErrors(t, src, 1)
+}
+
+// TestExternFuncStructWithFuncFieldIsError mirrors the string case for a
+// function-typed field (a fat closure pointer, not a scalar/pointer C ABI
+// shape).
+func TestExternFuncStructWithFuncFieldIsError(t *testing.T) {
+	src := "struct Bad {\n" +
+		"\tcb func(int) int\n" +
+		"}\n" +
+		"extern func Foo(b Bad) int\n"
+	expectCheckErrors(t, src, 1)
+}
+
+// TestExternFuncBareFixedArrayParamIsError covers the standalone-position
+// restriction: `[N]T` is fine as a struct field (see
+// TestExternFuncFixedArrayFieldIsLegal below) but never legal as a bare
+// parameter/return itself - a real C array parameter decays to a pointer,
+// a conversion this compiler doesn't perform implicitly.
+func TestExternFuncBareFixedArrayParamIsError(t *testing.T) {
+	src := "extern func Foo(a [4]int) int\n"
+	expectCheckErrors(t, src, 1)
+}
+
+// TestExternFuncNestedFFISafeStructIsLegal covers recursion: a struct
+// nesting another struct, itself made entirely of FFI-safe fields, is
+// FFI-safe.
+func TestExternFuncNestedFFISafeStructIsLegal(t *testing.T) {
+	src := "struct Inner {\n" +
+		"\tx int\n" +
+		"}\n" +
+		"struct Outer {\n" +
+		"\tinner Inner\n" +
+		"\ty int\n" +
+		"}\n" +
+		"extern func Foo(o Outer) int\n"
+	checkSrc(t, src)
+}
+
+// TestExternFuncNestedNonFFISafeStructIsError covers recursion propagating a
+// rejection through a nested struct exactly like a direct field would.
+func TestExternFuncNestedNonFFISafeStructIsError(t *testing.T) {
+	src := "struct Inner {\n" +
+		"\ts string\n" +
+		"}\n" +
+		"struct Outer {\n" +
+		"\tinner Inner\n" +
+		"}\n" +
+		"extern func Foo(o Outer) int\n"
+	expectCheckErrors(t, src, 1)
+}
+
+// TestExternFuncFixedArrayFieldIsLegal covers the one case a bare `[N]T`
+// param/return doesn't cover: `[N]T` as a struct *field* is FFI-safe when T
+// is, since a real C struct may legally embed an array member.
+func TestExternFuncFixedArrayFieldIsLegal(t *testing.T) {
+	src := "struct Buf {\n" +
+		"\tdata [4]i8\n" +
+		"}\n" +
+		"extern func Foo(b Buf) int\n"
+	checkSrc(t, src)
+}
+
+// TestExternFuncFixedArrayOfDisallowedElemFieldIsError covers a fixed-array
+// field itself propagating a non-FFI-safe element type's rejection.
+func TestExternFuncFixedArrayOfDisallowedElemFieldIsError(t *testing.T) {
+	src := "struct Bad {\n" +
+		"\tdata [4]string\n" +
+		"}\n" +
+		"extern func Foo(b Bad) int\n"
+	expectCheckErrors(t, src, 1)
 }
 
 // TestExternFuncNeverCalledStillChecked covers checkExternFuncDecl's own

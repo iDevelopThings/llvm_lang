@@ -22,7 +22,7 @@
 //	llvmc <file.llx>
 //	llvmc <directory>
 //	llvmc -emit-llvm <file.llx or directory>
-//	llvmc -o <output> <file.llx or directory>
+//	llvmc -o <output> [-l <lib>]... [-L <dir>]... <file.llx or directory>
 //	llvmc -no-opt <file.llx or directory>
 //
 // The -emit-llvm flag runs the exact same pipeline (including LLVM's own
@@ -51,6 +51,11 @@
 // Neither flag given keeps the default JIT-execution behavior exactly as
 // before.
 //
+// -l / -L (repeatable) append gcc-style linker search dirs and libraries to
+// that AOT link step only - required for third-party C libs that are not on
+// mingw's default import-lib set. Using either without -o is a usage error
+// (JIT/-emit-llvm never invoke the linker).
+//
 // Source file extension: this project picks ".llx" for llvm_lang source
 // files - ".ll" is already LLVM's own textual IR format's extension, and
 // reusing it here would be a real (and confusing) collision with that. The
@@ -62,9 +67,10 @@
 //
 // Exit codes:
 //   - 2: usage error - no path argument, an unrecognized flag, both -o and
-//     -emit-llvm given together, the path couldn't be resolved to a real
-//     file/directory, or its resolved directory has zero .llx files in it. A
-//     short usage message is printed to stderr; nothing is compiled.
+//     -emit-llvm given together, -l/-L without -o, the path couldn't be
+//     resolved to a real file/directory, or its resolved directory has zero
+//     .llx files in it. A short usage message is printed to stderr; nothing
+//     is compiled.
 //   - 1: a compile-time diagnostic - the lexer, parser,
 //     sema.ResolvePackage/ResolveProgram, sema.CheckProgram (src/compiler's
 //     finishPipeline always calls CheckProgram, even for a single, import-
@@ -128,7 +134,7 @@ func main() {
 // usage is the short usage message printed on any usage error, and also
 // documents the -emit-llvm/-o/-no-opt flags (see the package doc comment
 // for the full exit-code writeup).
-const usage = "usage: llvmc [-emit-llvm | -o <output>] [-no-opt] <file.llx | directory>"
+const usage = "usage: llvmc [-emit-llvm | -o <output>] [-no-opt] [-l <lib>]... [-L <dir>]... <file.llx | directory>"
 
 // run is main's testable body: it never calls os.Exit itself, so a test can
 // invoke it directly and just inspect the returned code plus whatever was
@@ -155,6 +161,15 @@ func run(args []string, stderr io.Writer) int {
 		false,
 		"skip the default LLVM optimization pipeline (default<O2>), keeping the module exactly as codegen produced it - useful for debugging",
 	)
+	var linkLibs, linkDirs []string
+	fs.Func("l", "add a library for the AOT link step (gcc -l); requires -o; repeatable", func(s string) error {
+		linkLibs = append(linkLibs, s)
+		return nil
+	})
+	fs.Func("L", "add a library search directory for the AOT link step (gcc -L); requires -o; repeatable", func(s string) error {
+		linkDirs = append(linkDirs, s)
+		return nil
+	})
 
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
@@ -169,6 +184,10 @@ func run(args []string, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "llvmc: -emit-llvm and -o are mutually exclusive")
 		return exitUsage
 	}
+	if (len(linkLibs) > 0 || len(linkDirs) > 0) && *output == "" {
+		fmt.Fprintln(stderr, "llvmc: -l and -L require -o")
+		return exitUsage
+	}
 
 	path := fs.Arg(0)
 	prog, err := loader.LoadProgram(afero.NewOsFs(), path)
@@ -179,10 +198,10 @@ func run(args []string, stderr io.Writer) int {
 
 	// Bypasses compileAndRunProgram (unchanged, still JIT-or-emit-llvm only -
 	// see its own doc comment) since only this real CLI entry point ever
-	// knows about -o/-no-opt; every in-process test still goes through
+	// knows about -o/-no-opt/-l/-L; every in-process test still goes through
 	// compileAndRun/compileAndRunPackage/compileAndRunProgram exactly as
 	// before, always with outputPath "" and optimization on.
-	return finish(compiler.CompileProgram(prog, !*noOpt), stderr, *output, *emitLLVM)
+	return finish(compiler.CompileProgram(prog, !*noOpt), stderr, *output, *emitLLVM, linkLibs, linkDirs)
 }
 
 // compileAndRun drives the full pipeline for a single source file - the
@@ -209,7 +228,7 @@ func compileAndRun(name, src string, stderr io.Writer, emitLLVM bool) int {
 // true) - only run's own real CLI entry point ever threads -no-opt through;
 // no existing test here has a specific reason to compile unoptimized.
 func compileAndRunPackage(files []loader.SourceFile, stderr io.Writer, emitLLVM bool) int {
-	return finish(compiler.CompilePackage(files, true), stderr, "", emitLLVM)
+	return finish(compiler.CompilePackage(files, true), stderr, "", emitLLVM, nil, nil)
 }
 
 // compileAndRunProgram drives the full pipeline for prog - a whole program,
@@ -223,7 +242,7 @@ func compileAndRunPackage(files []loader.SourceFile, stderr io.Writer, emitLLVM 
 // Always compiles with optimization on - see compileAndRunPackage's own
 // doc comment for why.
 func compileAndRunProgram(prog *loader.Program, stderr io.Writer, emitLLVM bool) int {
-	return finish(compiler.CompileProgram(prog, true), stderr, "", emitLLVM)
+	return finish(compiler.CompileProgram(prog, true), stderr, "", emitLLVM, nil, nil)
 }
 
 // finish is this CLI's own tail shared by compileAndRunPackage/
@@ -256,7 +275,10 @@ func compileAndRunProgram(prog *loader.Program, stderr io.Writer, emitLLVM bool)
 // exit codes, -emit-llvm's stdout dump, -o's AOT tail
 // (compileToExecutable), and JIT execution (jitRunMain) all belong here, not
 // in src/compiler.
-func finish(res *compiler.Result, stderr io.Writer, outputPath string, emitLLVM bool) int {
+//
+// linkLibs/linkDirs are the -l/-L values from run (nil/empty for in-process
+// test helpers that never AOT-link). Only meaningful when outputPath != "".
+func finish(res *compiler.Result, stderr io.Writer, outputPath string, emitLLVM bool, linkLibs, linkDirs []string) int {
 	for _, tree := range res.Trees {
 		b := res.Diags[tree]
 		if b.Len() > 0 {
@@ -272,7 +294,7 @@ func finish(res *compiler.Result, stderr io.Writer, outputPath string, emitLLVM 
 	}
 
 	if outputPath != "" {
-		return compileToExecutable(res.Module, res.TargetMachine, outputPath, stderr)
+		return compileToExecutable(res.Module, res.TargetMachine, outputPath, stderr, linkLibs, linkDirs)
 	}
 	defer res.TargetMachine.Dispose()
 
@@ -309,7 +331,9 @@ func finish(res *compiler.Result, stderr io.Writer, outputPath string, emitLLVM 
 // "External functions (FFI)" section) automatically via mingw64's standard
 // import libraries, exactly like it would for a real, hand-written C
 // program calling the same APIs - no special linking flags are needed for
-// either case.
+// either case. Third-party libs that are not on that default set need
+// explicit -L/-l (linkDirs/linkLibs), forwarded as gcc -Ldir / -llib after
+// the object and -o args (dirs before libs).
 //
 // tm is src/compiler's own Result.TargetMachine - already built once inside
 // finishPipeline (see CODEGEN.md's "Optimization pipeline" section) and
@@ -329,7 +353,7 @@ func finish(res *compiler.Result, stderr io.Writer, outputPath string, emitLLVM 
 // file for a CLI-only link step with no test needing to fake its contents,
 // immediately removed once gcc has read it - a narrow, deliberate exception,
 // not a quiet departure from that convention.
-func compileToExecutable(mod *codegen.Module, tm llvm.TargetMachine, outputPath string, stderr io.Writer) int {
+func compileToExecutable(mod *codegen.Module, tm llvm.TargetMachine, outputPath string, stderr io.Writer, linkLibs, linkDirs []string) int {
 	defer mod.Dispose()
 	defer tm.Dispose()
 
@@ -358,7 +382,14 @@ func compileToExecutable(mod *codegen.Module, tm llvm.TargetMachine, outputPath 
 		return exitCompile
 	}
 
-	link := exec.Command("gcc", objPath, "-o", outputPath)
+	linkArgs := []string{objPath, "-o", outputPath}
+	for _, dir := range linkDirs {
+		linkArgs = append(linkArgs, "-L"+dir)
+	}
+	for _, lib := range linkLibs {
+		linkArgs = append(linkArgs, "-l"+lib)
+	}
+	link := exec.Command("gcc", linkArgs...)
 	if out, err := link.CombinedOutput(); err != nil {
 		fmt.Fprintf(stderr, "llvmc: linking %s: %v\n%s", outputPath, err, out)
 		return exitCompile

@@ -23,7 +23,10 @@ import (
 //   - a first-class function value (sema.TypeFunc) is the literal (unnamed)
 //     struct {ptr, ptr} - a "fat pointer" of {fnPtr, ctxPtr} - see
 //     CODEGEN.md's "First-class functions" section and genFuncValue
-//     (expr.go) for the one construction site that fills it in.
+//     (expr.go) for the one construction site that fills it in. A bare C
+//     function pointer (sema.TypeCFunc) is just g.ptrTy alone - no ctxPtr,
+//     no fat pointer at all - see CODEGEN.md's "External functions (FFI)"
+//     section.
 //   - a dynamic array (sema.Type{Kind: TypeArray, Dynamic: true}) is the
 //     literal (unnamed) struct {ptr, i32, i32} - a data pointer, current
 //     length, and allocated capacity - following the exact same convention
@@ -87,6 +90,11 @@ func (g *Generator) llvmType(t sema.Type) llvm.Type {
 		return g.boolTy
 	case sema.TypeString:
 		return g.stringTy
+	case sema.TypeCString:
+		// A raw C string is just a pointer at the ABI level - no length
+		// field, unlike TypeString's {ptr, i32} (see LANGUAGE.md's
+		// "External functions (FFI)" section).
+		return g.ptrTy
 	case sema.TypeVoid:
 		return g.voidTy
 	case sema.TypeStruct:
@@ -100,6 +108,12 @@ func (g *Generator) llvmType(t sema.Type) llvm.Type {
 		return llvm.ArrayType(g.llvmType(*t.Elem), int(t.Size))
 	case sema.TypeFunc:
 		return g.funcValTy
+	case sema.TypeCFunc:
+		// A bare C function pointer (see LANGUAGE.md's "External functions
+		// (FFI)" section) - a single opaque `ptr`, unlike TypeFunc's own
+		// {fnPtr, ctxPtr} fat pointer above: there is no capture context at
+		// all, so g.ptrTy alone is sema.TypeCFunc's exact real representation.
+		return g.ptrTy
 	case sema.TypeMultiReturn:
 		// A multi-return function's real LLVM signature returns an anonymous
 		// struct {T1, T2, ...} - exactly the same "return a struct by value"

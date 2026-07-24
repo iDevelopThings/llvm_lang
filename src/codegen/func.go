@@ -134,31 +134,50 @@ func (g *Generator) declareFuncSignature(decl ast.NodeIndex) {
 //
 // Stores into the exact same g.funcs map declareFuncSignature does, keyed by
 // the identical sym (both declare a SymFunc symbol - see resolve.go's
-// declareExternFunc) - every call-site (genFuncCall, isDirectFuncCall,
-// genFuncValue/genFuncThunk) reads this map with zero awareness of which of
-// the two declare*Signature functions actually populated a given entry.
+// declareExternFunc) - every direct-call site (genFuncCall, isDirectFuncCall)
+// reads this map with zero awareness of which of the two declare*Signature
+// functions actually populated a given entry. A struct-by-value parameter/
+// return uses externParamType/externReturnType (ffi.go) rather than
+// g.llvmType directly - the real Windows x64 ABI shape, which genFuncCall's
+// own coerceExternArg/sretReturn handling then adapts a plain struct-typed
+// SSA value to/from at each call site (see ffi.go's own doc comment for why
+// this diverges from g.llvmType at all). This ABI coercion is genFuncCall-
+// only: a bare reference to a struct-by-value extern func, then called
+// indirectly through genFuncThunk/genIndirectCallValue, is not covered (see
+// DECISIONS.md's dated entry) - out of scope for this round, since
+// LANGUAGE.md's only documented extern-func calling form is a direct call.
 func (g *Generator) declareExternFuncSignature(decl ast.NodeIndex) {
 	nameNode := g.tree.ExternFuncName(decl)
 	paramListNode := g.tree.ExternFuncParamList(decl)
 	returnTypeNode := g.tree.ExternFuncReturnType(decl)
 	sym := g.info.Refs[nameNode]
 
-	var paramTypes []llvm.Type
-	for _, paramNode := range g.tree.Children(paramListNode) {
-		paramTypes = append(paramTypes, g.llvmType(g.info.Types[g.tree.Child(paramNode, 1)]))
-	}
-
 	retType := sema.Type{Kind: sema.TypeVoid}
 	if returnTypeNode != ast.InvalidNode {
 		retType = g.info.Types[returnTypeNode]
 	}
+	llvmRetType, sretReturn := g.externReturnType(retType)
 
-	fnType := llvm.FunctionType(g.llvmType(retType), paramTypes, false)
+	var paramTypes []llvm.Type
+	if sretReturn {
+		paramTypes = append(paramTypes, g.ptrTy)
+	}
+	for _, paramNode := range g.tree.Children(paramListNode) {
+		paramTypes = append(paramTypes, g.externParamType(g.info.Types[g.tree.Child(paramNode, 1)]))
+	}
+
+	fnType := llvm.FunctionType(llvmRetType, paramTypes, false)
+	fn := llvm.AddFunction(g.mod, g.tree.Text(nameNode), fnType)
+	if sretReturn {
+		sretAttr := g.ctx.CreateTypeAttribute(llvm.AttributeKindID("sret"), g.llvmType(retType))
+		fn.AddAttributeAtIndex(1, sretAttr)
+	}
 	g.funcs[sym] = funcEntry{
-		fn:       llvm.AddFunction(g.mod, g.tree.Text(nameNode), fnType),
-		fnType:   fnType,
-		retType:  retType,
-		isMethod: false,
+		fn:         fn,
+		fnType:     fnType,
+		retType:    retType,
+		isMethod:   false,
+		sretReturn: sretReturn,
 	}
 }
 

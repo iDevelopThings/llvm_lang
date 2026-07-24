@@ -119,3 +119,100 @@ func main() int {
 		t.Errorf("expected a plain default-linkage `declare i32 @abs(i32)`, got:\n%s", jm.ir)
 	}
 }
+
+// --- Struct-by-value FFI (see LANGUAGE.md's "External functions (FFI)"
+// section): a POD struct type may cross an extern signature - sema's own
+// isFFISafeType already rejected anything else before this point, so
+// codegen just needs g.llvmType's existing struct lowering to reach the
+// declare/call unchanged (declareExternFuncSignature/genFuncCall took no
+// code changes for this feature at all - see DECISIONS.md). ---
+
+// TestExternFuncStructByValueParamAndReturnCoercesToInteger covers
+// declareExternFuncSignature's own Windows x64 ABI classification (ffi.go's
+// externParamType/externReturnType): an 8-byte, two-i32-field struct is
+// coerced to a plain i64 at both a parameter and the return position,
+// rather than declared with its own raw (2-field) LLVM struct type - the
+// shape LLVM's default aggregate-argument lowering would otherwise flatten
+// into two independent i32 slots, silently wrong against a real C callee
+// (see DECISIONS.md's dated entry). No JIT execution here, just the
+// generated declaration shape (an unresolved extern symbol would fail were
+// this test to actually call it) - the real end-to-end proof is cmd/llvmc's
+// AOT TestBinary_AOT_LinkLibStructByValue instead.
+func TestExternFuncStructByValueParamAndReturnCoercesToInteger(t *testing.T) {
+	jm := compileAndJIT(t, `
+struct Point {
+	x int
+	y int
+}
+
+extern func MakePoint(x int, y int) Point
+extern func SumPoint(p Point) int
+
+func main() int {
+	return 0
+}
+`)
+	if !strings.Contains(jm.ir, "declare i64 @MakePoint(i32, i32)") {
+		t.Errorf("expected `declare i64 @MakePoint(i32, i32)`, got:\n%s", jm.ir)
+	}
+	if !strings.Contains(jm.ir, "declare i32 @SumPoint(i64)") {
+		t.Errorf("expected `declare i32 @SumPoint(i64)`, got:\n%s", jm.ir)
+	}
+}
+
+// TestExternFuncLargeStructByValueParamAndReturnPassesByReference covers the
+// other half of the classification: a struct too large (or the wrong size)
+// to coerce to an integer gets a hidden sret return slot and an indirect
+// (pointer) parameter instead - the real Windows x64 "otherwise pass by
+// reference" rule (see ffi.go's externReturnType).
+func TestExternFuncLargeStructByValueParamAndReturnPassesByReference(t *testing.T) {
+	jm := compileAndJIT(t, `
+struct Triple {
+	x int
+	y int
+	z int
+}
+
+extern func MakeTriple(x int, y int, z int) Triple
+extern func SumTriple(t Triple) int
+
+func main() int {
+	return 0
+}
+`)
+	if !strings.Contains(jm.ir, "declare void @MakeTriple(ptr sret(%Triple), i32, i32, i32)") {
+		t.Errorf("expected a sret-return `declare void @MakeTriple(ptr sret(%%Triple), i32, i32, i32)`, got:\n%s", jm.ir)
+	}
+	if !strings.Contains(jm.ir, "declare i32 @SumTriple(ptr)") {
+		t.Errorf("expected an indirect-param `declare i32 @SumTriple(ptr)`, got:\n%s", jm.ir)
+	}
+}
+
+// TestExternFuncNestedStructByValueCallLowersFieldByField covers a
+// language-to-language call passing/returning the identical struct type an
+// extern signature also uses - proving the intra-module struct-by-value
+// path (genCompositeLitInto/genFuncCall) stays completely unaffected: this
+// feature only ever widens what sema.checkExternType accepts, codegen's own
+// struct lowering needed no changes at all.
+func TestExternFuncNestedStructByValueCallLowersFieldByField(t *testing.T) {
+	jm := compileAndJIT(t, `
+struct Point {
+	x int
+	y int
+}
+
+extern func SumPoint(p Point) int
+
+func makeLocal() Point {
+	return Point{3, 4}
+}
+
+func main() int {
+	p := makeLocal()
+	return p.x + p.y
+}
+`)
+	if got := jm.runInt32(t, "main"); got != 7 {
+		t.Errorf("main() = %d, want 7", got)
+	}
+}

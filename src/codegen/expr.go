@@ -645,6 +645,14 @@ func (g *Generator) genExpr(n ast.NodeIndex) llvm.Value {
 		// still goes through the ordinary addr+load path.
 		switch sym := g.info.Refs[n]; sym.Kind {
 		case sema.SymFunc:
+			if g.info.Types[n].Kind == sema.TypeCFunc {
+				// A top-level func/extern func reference converted to
+				// cfunc (checkFuncToCFuncConversion, sema/typecheck.go) -
+				// sym's own real function address, never a thunk (see
+				// LANGUAGE.md's "External functions (FFI)" section: a
+				// cfunc value has no capture context to thunk through).
+				return g.funcs[sym].fn
+			}
 			return g.genFuncValue(sym)
 		case sema.SymBuiltinValue:
 			return llvm.ConstNull(g.ptrTy)
@@ -1118,6 +1126,8 @@ func (g *Generator) genCallExpr(n ast.NodeIndex) llvm.Value {
 		return g.genMethodCall(calleeNode, argNodes)
 	case g.isDirectFuncCall(calleeNode):
 		return g.genFuncCall(calleeNode, argNodes)
+	case g.isCFuncCall(calleeNode):
+		return g.genCFuncCall(calleeNode, argNodes)
 	default:
 		return g.genIndirectCall(calleeNode, argNodes)
 	}
@@ -1182,6 +1192,69 @@ func (g *Generator) isDirectFuncCall(calleeNode ast.NodeIndex) bool {
 	}
 	sym, ok := g.info.Refs[calleeNode]
 	return ok && sym.Kind == sema.SymFunc && sym.Decl != ast.InvalidNode
+}
+
+// isCFuncCall reports whether calleeNode's own already-resolved sema.Type
+// is TypeCFunc - a bare C function pointer value (see LANGUAGE.md's
+// "External functions (FFI)" section), called with real C-ABI marshaling
+// (genCFuncCall) and no ctxPtr at all, unlike an ordinary func-typed
+// value's fat-pointer indirect call (genIndirectCall). Checked after
+// isDirectFuncCall in genCallExpr's own dispatch since a direct call to a
+// top-level FuncDecl/ExternFuncDecl never gets a TypeCFunc callee Type in
+// the first place (funcSigForCall's own direct-call branch, sema/
+// typecheck.go, never runs checkValueExpr on that shape of callee at all).
+func (g *Generator) isCFuncCall(calleeNode ast.NodeIndex) bool {
+	return g.info.Types[calleeNode].Kind == sema.TypeCFunc
+}
+
+// genCFuncCall lowers a call through a cfunc-typed value: calleeNode's own
+// value IS the real, bare C function pointer already (llvmType's TypeCFunc
+// case) - no fat pointer, no ctxPtr to extract or pass, unlike
+// genIndirectCall. Parameter/return types get the identical Windows x64
+// ABI coercion a direct extern func call already gets (ffi.go's
+// externParamType/externReturnType/coerceExternArg/bitcastThroughMemory) -
+// a cfunc value is always either a real extern func's own address or an
+// ordinary top-level func's (checkFuncToCFuncConversion, sema/typecheck.go,
+// already rejected the one shape - an ordinary FuncDecl with a struct-by-
+// value parameter/return - where the two conventions would disagree).
+func (g *Generator) genCFuncCall(calleeNode ast.NodeIndex, argNodes []ast.NodeIndex) llvm.Value {
+	calleeType := g.info.Types[calleeNode]
+	fnPtr := g.genExpr(calleeNode)
+
+	declaredParams := make([]llvm.Type, len(calleeType.Params))
+	for i, pt := range calleeType.Params {
+		declaredParams[i] = g.externParamType(pt)
+	}
+	retType, sretReturn := g.externReturnType(*calleeType.Return)
+
+	fnParamTypes := declaredParams
+	paramOffset := 0
+	var sretSlot llvm.Value
+	if sretReturn {
+		fnParamTypes = append([]llvm.Type{g.ptrTy}, declaredParams...)
+		sretSlot = g.builder.CreateAlloca(g.llvmType(*calleeType.Return), "")
+		paramOffset = 1
+	}
+	fnType := llvm.FunctionType(retType, fnParamTypes, false)
+
+	args := make([]llvm.Value, len(argNodes)+paramOffset)
+	if sretReturn {
+		args[0] = sretSlot
+	}
+	for i, a := range argNodes {
+		args[i+paramOffset] = g.coerceExternArg(g.genExpr(a), declaredParams[i])
+	}
+
+	result := g.builder.CreateCall(fnType, fnPtr, args, "")
+	if sretReturn {
+		return g.builder.CreateLoad(g.llvmType(*calleeType.Return), sretSlot, "")
+	}
+	if calleeType.Return.Kind == sema.TypeStruct {
+		if natural := g.llvmType(*calleeType.Return); result.Type() != natural {
+			return g.bitcastThroughMemory(result, natural)
+		}
+	}
+	return result
 }
 
 // genIndirectCall lowers a call through a function-typed value - a
@@ -1348,18 +1421,18 @@ func (g *Generator) isConversionCall(calleeNode ast.NodeIndex) bool {
 	return ok && sym.Kind == sema.SymBuiltinType
 }
 
-// genConversion lowers a validated numeric conversion `T(x)`: sema has
-// already confirmed both the argument's and the call's own (target) types
-// are numeric and recorded the target as the CallExpr node's own Type in
-// info.Types (checkConversionCall), so this reads both ends straight out of
-// info.Types with no re-derivation of its own. A same-Kind "conversion"
+// genConversion lowers a validated conversion `T(x)`: either a numeric
+// conversion or one of the two dedicated cstring<->string FFI crossings
+// (checkConversionCall, sema/typecheck.go) - both ends are read straight out
+// of info.Types with no re-derivation of their own. A same-Kind "conversion"
 // (`i32(someI32Value)`) passes the value through unchanged rather than
-// emitting a pointless instruction; otherwise the correct LLVM conversion
-// instruction is chosen for the source/target pair - sign-extend for a
-// wider integer, truncate for a narrower one (every integer here is signed -
-// see AGENTS.md's Types section), int-to-float/float-to-int via
-// CreateSIToFP/CreateFPToSI, and extend/truncate between float widths via
-// CreateFPExt/CreateFPTrunc.
+// emitting a pointless instruction; otherwise the correct lowering is chosen
+// for the source/target pair - sign-extend for a wider integer, truncate for
+// a narrower one (every integer here is signed - see AGENTS.md's Types
+// section), int-to-float/float-to-int via CreateSIToFP/CreateFPToSI,
+// extend/truncate between float widths via CreateFPExt/CreateFPTrunc, or
+// genStringToCString/genCStringToString (runtime.go) for the two FFI
+// crossings.
 func (g *Generator) genConversion(n, argNode ast.NodeIndex) llvm.Value {
 	from := g.info.Types[argNode]
 	to := g.info.Types[n]
@@ -1368,6 +1441,14 @@ func (g *Generator) genConversion(n, argNode ast.NodeIndex) llvm.Value {
 	if from.Kind == to.Kind {
 		return v
 	}
+
+	switch {
+	case to.Kind == sema.TypeCString && from.Kind == sema.TypeString:
+		return g.genStringToCString(argNode, v)
+	case to.Kind == sema.TypeString && from.Kind == sema.TypeCString:
+		return g.genCStringToString(v)
+	}
+
 	toLLT := g.llvmType(to)
 
 	switch {
@@ -1390,14 +1471,50 @@ func (g *Generator) genConversion(n, argNode ast.NodeIndex) llvm.Value {
 	}
 }
 
+// genFuncCall lowers a direct call to a free function or extern func
+// (isDirectFuncCall) - identical for both until entry.fnType's own declared
+// param/return types diverge from g.llvmType's "natural" ones, which only
+// ever happens for an extern func's own struct-by-value parameter/return
+// (see ffi.go's own doc comment for why, and DECISIONS.md's dated entry for
+// what this scopes out: an ordinary call's declared and natural types are
+// always identical, so every branch below is a no-op there).
 func (g *Generator) genFuncCall(calleeNode ast.NodeIndex, argNodes []ast.NodeIndex) llvm.Value {
 	sym := g.info.Refs[calleeNode]
 	entry := g.funcs[sym]
-	args := make([]llvm.Value, len(argNodes))
-	for i, a := range argNodes {
-		args[i] = g.genExpr(a)
+
+	declaredParams := entry.fnType.ParamTypes()
+	paramOffset := 0
+	var sretSlot llvm.Value
+	if entry.sretReturn {
+		sretSlot = g.builder.CreateAlloca(g.llvmType(entry.retType), "")
+		paramOffset = 1
 	}
-	return g.builder.CreateCall(entry.fnType, entry.fn, args, "")
+
+	args := make([]llvm.Value, len(argNodes)+paramOffset)
+	if entry.sretReturn {
+		args[0] = sretSlot
+	}
+	for i, a := range argNodes {
+		args[i+paramOffset] = g.coerceExternArg(g.genExpr(a), declaredParams[i+paramOffset])
+	}
+
+	result := g.builder.CreateCall(entry.fnType, entry.fn, args, "")
+	if entry.sretReturn {
+		return g.builder.CreateLoad(g.llvmType(entry.retType), sretSlot, "")
+	}
+	// Only an extern func's own struct return is ever coerced away from its
+	// natural LLVM shape (see ffi.go's externReturnType) - deliberately
+	// scoped to TypeStruct rather than a blanket type-mismatch check: an
+	// async function's real LLVM return (the llvm.coro.begin handle, a ptr)
+	// and its declared retType (void this round) intentionally diverge for
+	// a completely unrelated reason (see declareFuncSignature) and must
+	// never hit this path.
+	if entry.retType.Kind == sema.TypeStruct {
+		if natural := g.llvmType(entry.retType); result.Type() != natural {
+			return g.bitcastThroughMemory(result, natural)
+		}
+	}
+	return result
 }
 
 // genMethodCall lowers `p.move(...)`: the receiver's address (not its

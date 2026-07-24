@@ -391,6 +391,71 @@ func (g *Generator) constStringValue(text string) llvm.Value {
 	}, false)
 }
 
+// genStringToCString lowers `cstring(s)` (see genConversion, expr.go): s's
+// bytes must be NUL-terminated to be a valid C string, but a language
+// string's own {ptr, i32} never guarantees that. A string literal argument
+// is the one exception - constStringValue already builds it via
+// defineCString, which always appends a NUL - so that case just reuses the
+// literal's own pointer directly rather than paying for a redundant
+// arena-copy. Every other case (a variable, a concatenation result, ...)
+// arena-allocates len+1 bytes, memcpy's the len real bytes in, and writes
+// the trailing NUL itself.
+func (g *Generator) genStringToCString(argNode ast.NodeIndex, v llvm.Value) llvm.Value {
+	if g.tree.Nodes[argNode].Kind == enums.NodeKinds.StringLit {
+		return g.builder.CreateExtractValue(v, 0, "")
+	}
+
+	ptr := g.builder.CreateExtractValue(v, 0, "")
+	length := g.builder.CreateExtractValue(v, 1, "")
+	lengthSize := g.builder.CreateZExt(length, g.i64Ty, "")
+	totalSize := g.builder.CreateAdd(lengthSize, llvm.ConstInt(g.i64Ty, 1, false), "")
+
+	buf := g.genArenaAlloc(totalSize)
+	g.builder.CreateCall(g.memcpyType, g.memcpyFn, []llvm.Value{buf, ptr, lengthSize}, "")
+	nulAddr := g.builder.CreateInBoundsGEP(g.i8Ty, buf, []llvm.Value{length}, "")
+	g.builder.CreateStore(llvm.ConstInt(g.i8Ty, 0, false), nulAddr)
+	return buf
+}
+
+// genCStringToString lowers `string(cs)` (see genConversion, expr.go): a
+// real libc strlen call (mirroring buildArgsInitFn's identical convention,
+// args.go) finds the C string's length, then its bytes are arena-copied
+// into a fresh language string - a copy, not a borrow, so the result stays
+// valid even if the C buffer cs points at is freed or overwritten later.
+func (g *Generator) genCStringToString(v llvm.Value) llvm.Value {
+	strlenType, strlenFn := g.strlenExtern()
+	length64 := g.builder.CreateCall(strlenType, strlenFn, []llvm.Value{v}, "")
+	buf := g.genArenaAlloc(length64)
+	g.builder.CreateCall(g.memcpyType, g.memcpyFn, []llvm.Value{buf, v, length64}, "")
+	length32 := g.builder.CreateTrunc(length64, g.i32Ty, "")
+
+	result := llvm.Undef(g.stringTy)
+	result = g.builder.CreateInsertValue(result, buf, 0, "")
+	result = g.builder.CreateInsertValue(result, length32, 1, "")
+	return result
+}
+
+// strlenExtern returns this module's single "strlen" declaration - reusing
+// one that already exists (a user's own `extern func strlen(...)`, or an
+// earlier call to this same method from either of its two callers,
+// genCStringToString above or buildArgsInitFn, args.go) rather than ever
+// adding a second declaration of the same symbol name, which LLVM would
+// silently rename (e.g. to "strlen.1") to avoid the collision - a real
+// symbol the JIT/linker can never actually resolve, unlike the genuine
+// "strlen" it was meant to call.
+func (g *Generator) strlenExtern() (llvm.Type, llvm.Value) {
+	if !g.strlenFn.IsNil() {
+		return g.strlenType, g.strlenFn
+	}
+	g.strlenType = llvm.FunctionType(g.i64Ty, []llvm.Type{g.ptrTy}, false)
+	if existing := g.mod.NamedFunction("strlen"); !existing.IsNil() {
+		g.strlenFn = existing
+	} else {
+		g.strlenFn = llvm.AddFunction(g.mod, "strlen", g.strlenType)
+	}
+	return g.strlenType, g.strlenFn
+}
+
 // genStringConcat implements `+` (and `+=`) on two already-evaluated string
 // values: ask the arena (setupArena/genArenaAlloc) for a buffer sized to fit
 // both, memcpy each operand's bytes into it in order, and build the
