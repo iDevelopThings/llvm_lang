@@ -39,11 +39,7 @@ func (w *Workspace) Hover(path string, pos protocol.Position) *protocol.Hover {
 		return nil
 	}
 
-	span := fa.Tree.SpanOf(n)
-	rng := protocol.Range{
-		Start: byteOffsetToPosition(fa.Tree.File, span.Start),
-		End:   byteOffsetToPosition(fa.Tree.File, span.End),
-	}
+	rng := spanToRange(fa.Tree.File, fa.Tree.SpanOf(n))
 	return &protocol.Hover{
 		Contents: protocol.MarkupContent{
 			Kind:  protocol.MarkupKindMarkdown,

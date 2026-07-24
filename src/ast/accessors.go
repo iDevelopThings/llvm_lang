@@ -505,3 +505,27 @@ func stripCommentMarkers(text string) string {
 		return text
 	}
 }
+
+// IsAssignmentTarget reports whether n is itself the direct target of a
+// plain assignment (AssignStmt, MultiAssignStmt) or increment/decrement
+// (IncDecStmt) - not merely nested somewhere inside one: `p.field = v`'s own
+// "p" is not itself a target (the whole MemberExpr "p.field" is), and this
+// only ever reports true for n exactly at that outer position.
+func (t *Tree) IsAssignmentTarget(n NodeIndex) bool {
+	parent := t.Parent(n)
+	if parent == InvalidNode {
+		return false
+	}
+	switch t.Nodes[parent].Kind {
+	case enums.NodeKinds.AssignStmt,
+		enums.NodeKinds.IncDecStmt:
+		return t.Child(parent, 0) == n
+	case enums.NodeKinds.MultiAssignStmt:
+		for _, target := range t.MultiAssignStmtTargets(parent) {
+			if target == n {
+				return true
+			}
+		}
+	}
+	return false
+}

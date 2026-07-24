@@ -47,13 +47,9 @@ func (w *Workspace) References(path string, pos protocol.Position, includeDeclar
 			if !includeDeclaration && other.Tree == sym.Tree && refNode == declNameNode {
 				continue
 			}
-			span := other.Tree.SpanOf(refNode)
 			locs = append(locs, protocol.Location{
-				URI: URIFromPath(other.Tree.File.Name),
-				Range: protocol.Range{
-					Start: byteOffsetToPosition(other.Tree.File, span.Start),
-					End:   byteOffsetToPosition(other.Tree.File, span.End),
-				},
+				URI:   URIFromPath(other.Tree.File.Name),
+				Range: spanToRange(other.Tree.File, other.Tree.SpanOf(refNode)),
 			})
 		}
 	}

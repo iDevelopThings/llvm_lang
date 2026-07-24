@@ -1,6 +1,7 @@
 package lsp
 
 import (
+	"llvm_lang/src/ast"
 	"llvm_lang/src/lexer"
 
 	protocol "github.com/tliron/glsp/protocol_3_16"
@@ -59,4 +60,14 @@ func utf16Len(s string) int {
 // second version of the same conversion in the opposite direction.
 func positionToByteOffset(src string, pos protocol.Position) lexer.Pos {
 	return lexer.Pos(pos.IndexIn(src))
+}
+
+// spanToRange converts an ast.Span (byte offsets) to a protocol.Range
+// (UTF-16 positions) - the "build a Range for this node's span" idiom
+// every request handler that returns a Location/Hover/DocumentSymbol needs.
+func spanToRange(file *lexer.File, span ast.Span) protocol.Range {
+	return protocol.Range{
+		Start: byteOffsetToPosition(file, span.Start),
+		End:   byteOffsetToPosition(file, span.End),
+	}
 }

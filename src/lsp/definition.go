@@ -51,13 +51,9 @@ func (w *Workspace) Definition(path string, pos protocol.Position) *protocol.Loc
 	if target == ast.InvalidNode {
 		target = sym.Decl
 	}
-	declSpan := sym.Tree.SpanOf(target)
 	return &protocol.Location{
-		URI: URIFromPath(sym.Tree.File.Name),
-		Range: protocol.Range{
-			Start: byteOffsetToPosition(sym.Tree.File, declSpan.Start),
-			End:   byteOffsetToPosition(sym.Tree.File, declSpan.End),
-		},
+		URI:   URIFromPath(sym.Tree.File.Name),
+		Range: spanToRange(sym.Tree.File, sym.Tree.SpanOf(target)),
 	}
 }
 

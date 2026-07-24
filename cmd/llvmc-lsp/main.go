@@ -60,6 +60,9 @@ func main() {
 		TextDocumentDeclaration:         declaration,
 		TextDocumentDefinition:          definition,
 		TextDocumentReferences:          references,
+		TextDocumentDocumentHighlight:   documentHighlight,
+		TextDocumentDocumentSymbol:      documentSymbol,
+		TextDocumentFoldingRange:        foldingRange,
 		TextDocumentSemanticTokensFull:  semanticTokensFull,
 	}
 
@@ -249,6 +252,30 @@ func references(context *glsp.Context, params *protocol.ReferenceParams) ([]prot
 		return nil, err
 	}
 	return workspace.References(path, params.Position, params.Context.IncludeDeclaration), nil
+}
+
+func documentHighlight(context *glsp.Context, params *protocol.DocumentHighlightParams) ([]protocol.DocumentHighlight, error) {
+	path, err := lsp.PathFromURI(params.TextDocument.URI)
+	if err != nil {
+		return nil, err
+	}
+	return workspace.DocumentHighlight(path, params.Position), nil
+}
+
+func documentSymbol(context *glsp.Context, params *protocol.DocumentSymbolParams) (any, error) {
+	path, err := lsp.PathFromURI(params.TextDocument.URI)
+	if err != nil {
+		return nil, err
+	}
+	return workspace.DocumentSymbols(path), nil
+}
+
+func foldingRange(context *glsp.Context, params *protocol.FoldingRangeParams) ([]protocol.FoldingRange, error) {
+	path, err := lsp.PathFromURI(params.TextDocument.URI)
+	if err != nil {
+		return nil, err
+	}
+	return workspace.FoldingRanges(path), nil
 }
 
 func semanticTokensFull(context *glsp.Context, params *protocol.SemanticTokensParams) (*protocol.SemanticTokens, error) {
