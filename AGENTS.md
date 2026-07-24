@@ -192,6 +192,50 @@ switch t.Lexeme {
 
 
 
+### Comments **IMPORTANT**
+
+Comments have been trending steadily longer and more elaborate as the
+project has grown - each new round tends to match the surrounding file's
+existing comment density, which then ratchets it up further next round.
+Pull this back deliberately, on every edit, not just when writing new code:
+
+- State the non-obvious fact in one or two sentences. Don't narrate the
+  full provenance of how execution reaches this line (which caller, via
+  which dispatch, guaranteed by which other function, proven by which
+  test) when a single short cross-reference already lets a reader chase it
+  down themselves.
+- Don't chain more than one "see X" per comment. Pick the single most
+  useful pointer, not three.
+- Never explain the same fact twice in two nearby places (e.g. a long
+  rationale at a call site *and* an equally long one on the function it
+  calls). Put it in exactly one place - normally the function/type's own
+  doc comment - and have every other site reference it briefly.
+- If deleting the comment would leave a future reader confused about a
+  hidden constraint or a subtle *why*, keep a short version. If it would
+  just remove restated *what* the adjacent code already makes obvious,
+  delete it.
+
+Bad:
+```go
+case enums.NodeKinds.MatchStmt:
+    // A MatchStmt node reached HERE - via checkExpr/inferExpr's own
+    // dispatch - is always the expression-position flavor (see
+    // ast.Node's own MatchStmt doc comment): a bare statement-position
+    // `match x {...}` is dispatched by checkStmt directly to
+    // checkMatchStmt, never by way of checkExpr at all (parseStmt's own
+    // keyword-first dispatch guarantees the two surface forms produce
+    // genuinely different call paths - see parser/stmt.go's own
+    // parseStmt doc comment, and the regression test proving it).
+    return c.checkMatchExprStmt(n)
+```
+Good:
+```go
+case enums.NodeKinds.MatchStmt:
+    // Always expression-position here - statement-position match is
+    // dispatched by checkStmt directly, never through checkExpr.
+    return c.checkMatchExprStmt(n)
+```
+
 ## Parser
 
 `src/parser` is split by concern, not dumped into one file:
