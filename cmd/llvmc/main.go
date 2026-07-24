@@ -24,6 +24,7 @@
 //	llvmc -emit-llvm <file.llx or directory>
 //	llvmc [-l <lib>]... [-L <dir>]... <file.llx or directory>
 //	llvmc -o <output> [-l <lib>]... [-L <dir>]... <file.llx or directory>
+//	llvmc -watch [-init Name] [-tick Name] [-l <lib>]... [-L <dir>]... <file.llx or directory>
 //	llvmc -no-opt <file.llx or directory>
 //
 // The -emit-llvm flag runs the exact same pipeline (including LLVM's own
@@ -57,6 +58,12 @@
 // real .dll or static .a/.lib under the -L dirs and attaches ORC search
 // generators (see CODEGEN.md / bindExtraLibraries). Using either with
 // -emit-llvm is a usage error (IR dump never loads libraries).
+//
+// -watch keeps one LLJIT instance alive and reloads the user module on
+// source change (ORC ResourceTracker swap). It calls optional Init (void)
+// after each successful load, then loops on Tick (default Frame) which must
+// return int: 0 continues, non-zero stops the process with that exit code.
+// main is unused. Mutually exclusive with -o / -emit-llvm. See CODEGEN.md.
 //
 // Source file extension: this project picks ".llx" for llvm_lang source
 // files - ".ll" is already LLVM's own textual IR format's extension, and
@@ -137,7 +144,7 @@ func main() {
 // usage is the short usage message printed on any usage error, and also
 // documents the -emit-llvm/-o/-no-opt flags (see the package doc comment
 // for the full exit-code writeup).
-const usage = "usage: llvmc [-emit-llvm | -o <output>] [-no-opt] [-l <lib>]... [-L <dir>]... <file.llx | directory>"
+const usage = "usage: llvmc [-emit-llvm | -o <output> | -watch] [-init Name] [-tick Name] [-no-opt] [-l <lib>]... [-L <dir>]... <file.llx | directory>"
 
 // run is main's testable body: it never calls os.Exit itself, so a test can
 // invoke it directly and just inspect the returned code plus whatever was
@@ -158,6 +165,21 @@ func run(args []string, stderr io.Writer) int {
 		"o",
 		"",
 		"compile to a standalone native executable at this path instead of JIT-executing or emitting LLVM IR",
+	)
+	watch := fs.Bool(
+		"watch",
+		false,
+		"hot-reload JIT: persistent LLJIT, call Init then loop on Tick (default Frame); reload on source change",
+	)
+	initName := fs.String(
+		"init",
+		"Init",
+		"with -watch: void entry called after each successful load (empty string skips); default Init",
+	)
+	tickName := fs.String(
+		"tick",
+		"Frame",
+		"with -watch: int entry called each loop iteration (0=continue, non-zero=exit); default Frame",
 	)
 	noOpt := fs.Bool(
 		"no-opt",
@@ -183,8 +205,30 @@ func run(args []string, stderr io.Writer) int {
 		return exitUsage
 	}
 
+	initSet, tickSet := false, false
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "init":
+			initSet = true
+		case "tick":
+			tickSet = true
+		}
+	})
+
 	if *emitLLVM && *output != "" {
 		fmt.Fprintln(stderr, "llvmc: -emit-llvm and -o are mutually exclusive")
+		return exitUsage
+	}
+	if *watch && (*emitLLVM || *output != "") {
+		fmt.Fprintln(stderr, "llvmc: -watch cannot be used with -emit-llvm or -o")
+		return exitUsage
+	}
+	if (initSet || tickSet) && !*watch {
+		fmt.Fprintln(stderr, "llvmc: -init and -tick require -watch")
+		return exitUsage
+	}
+	if *watch && *tickName == "" {
+		fmt.Fprintln(stderr, "llvmc: -tick cannot be empty")
 		return exitUsage
 	}
 	if (len(linkLibs) > 0 || len(linkDirs) > 0) && *emitLLVM {
@@ -197,6 +241,19 @@ func run(args []string, stderr io.Writer) int {
 	}
 
 	path := fs.Arg(0)
+
+	if *watch {
+		return runWatch(watchConfig{
+			EntryPath:    path,
+			Optimize:     !*noOpt,
+			LinkLibs:     linkLibs,
+			LinkDirs:     linkDirs,
+			InitName:     *initName,
+			TickName:     *tickName,
+			InitRequired: initSet && *initName != "",
+		}, stderr)
+	}
+
 	prog, err := loader.LoadProgram(afero.NewOsFs(), path)
 	if err != nil {
 		fmt.Fprintf(stderr, "llvmc: %v\n", err)
