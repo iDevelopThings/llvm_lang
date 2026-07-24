@@ -2550,6 +2550,33 @@ hermetic.
 Confirmed by `TestBinary_JIT_LinkLibStatic`, `TestBinary_JIT_LinkLibDLL`,
 and `TestRun_JIT_MissingLibrary`.
 
+## `-watch`: hot-reload JIT
+
+`llvmc -watch [-init Name] [-tick Name] …` keeps one LLJIT instance alive
+(with `-l`/`-L` generators bound once) and reloads the user module when any
+loaded `.llx` file's mtime/size changes:
+
+1. Compile via `loader.LoadProgram` + `compiler.CompileProgram`.
+2. Add the module under a fresh ORC `ResourceTracker`
+   (`AddLLVMIRModuleWithRT`); previous tracker is `Remove`d first so symbol
+   names don't clash.
+3. Run `llvm_lang.global_init`, then optional Init (void; default name
+   `Init`, skipped if absent unless `-init` was set explicitly).
+4. Loop calling Tick (default `Frame`), which must return `int`: `0`
+   continues, non-zero exits the process with that code.
+
+`main` is unused under `-watch`. Mutually exclusive with `-o` /
+`-emit-llvm`. A compile failure after a successful load prints diagnostics
+and keeps the last-good module; the next successful edit swaps in the new
+one and runs Init again (reset-on-reload). Host libraries stay loaded across
+reloads. Arena memory is still process-lifetime (see `BLOCKERS.md`) - it
+grows across reloads in v1. Tick should pace itself (e.g. vsync inside
+Frame); the driver loops as fast as Tick returns. Stdout is set unbuffered
+so `print` is visible while the process stays up.
+
+Confirmed by `TestBinary_Watch_TickExit`, `TestBinary_Watch_Reload`, and
+`TestBinary_Watch_LastGoodOnError`.
+
 ## Source file extension: `.llx`
 
 This project's source files use the extension `.llx`, not `.ll` - `.ll` is
@@ -2565,7 +2592,8 @@ doesn't accidentally pull its siblings into the same package.
 
 ## Exit codes
 
-- **2** - a usage error: no path argument, an unrecognized flag, both `-o`
+- **2** - a usage error: no path argument, an unrecognized flag, `-watch`
+  with `-o`/`-emit-llvm`, `-init`/`-tick` without `-watch`, both `-o`
   and `-emit-llvm` given together, `-l`/`-L` with `-emit-llvm`, `-L` without
   `-l`, the path couldn't be resolved to a real file/directory, its resolved
   directory has zero `.llx` files in it, an imported package directory

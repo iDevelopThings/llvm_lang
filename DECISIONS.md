@@ -1968,6 +1968,29 @@ section, `cmd/llvmc/linkresolve.go`, and
 
 ---
 
+## 2026-07-24 - `-watch`: hot-reload via persistent LLJIT + ResourceTracker
+
+**Decision:** add an optional `llvmc -watch` driver mode (not a language
+change). One LLJIT stays up; user code reloads by swapping an ORC
+`ResourceTracker`. Convention: optional void `Init`, looping `Frame() int`
+(`0` = continue). Flags `-init`/`-tick` override names. `main` unused under
+`-watch`. Reset-on-reload (Init again; no preserved game heap). Last-good
+module kept when a reload compile fails.
+
+**Why not a host/game Module split yet:** v1 only needs edit-reload for a
+single user package with third-party libs already on the JIT via `-l`.
+Splitting a sticky host Module from reloadable game code can come later if
+arena-preserve or live host state matters.
+
+**Why Tick returns int:** gives a clean stop for games (`WindowShouldClose`
+→ non-zero) and for tests, without inventing a separate `-watch-max-ticks`
+escape hatch.
+
+**Status:** shipped. See `CODEGEN.md`'s "`-watch`: hot-reload JIT" section
+and `cmd/llvmc/watch.go`.
+
+---
+
 ## 2026-07-24 - `move x`: reject conditional moves outright, extend fresh-construction to resolve the return-statement escape-analysis gap
 
 **Decision:** add a `move x` prefix expression (`x` a bare identifier only)
