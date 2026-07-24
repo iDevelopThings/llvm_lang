@@ -141,6 +141,23 @@ Skipping this because a change "looks straightforward" is precisely how it
 gets missed - straightforward-looking changes are exactly the ones nobody
 double-checks.
 
+**This review pass is not something a dispatched implementation agent does
+to its own work.** An agent spinning up its own internal review sub-agent
+as part of the same task is not a substitute for this step - it shares the
+same blind spots as the code it's reviewing, and it slows the round down for
+no independent signal gained. The review happens afterward, done by whoever
+dispatched the work (or a separately-dispatched reviewer with no stake in
+the implementation), never folded into the implementing agent's own run.
+
+**Functional tests need invalid-path coverage, not just the happy path.**
+A suite that only proves a feature works when used correctly won't catch a
+missing diagnostic, a rejection that should fire and doesn't, or a
+double-free/use-after-invalidation case - see the struct/array `==` example
+above, which slipped through for exactly this reason. Every dispatch brief
+for new/changed `src/`, `cmd/`, or `std/` code should explicitly ask for
+tests covering illegal usage and boundary/edge cases alongside the valid
+ones, not just "test that it works."
+
 
 ## Project Code Style Preferences **IMPORTANT**
 
@@ -235,6 +252,13 @@ case enums.NodeKinds.MatchStmt:
     // dispatched by checkStmt directly, never through checkExpr.
     return c.checkMatchExprStmt(n)
 ```
+
+**This applies equally to `BLOCKERS.md`/`DECISIONS.md`/`CODEGEN.md` prose
+additions, not just Go comments.** The same ratcheting happens there: a new
+entry matches the surrounding write-up's density, and it compounds round
+over round. Keep new entries in these files to the same standard - state the
+non-obvious fact, cross-reference once, don't re-narrate a story that's
+already told at the code site.
 
 ## Parser
 
