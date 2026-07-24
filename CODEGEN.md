@@ -24,16 +24,22 @@ type. See `DECISIONS.md`.
 
 ## Numeric type -> LLVM type, and where the type resolution itself lives
 
-`sema.Type`'s six concrete numeric kinds map straight onto go-llvm's own
+`sema.Type`'s concrete numeric kinds map straight onto go-llvm's own
 integer/float constructors (`llvmType`, `src/codegen/types.go`): `i8`/`i16`/
 `i32`/`i64` -> `Int8Type`/`Int16Type`/`Int32Type`/`Int64Type`; `f32`/`f64` ->
-`FloatType`/`DoubleType`. An LLVM integer/float instruction is already
-generic over bit width as long as both operands share the same LLVM type
-(sema guarantees this by construction), so no per-width branching is needed
-inside `genBinaryExpr`/`genUnaryExpr`/etc.; only the *kind* (integer vs.
-float) needs to be checked, to pick the matching floating-point instruction
-(`CreateFAdd`/`CreateFSub`/`CreateFMul`/`CreateFDiv`/`CreateFCmp`/`CreateFNeg`)
-instead of the integer one.
+`FloatType`/`DoubleType`. The unsigned widths `u8`/`u16`/`u32`/`u64` lower to
+the *same* LLVM `iN` types as their signed counterparts - LLVM integers carry
+no inherent signedness. An LLVM integer/float instruction is already generic
+over bit width as long as both operands share the same LLVM type (sema
+guarantees this by construction), so no per-width branching is needed inside
+`genBinaryExpr`/`genUnaryExpr`/etc.; the *kind* (integer vs. float) is checked
+to pick the matching floating-point instruction, and for integers the
+sema-level signedness (`Type.IsUnsigned`) picks unsigned over signed only
+where LLVM actually differentiates: division/remainder (`udiv`/`urem` vs
+`sdiv`/`srem`), ordered comparison (`ULT/ULE/UGT/UGE` vs the `S` forms),
+widening (`zext` vs `sext`), int<->float (`uitofp`/`fptoui`), and print
+formatting. Add/sub/mul/bitwise/equality are signedness-agnostic in LLVM and
+need no branch.
 
 There is **no codegen-side type-position resolution left at all**. A prior
 version of this package had its own `resolveTypeNode`/`varDeclType`
@@ -55,10 +61,11 @@ the `Info.Types` fix instead). See `AGENTS.md`'s `## Architecture` section.
 exactly the way sema determined it - a `CallExpr`'s callee `Ident` resolving
 (via `Info.Refs`) to `sema.SymBuiltinType`, not a function - and lowered
 (`genConversion`) using the correct LLVM instruction for the source/target
-type pair: `CreateSExt` (widening int - every integer here is signed, so
-sign-extension is always correct), `CreateTrunc` (narrowing int),
-`CreateSIToFP`/`CreateFPToSI` (int<->float), `CreateFPExt`/`CreateFPTrunc`
-(widening/narrowing float). A same-`Kind` "conversion" (e.g.
+type pair: widening int via `CreateSExt` for a signed source or `CreateZExt`
+for an unsigned one, `CreateTrunc` (narrowing int, bit-pattern-only so
+signedness-agnostic), `CreateSIToFP`/`CreateFPToSI` (or the `UIToFP`/`FPToUI`
+variants when the unsigned end is the integer one), `CreateFPExt`/
+`CreateFPTrunc` (widening/narrowing float). A same-`Kind` "conversion" (e.g.
 `i32(someI32Value)`) just returns the value unchanged - no pointless
 bitcast/identity instruction emitted.
 
@@ -70,7 +77,11 @@ to `i32` first and reuse `"%d"` - a manually-built variadic `printf` call
 doesn't get C's own default-argument-promotion for free, so this package
 does it explicitly, same reasoning as `bool`. `f32` is extended to `f64`
 first and reuses `"%f"` (variadic C calls always promote `float` to
-`double`). `f64` uses `"%f"` directly.
+`double`). `f64` uses `"%f"` directly. The unsigned widths need their own
+specifiers: `u8`/`u16`/`u32` zero-extend to `i32` and use `"%u"`, and `u64`
+uses `"%llu"` (the `%lld`-family sibling verified below) - printing an
+unsigned value through the signed `"%d"`/`"%lld"` would render a value above
+the signed max as negative.
 
 `i64` needed to be **verified empirically, not assumed**: this project's
 toolchain is mingw64/MSYS2, and `%lld`/`%d`-family format specifier behavior

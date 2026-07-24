@@ -1234,12 +1234,19 @@ func main() f64 {
 
 ## Types
 
-Primitive types: signed integers `i8`, `i16`, `i32`, `i64`; floats `f32`,
-`f64`; `string`; `bool`. `int` is not a separate type - it's exactly a
-synonym for `i32` (see `sema.TypeInt`'s doc comment: both spellings produce
-the literal same `Type` value, so `var a int = 1` and `var b i32 = a` need no
-conversion between them at all - see `DECISIONS.md` for why this width was
-chosen). A named struct type, an array type (`[N]T` fixed-size, `[]T`
+Primitive types: signed integers `i8`, `i16`, `i32`, `i64`; unsigned integers
+`u8`, `u16`, `u32`, `u64`; floats `f32`, `f64`; `string`; `bool`. `int` is not
+a separate type - it's exactly a synonym for `i32` (see `sema.TypeInt`'s doc
+comment: both spellings produce the literal same `Type` value, so
+`var a int = 1` and `var b i32 = a` need no conversion between them at all -
+see `DECISIONS.md` for why this width was chosen). The unsigned types have no
+analogous single-width alias: `int` is special only as the language's oldest
+int type. Each `uN` is its own distinct type, identical to the same-width
+`iN` in every way except signedness - the explicit-only-conversion and
+no-implicit-mixing rules below apply identically, so an `i32` and a `u32` no
+more interoperate without a conversion than an `i32` and an `i64` do. A
+negative constant (e.g. `-1`) never adapts to an unsigned type; negating an
+unsigned *variable* wraps (two's-complement), matching Go. A named struct type, an array type (`[N]T` fixed-size, `[]T`
 dynamic), and a pointer type (`*T` - see "Pointers" above) round out the type
 system - see their own sections above.
 

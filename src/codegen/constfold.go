@@ -98,6 +98,12 @@ func (g *Generator) constUnaryExpr(n ast.NodeIndex) (llvm.Value, bool) {
 			f, _ := operand.DoubleValue()
 			return llvm.ConstFloat(g.llvmType(t), -f), true
 		}
+		if t.IsUnsigned() {
+			// A constant context is always a constant negation - out of range
+			// for any unsigned type (see genUnaryExpr's runtime counterpart).
+			g.errorAt(n, "negation of unsigned constant is out of range for %s", t)
+			return llvm.Value{}, false
+		}
 		return g.constIntOfType(t, -operand.SExtValue()), true
 	case "!":
 		return g.constBool(operand.ZExtValue() == 0), true
@@ -150,6 +156,10 @@ func (g *Generator) constBinaryExpr(n ast.NodeIndex) (llvm.Value, bool) {
 		return g.constFloatBinaryExpr(n, op, lv, rv)
 	}
 
+	if lt.IsUnsigned() {
+		return g.constUnsignedBinaryExpr(n, op, lv, rv)
+	}
+
 	li := lv.SExtValue()
 	ri := rv.SExtValue()
 	resultType := g.info.Types[n]
@@ -190,6 +200,59 @@ func (g *Generator) constBinaryExpr(n ast.NodeIndex) (llvm.Value, bool) {
 		return g.constBool(li > ri), true
 	case ">=":
 		return g.constBool(li >= ri), true
+	default:
+		g.errorAt(n, "unsupported constant operator %s", op)
+		return llvm.Value{}, false
+	}
+}
+
+// constUnsignedBinaryExpr is constBinaryExpr's unsigned-integer branch: reads
+// both operands as uint64 (ZExtValue, so a high-bit-set u64 constant isn't
+// misread as negative) and uses unsigned division/remainder/ordering, where a
+// signed fold would give wrong results. Add/sub/mul/bitwise share the signed
+// path's semantics (same low bits after constIntOfType truncates to width), so
+// they differ from constBinaryExpr only in operand width interpretation here.
+func (g *Generator) constUnsignedBinaryExpr(n ast.NodeIndex, op string, lv, rv llvm.Value) (llvm.Value, bool) {
+	lu := lv.ZExtValue()
+	ru := rv.ZExtValue()
+	resultType := g.info.Types[n]
+	switch op {
+	case "+":
+		return g.constIntOfType(resultType, int64(lu+ru)), true
+	case "-":
+		return g.constIntOfType(resultType, int64(lu-ru)), true
+	case "*":
+		return g.constIntOfType(resultType, int64(lu*ru)), true
+	case "/":
+		if ru == 0 {
+			g.errorAt(n, "division by zero in constant expression")
+			return llvm.Value{}, false
+		}
+		return g.constIntOfType(resultType, int64(lu/ru)), true
+	case "%":
+		if ru == 0 {
+			g.errorAt(n, "division by zero in constant expression")
+			return llvm.Value{}, false
+		}
+		return g.constIntOfType(resultType, int64(lu%ru)), true
+	case "&":
+		return g.constIntOfType(resultType, int64(lu&ru)), true
+	case "|":
+		return g.constIntOfType(resultType, int64(lu|ru)), true
+	case "^":
+		return g.constIntOfType(resultType, int64(lu^ru)), true
+	case "==":
+		return g.constBool(lu == ru), true
+	case "!=":
+		return g.constBool(lu != ru), true
+	case "<":
+		return g.constBool(lu < ru), true
+	case "<=":
+		return g.constBool(lu <= ru), true
+	case ">":
+		return g.constBool(lu > ru), true
+	case ">=":
+		return g.constBool(lu >= ru), true
 	default:
 		g.errorAt(n, "unsupported constant operator %s", op)
 		return llvm.Value{}, false

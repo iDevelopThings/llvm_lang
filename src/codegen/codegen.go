@@ -483,6 +483,8 @@ type Generator struct {
 	fflushFn   llvm.Value
 	fmtInt     llvm.Value
 	fmtInt64   llvm.Value
+	fmtUInt    llvm.Value
+	fmtUInt64  llvm.Value
 	fmtFloat   llvm.Value
 	fmtStr     llvm.Value
 
@@ -516,16 +518,18 @@ type Generator struct {
 	// globals: "bare" (no trailing newline) int/string specifiers for a
 	// nested field/element, plus the literal punctuation gluing them
 	// together. See AGENTS.md's codegen section for the exact format.
-	fmtIntBare   llvm.Value
-	fmtInt64Bare llvm.Value
-	fmtFloatBare llvm.Value
-	fmtStrBare   llvm.Value
-	fmtSpace     llvm.Value
-	fmtLBrace    llvm.Value
-	fmtRBrace    llvm.Value
-	fmtLBracket  llvm.Value
-	fmtRBracket  llvm.Value
-	fmtNewline   llvm.Value
+	fmtIntBare    llvm.Value
+	fmtInt64Bare  llvm.Value
+	fmtUIntBare   llvm.Value
+	fmtUInt64Bare llvm.Value
+	fmtFloatBare  llvm.Value
+	fmtStrBare    llvm.Value
+	fmtSpace      llvm.Value
+	fmtLBrace     llvm.Value
+	fmtRBrace     llvm.Value
+	fmtLBracket   llvm.Value
+	fmtRBracket   llvm.Value
+	fmtNewline    llvm.Value
 
 	// fmtPtr/fmtPtrBare are the newline/bare format-string pair for a
 	// TypePointer value (see genPrintCall/genPrintValueBare, runtime.go) -

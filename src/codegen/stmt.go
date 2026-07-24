@@ -590,7 +590,7 @@ func (g *Generator) genAssignStmt(n ast.NodeIndex) {
 		if baseOp == "+" && targetType.Kind == sema.TypeString {
 			result = g.genStringConcat(cur, rhs)
 		} else {
-			result = g.genArithOp(baseOp, cur, rhs, isFloat)
+			result = g.genArithOp(baseOp, cur, rhs, isFloat, targetType.IsUnsigned())
 		}
 	default:
 		panic("codegen: unsupported compound assignment operator " + op)
@@ -678,7 +678,7 @@ func (g *Generator) genIncDecStmt(n ast.NodeIndex) {
 	if isInc {
 		op = "+"
 	}
-	result := g.genArithOp(op, cur, one, isFloat)
+	result := g.genArithOp(op, cur, one, isFloat, t.IsUnsigned())
 	g.builder.CreateStore(result, addr)
 }
 

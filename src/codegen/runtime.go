@@ -97,6 +97,13 @@ func (g *Generator) setupRuntime() {
 	// float promotion.
 	g.fmtInt = g.defineCString(".fmt.int", "%d\n")
 	g.fmtInt64 = g.defineCString(".fmt.int64", "%lld\n")
+	// Unsigned widths need their own specifiers ("%u"/"%llu") - printing an
+	// unsigned value through the signed "%d"/"%lld" would render a value above
+	// the signed max as negative. "%llu" is the u64 counterpart to i64's
+	// "%lld" (same confirmed-correct mingw64 ANSI-stdio family - see the i64
+	// note above); u8/u16/u32 all use "%u" (zero-extended to i32 first).
+	g.fmtUInt = g.defineCString(".fmt.uint", "%u\n")
+	g.fmtUInt64 = g.defineCString(".fmt.uint64", "%llu\n")
 	g.fmtFloat = g.defineCString(".fmt.float", "%f\n")
 	g.fmtStr = g.defineCString(".fmt.str", "%.*s\n")
 
@@ -114,6 +121,8 @@ func (g *Generator) setupRuntime() {
 	// is safe.
 	g.fmtIntBare = g.defineCString(".fmt.int.bare", "%d")
 	g.fmtInt64Bare = g.defineCString(".fmt.int64.bare", "%lld")
+	g.fmtUIntBare = g.defineCString(".fmt.uint.bare", "%u")
+	g.fmtUInt64Bare = g.defineCString(".fmt.uint64.bare", "%llu")
 	g.fmtFloatBare = g.defineCString(".fmt.float.bare", "%f")
 	g.fmtStrBare = g.defineCString(".fmt.str.bare", "%.*s")
 	g.fmtSpace = g.defineCString(".fmt.space", " ")
@@ -796,6 +805,12 @@ func (g *Generator) genPrintCall(argNode ast.NodeIndex) {
 		g.callPrintf([]llvm.Value{g.fmtInt, v})
 	case sema.TypeI64:
 		g.callPrintf([]llvm.Value{g.fmtInt64, v})
+	case sema.TypeU8, sema.TypeU16:
+		g.callPrintf([]llvm.Value{g.fmtUInt, g.builder.CreateZExt(v, g.i32Ty, "")})
+	case sema.TypeU32:
+		g.callPrintf([]llvm.Value{g.fmtUInt, v})
+	case sema.TypeU64:
+		g.callPrintf([]llvm.Value{g.fmtUInt64, v})
 	case sema.TypeF32:
 		g.callPrintf([]llvm.Value{g.fmtFloat, g.builder.CreateFPExt(v, g.f64Ty, "")})
 	case sema.TypeF64:
@@ -868,6 +883,12 @@ func (g *Generator) genPrintValueBare(t sema.Type, v llvm.Value) {
 		g.callPrintf([]llvm.Value{g.fmtIntBare, v})
 	case sema.TypeI64:
 		g.callPrintf([]llvm.Value{g.fmtInt64Bare, v})
+	case sema.TypeU8, sema.TypeU16:
+		g.callPrintf([]llvm.Value{g.fmtUIntBare, g.builder.CreateZExt(v, g.i32Ty, "")})
+	case sema.TypeU32:
+		g.callPrintf([]llvm.Value{g.fmtUIntBare, v})
+	case sema.TypeU64:
+		g.callPrintf([]llvm.Value{g.fmtUInt64Bare, v})
 	case sema.TypeF32:
 		g.callPrintf([]llvm.Value{g.fmtFloatBare, g.builder.CreateFPExt(v, g.f64Ty, "")})
 	case sema.TypeF64:
