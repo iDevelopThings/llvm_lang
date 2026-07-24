@@ -44,10 +44,15 @@ type Span struct {
 //   - ShortVarDecl, MultiShortVarDecl: the `:=` token
 //   - VarDecl, FuncDecl, StructDecl, IfStmt, ForStmt, ReturnStmt, BreakStmt,
 //     ContinueStmt, FuncType, ConstructorDecl, DestructorDecl, FuncLit,
-//     NewExpr, DeleteStmt, ExternFuncDecl, EnumDecl, MatchStmt, YieldStmt:
-//     the leading keyword token (EnumDecl's is `enum`, MatchStmt's is
-//     `match`, YieldStmt's is `yield` - see LANGUAGE.md's "Enums"/"match"
-//     sections)
+//     NewExpr, DeleteStmt, ExternFuncDecl, EnumDecl, MatchStmt, YieldStmt,
+//     AwaitStmt: the leading keyword token (EnumDecl's is `enum`, MatchStmt's
+//     is `match`, YieldStmt's is `yield` - see LANGUAGE.md's "Enums"/"match"
+//     sections). FuncDecl's is normally `func`, but is `async` instead for an
+//     `async func` (see LANGUAGE.md's "Coroutines" section) - the same "same
+//     shape, different flag" convention as YieldReturnType below, just
+//     carried in Tok rather than a child node, since async is a whole-
+//     declaration marker, not a return-type-position one; Tree.FuncIsAsync
+//     reads this rather than every call site comparing Tok.Keyword directly.
 //   - EnumVariant: the variant's own name identifier token
 //     (ExternFuncDecl's is the `extern` keyword, not the `func` that follows
 //     it - see LANGUAGE.md's "External functions (FFI)" section; FuncType's
@@ -119,6 +124,9 @@ type Span struct {
 //     exactly one canonical shape by the time either pass sees it: a Block
 //     whose every reachable path ends in a YieldStmt.
 //   - BreakStmt, ContinueStmt: no children (leaves)
+//   - AwaitStmt: no children (leaf) - a bare `await`, legal only inside an
+//     async function's own body (see LANGUAGE.md's "Coroutines" section) -
+//     unlike YieldStmt, there is no operand at all this round.
 //   - Block: [stmt0, stmt1, ...] - variable arity
 //   - IfStmt: [cond, then, else] - fixed arity; else may be InvalidNode.
 //     then/else are whatever parseStmt/parseBlock produced - a Block for the

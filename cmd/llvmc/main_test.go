@@ -497,6 +497,87 @@ func TestBinary_MainExitCode(t *testing.T) {
 	}
 }
 
+// coroutinesExampleWant is examples/coroutines/coroutines.llx's own expected
+// stdout (see that file's inline comments) - shared by the JIT and AOT
+// variants below.
+const coroutinesExampleWant = "100\n200\n300\n3\n2\n1\n100\n200\n2\n1"
+
+// TestBinary_CoroutinesExample runs examples/coroutines/coroutines.llx
+// through the real llvmc binary (JIT) - true suspend/resume coroutines (see
+// LANGUAGE.md's "Coroutines" section): resuming to normal completion (every
+// segment's own print, then every destructor firing in reverse declaration
+// order via the coroutine's own final suspend) and an early `delete` on a
+// still-suspended handle destructing exactly what's live at that point.
+func TestBinary_CoroutinesExample(t *testing.T) {
+	cmd := exec.Command(llvmcPath, "../../examples/coroutines/coroutines.llx")
+	out, err := cmd.Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			t.Fatalf("running llvmc: %v, stderr:\n%s", err, ee.Stderr)
+		}
+		t.Fatalf("running llvmc: %v", err)
+	}
+
+	normalized := strings.ReplaceAll(string(out), "\r\n", "\n")
+	normalized = strings.TrimRight(normalized, "\n")
+	if normalized != coroutinesExampleWant {
+		t.Errorf("stdout = %q, want %q", normalized, coroutinesExampleWant)
+	}
+}
+
+// TestBinary_AOT_Coroutines AOT-compiles examples/coroutines/coroutines.llx
+// and confirms identical output to the JIT variant above - see
+// TestBinary_AOT_HelloWorld's own doc comment for why this matters (a
+// genuinely standalone, deployable binary, no llvmc/JIT in the loop).
+func TestBinary_AOT_Coroutines(t *testing.T) {
+	exePath := aotCompile(t, "../../examples/coroutines/coroutines.llx")
+
+	out, err := exec.Command(exePath).Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			t.Fatalf("%s exited %v, stderr:\n%s", exePath, err, ee.Stderr)
+		}
+		t.Fatalf("running %s: %v", exePath, err)
+	}
+
+	normalized := strings.ReplaceAll(string(out), "\r\n", "\n")
+	normalized = strings.TrimRight(normalized, "\n")
+	if normalized != coroutinesExampleWant {
+		t.Errorf("stdout = %q, want %q", normalized, coroutinesExampleWant)
+	}
+}
+
+// TestBinary_NoOptAsyncIsCleanError covers the -no-opt/async restriction
+// (see CODEGEN.md's "Coroutines" section and src/compiler's
+// checkNoOptAsyncRestriction): llvm.coro.* intrinsics are only ever lowered
+// by the optimization pipeline, so -no-opt against a program declaring an
+// async function must be a clean, immediate compile-time diagnostic - never
+// a crash (confirmed directly, before this restriction existed, as a real
+// "LLVM ERROR: Cannot select: intrinsic %llvm.coro.destroy" fatal abort) and
+// never silently wrong output.
+func TestBinary_NoOptAsyncIsCleanError(t *testing.T) {
+	cmd := exec.Command(llvmcPath, "-no-opt", "../../examples/coroutines/coroutines.llx")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+
+	ee, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected llvmc to exit non-zero with an *exec.ExitError, got: %v", err)
+	}
+	if ee.ExitCode() != exitCompile {
+		t.Errorf("exit code = %d, want %d", ee.ExitCode(), exitCompile)
+	}
+
+	got := stderr.String()
+	if strings.Contains(got, "panic:") || strings.Contains(got, "LLVM ERROR") {
+		t.Errorf("stderr contains a crash, want a clean diagnostic:\n%s", got)
+	}
+	if !strings.Contains(got, "-no-opt") {
+		t.Errorf("stderr = %q, want it to mention -no-opt", got)
+	}
+}
+
 // TestBinary_Failure covers the failure path through the real binary:
 // examples/error/error.llx must exit non-zero and print a diagnostic to stderr,
 // never a Go panic/stack trace.

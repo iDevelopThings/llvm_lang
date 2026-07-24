@@ -19,7 +19,7 @@ func (p *Parser) parseTopLevelItem() ast.NodeIndex {
 		return p.parseImportDecl()
 	case p.atKeyword(enums.Keywords.Var):
 		return p.parseVarDecl()
-	case p.atKeyword(enums.Keywords.Func):
+	case p.atKeyword(enums.Keywords.Func), p.atKeyword(enums.Keywords.Async):
 		return p.parseFuncDecl()
 	case p.atKeyword(enums.Keywords.Struct):
 		return p.parseStructDecl()
@@ -102,8 +102,24 @@ func ParseFile(file *lexer.File) (*ast.Tree, *diag.Bag) {
 // receiver clause, `func (Name) name(params) ReturnType { body }` - a
 // method. The receiver is unambiguous: a plain function's name always comes
 // directly after `func`, so a `(` there can only mean a receiver clause.
+//
+// An optional leading `async` (`async func name(params) ReturnType { body }`
+// - see LANGUAGE.md's "Coroutines" section) is captured as the node's own
+// Tok instead of the `func` keyword that still must follow it - see
+// ast.Node's own FuncDecl doc comment and Tree.FuncIsAsync. A receiver
+// clause or a `FuncLit` combined with async is a clean sema-level rejection
+// (checkFuncDecl), not a grammar one - this function has no idea whether a
+// receiver clause follows, and a FuncLit's own parse function never checks
+// for a leading async at all, so the combination is structurally
+// unreachable there.
 func (p *Parser) parseFuncDecl() ast.NodeIndex {
-	kwTok := p.expectKeyword(enums.Keywords.Func)
+	var kwTok lexer.Token
+	if p.atKeyword(enums.Keywords.Async) {
+		kwTok = p.expectKeyword(enums.Keywords.Async)
+		p.expectKeyword(enums.Keywords.Func)
+	} else {
+		kwTok = p.expectKeyword(enums.Keywords.Func)
+	}
 
 	receiver := ast.InvalidNode
 	if _, ok := p.accept(enums.Lexemes.LeftParen); ok {

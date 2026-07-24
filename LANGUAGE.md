@@ -1874,7 +1874,95 @@ A generator function can't be a method (`yield T` on a receiver-declared
   pausing mid-function, holding two live generators concurrently and
   stepping them independently. See `CODEGEN.md`'s "Generator functions"
   section and `DECISIONS.md` for why a push/callback lowering was chosen
-  over this instead.
+  over this instead - and see this file's own "Coroutines" section below,
+  a genuinely separate feature built on real LLVM coroutine intrinsics
+  rather than push/callback, for exactly this capability.
+
+## Coroutines
+
+Real suspend/resume coroutines - `async func`/`await`, a caller-held handle
+driven by hand via `resume`/`done`/`delete` - distinct from, and not built on
+top of, this language's own `yield T` generator functions above (see
+`DECISIONS.md`'s dated entry for why these are two separate features rather
+than one generalized over the other).
+
+```
+async func Sequence() {
+    print(1)
+    await
+    print(2)
+    await
+    print(3)
+}
+
+func main() {
+    h := Sequence()          // runs eagerly up to the first await - prints 1
+    for !done(h) {
+        resume(h)             // runs to the next await (or completion)
+    }
+    delete h                  // safe no-op here: already done, just frees the frame
+}
+```
+
+- **`async func Name(params) { body }`** - a new top-level declaration form,
+  modeled on a plain `func` (same params, receiver, and body grammar) with
+  one addition: `await` is legal anywhere inside its own body, at any
+  nesting depth (exactly like `return` is legal anywhere inside an ordinary
+  function). Never a method (a receiver clause combined with `async` is a
+  clean diagnostic) and never a `FuncLit` - `async` is a top-level-only
+  marker this round, with no closures/captures for a coroutine's own frame
+  at all.
+- **`await`** - a bare statement, no operand, no result. Suspends the
+  enclosing coroutine at exactly that point; the next `resume(h)` against
+  its own handle continues execution immediately after it.
+- **Calling an async function returns a coroutine handle** (`h := Sequence()`)
+  - unlike a generator call (only ever legal as a `range`-for's own subject),
+  a coroutine handle is a real, storable value: assign it, hold it, pass it
+  around. It's non-copyable, exactly like a destructor-owning struct - only
+  a fresh call result may be assigned to a new name; `h2 := h` (aliasing an
+  existing handle) is a clean diagnostic.
+- **`resume(h) bool`** - runs the coroutine once, from wherever it's
+  currently suspended, until its next `await` or until it finishes. Returns
+  whether there's more work left (`true`) or it just finished (`false`).
+  Calling it on an already-finished handle is a safe, defined no-op
+  returning `false` - never undefined behavior.
+- **`done(h) bool`** - reports whether the coroutine has already finished
+  (normally, or via `delete`/scope exit). Safe to call at any time.
+- **`delete h`** - reuses this language's existing `new`/`delete` vocabulary
+  (see the "Pointers" section) to explicitly destroy a not-yet-finished
+  coroutine early: every local still live at its current suspend point gets
+  destructed (in reverse declaration order, exactly like an ordinary scope
+  exit), then its frame is freed. A coroutine handle falling out of scope
+  *without* an explicit `delete` gets the identical automatic cleanup - the
+  same non-copyable, destructor-owning-value machinery a struct with its own
+  `destructor()` already gets (see "Destructors"). Calling `delete` twice on
+  the same handle, or `resume`/`done` after it, is a safe, defined no-op -
+  never undefined behavior.
+
+### Explicitly out of scope this round
+
+Deliberately the smallest useful core primitive - "one handle, driven by
+hand, no scheduler, no timers" - matching how `range` shipped before
+generator functions built on top of it:
+
+- **No return value.** An async function declares no return type at all -
+  `async func f() int { ... }` is a clean diagnostic. Reading a coroutine's
+  own final result (once `done(h)` is true) needs `llvm.coro.promise`-based
+  storage this round doesn't build - see `CODEGEN.md`'s "Coroutines" section
+  for the full reasoning behind deferring this rather than half-building it.
+- **No timers/scheduler.** There's no `Wait(seconds)`/`Tick(dt)` - only a
+  bare `await`, resumed purely by an explicit `resume(h)` call. A Unity-style
+  scheduler built from this primitive is a real, natural next round, not
+  this one.
+- **No coroutine-to-coroutine interleaving.** An async function can't itself
+  call and await another async function - only hand-written driver code
+  (like `main` above) resumes a handle. This is arguably the most natural
+  next round after a scheduler, but is out of scope here.
+- **No closures.** `async func` is top-level-only, exactly like an
+  `ExternFuncDecl` - never a `FuncLit`, so there's no capture-analysis work
+  at all this round (a coroutine's own frame - which locals are live across
+  which suspend point - is entirely `CoroSplit`'s problem, not the
+  frontend's).
 
 ## Multi-file packages
 

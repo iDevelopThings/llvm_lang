@@ -151,6 +151,8 @@ func (g *Generator) genStmt(n ast.NodeIndex) bool {
 		return g.genMatchStmt(n, nil)
 	case enums.NodeKinds.YieldStmt:
 		return g.genYieldStmt(n)
+	case enums.NodeKinds.AwaitStmt:
+		return g.genAwaitStmt()
 	default:
 		return false
 	}
@@ -325,6 +327,16 @@ func (g *Generator) storeValueInto(addr llvm.Value, valueNode ast.NodeIndex) {
 // slot can never reach any of those).
 func (g *Generator) genDeleteStmt(n ast.NodeIndex) {
 	operand := g.tree.Child(n, 0)
+
+	// A coroutine handle (see LANGUAGE.md's "Coroutines" section) is a
+	// genuinely different `delete` shape - see genCoroDeleteStmt's own doc
+	// comment for why (both explicitly `delete`-able AND automatically
+	// destructor-tracked, unlike a plain pointer).
+	if g.info.Types[operand].Kind == sema.TypeCoroutine {
+		g.genCoroDeleteStmt(operand)
+		return
+	}
+
 	ptr := g.genExpr(operand)
 
 	if entry, ok := g.destructorFuncForPointee(operand); ok {
@@ -368,14 +380,11 @@ func (g *Generator) destructorFuncForPointee(operand ast.NodeIndex) (funcEntry, 
 // any other expression) - only a real, direct alloca in the current
 // function's own g.locals is ever nulled.
 func (g *Generator) deleteLocalSlot(operand ast.NodeIndex) (llvm.Value, bool) {
-	for g.tree.Nodes[operand].Kind == enums.NodeKinds.ParenExpr {
-		operand = g.tree.Child(operand, 0)
-	}
-	if g.tree.Nodes[operand].Kind != enums.NodeKinds.Ident {
+	sym, ok := g.localSymForOperand(operand)
+	if !ok {
 		return llvm.Value{}, false
 	}
-	addr, ok := g.locals[g.info.Refs[operand]]
-	return addr, ok
+	return g.locals[sym], true
 }
 
 // genAssignStmt lowers `=` and the compound forms `+= -= *= /=`. `+=` also
@@ -515,10 +524,18 @@ func (g *Generator) genIncDecStmt(n ast.NodeIndex) {
 // genReturnStmt lowers `return` (bare or with a value). A bare return in a
 // function declaring no return type - main included - produces `ret void`,
 // except main itself always needs a real i32 exit code (see
-// declareFuncSignature): a bare `return` in main is `ret i32 0`.
+// declareFuncSignature): a bare `return` in main is `ret i32 0`. An async
+// function's own bare return (the only shape it can have - see
+// sema.checkFuncDecl's void-only rule) is genuinely different again: it must
+// reach the coroutine's own final suspend (finishCoroBody), never a plain
+// `ret`.
 func (g *Generator) genReturnStmt(n ast.NodeIndex) bool {
 	valueNode := g.tree.Child(n, 0)
 	if valueNode == ast.InvalidNode {
+		if g.curIsAsync {
+			g.finishCoroBody()
+			return true
+		}
 		g.unwindDestructorsTo(0)
 		if g.curFunc.isMain {
 			g.builder.CreateRet(llvm.ConstInt(g.i32Ty, 0, false))

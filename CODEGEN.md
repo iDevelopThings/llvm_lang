@@ -1242,6 +1242,183 @@ language-level framing):
   it has no legal standalone runtime representation under this lowering at
   all, only ever appearing as a range-for's own direct subject.
 
+## Coroutines
+
+See `LANGUAGE.md`'s "Coroutines" section for the language-level feature
+(`async func`/bare `await`, a caller-held handle driven by hand via
+`resume`/`done`/`delete`) and `DECISIONS.md`'s dated entry for why this is a
+genuinely separate feature from `yield T` generator functions above, not one
+generalized over the other. Unlike a generator's push/callback lowering,
+this uses LLVM's own first-class coroutine intrinsics directly
+(`llvm.coro.id`/`coro.begin`/`coro.suspend`/`coro.resume`/`coro.destroy`/
+`coro.done`/`coro.free`/`coro.end` - all declared via the generic
+intrinsic-declaration mechanism, `Module.IntrinsicDeclaration`, since none of
+these have a dedicated `llvm-c` header the way e.g. ORC's does) plus the
+standard optimization pipeline's own `CoroSplit`/`CoroCleanup` passes, which
+this project's existing `default<O2>` pipeline already runs with zero extra
+pass-pipeline configuration.
+
+### Declaring an async function: real signature, `presplitcoroutine`, no implicit parameter
+
+`declareFuncSignature`/`genFuncBody` (`func.go`) recognize an async
+`FuncDecl` via `Tree.FuncIsAsync` (`decl.Tok.Keyword == Async` - see
+`ast.Node`'s own FuncDecl doc comment) - unlike a generator, there's no
+implicit trailing parameter and no forced-void declared type: an async
+function's REAL LLVM return type is instead the coroutine handle
+`llvm.coro.begin` produces (a plain `ptr`), regardless of its declared
+(void-only this round - see `LANGUAGE.md`) result type. The generated
+function is tagged with the `presplitcoroutine` enum attribute
+(`ctx.CreateEnumAttribute(llvm.AttributeKindID("presplitcoroutine"), 0)` +
+`fn.AddFunctionAttr`) right after `AddFunction` - required or LLVM's
+coroutine-splitting passes silently never look at the function at all.
+
+`genCoroPrologue` (`coroutine.go`) emits the fixed ramp prologue into the
+function's own entry block, right after `beginSyntheticFunc` resets it:
+`coro.id(0, null, null, null)` -> `coro.size.i64()` -> `malloc` -> `coro.begin(id, mem)`,
+caching the resulting id/handle onto `Generator.curCoroId`/`curCoroHandle` -
+safe as plain SSA values (not slots) since the entry block dominates every
+later use, including every per-`await` cleanup block below. No
+`llvm.coro.alloc` allocation-elision check is emitted - every call always
+heap-allocates a real frame; this project doesn't attempt the elision
+optimization this round.
+
+### The coro.suspend switch: three arms, not two - the one bug this took real empirical verification to catch
+
+Every suspend point (`genAwaitStmt`, an ordinary `await`; `finishCoroBody`,
+the implicit "final suspend" reached when a body falls off its own end or
+hits a bare `return`) is `coro.save` + `coro.suspend` + a real three-way
+`switch` on its `i8` result, following
+[LLVM's own documented coroutine-suspend shape](https://llvm.org/docs/Coroutines.html#coro-destroy)
+exactly:
+
+- **case 0 (resumed)**: continue the body normally (an ordinary `await`'s
+  own "cont" block) - or, for the *final* suspend specifically,
+  `llvm.trap()` + `unreachable`, matching LLVM's own documented rule that
+  resuming a coroutine already sitting at its final suspend point is
+  undefined behavior. This language's own `resume(h)` builtin
+  (`genResumeCall`) never lets a live caller reach that arm for real (it
+  checks `done(h)` first), but nothing in the IR itself proves that -
+  the frontend still has to mark it correctly.
+- **case 1 (destroyed)**: this suspend point's OWN dedicated cleanup block -
+  destructor calls (in reverse order) for a *snapshot* of
+  `Generator.destructors` taken at exactly this point (never mutating the
+  real slice - this is a hypothetical "destroyed here" branch, not execution
+  actually continuing), then `genCoroFreeFrame` (`coro.free` + `free`), then
+  falls through to the shared suspend tail. Every `await` gets its own
+  cleanup block rather than a shared one dispatched via a saved
+  suspend-index - `coro.suspend`'s own per-call switch already gives each
+  suspend point a distinct case-1 target for free (see `DECISIONS.md`'s
+  dated entry).
+- **switch DEFAULT (bare suspend - not case 1)**: `coroEndBlock` - `coro.end`
+  + `ret` the handle, touching nothing else. This is the arm every ordinary
+  suspend/resume actually takes (the ramp's own first pass reaching an
+  `await` for the first time; a real `resume()` call landing back in the
+  middle of a function body) - **conflating this with the destroy arm was
+  the actual bug**, caught only by JIT-executing a real multi-`await`
+  coroutine and observing a genuine double-destruct: routing default to
+  destroy makes the ramp's own "I haven't been resumed or destroyed yet"
+  sentinel value run cleanup unconditionally on the very first call,
+  collapsing the entire suspend away once combined with the standard
+  optimization pipeline's own reasoning (`unreachable` at the wrong arm
+  compounds this further - it licenses the optimizer to treat
+  `coro.suspend`'s result as provably constant at that call site). Matching
+  LLVM's own documented switch shape - default is bare-suspend, destroy is
+  its own explicit case 1 - fixed it outright; see `coroEndBlock`/
+  `genCoroFreeFrame`/`genAwaitStmt`/`finishCoroBody`'s own doc comments
+  (`coroutine.go`) for the exact current shape.
+
+### `resume`/`done` builtins: driver-side safety, not raw intrinsic calls
+
+`resume(h)`/`done(h)` (`genResumeCall`/`genDoneCall`, `coroutine.go`) are
+never a bare `coro.resume`/`coro.done` call - each first checks whether
+`h` is nil (already `delete`d - see below) and short-circuits to a safe,
+defined result (`false`/`true` respectively) rather than touching freed
+memory; `resume` additionally checks `coro.done(h)` BEFORE calling the raw
+`coro.resume` intrinsic, since resuming a coroutine already at its own final
+suspend point is undefined behavior at the LLVM level (see above) - this
+driver-side guard is what makes it safe to call `resume`/`done` on an
+already-finished handle at all. `resume`'s own bool result (`false` reported
+either at this design's own nil/already-done arms, and `true`/`false` for a
+real resume - checked via `coro.done` immediately after the raw
+`coro.resume` call, since that intrinsic itself returns `void`) tracks
+whether the coroutine suspended again or just finished.
+
+### `delete h` and automatic scope-exit: one non-copyable value, two triggers
+
+A coroutine handle is `sema.TypeCoroutine` - a real, storable, non-copyable
+value (unlike a generator's call result), so `destructorFuncFor` (`func.go`)
+gets a new case returning a small synthesized wrapper,
+`coroDestroyLocalFn` (`llvm_lang.coro.destroylocal`, built once in
+`setupCoroutines`): `void(ptr addr)`, loading the handle stored at `addr`
+then calling `coro.destroy` on it. This one small adapter is what lets
+`pushDestructorEntry`/`unwindDestructorsTo` (the exact same mechanism every
+struct/enum destructor already uses) serve a coroutine handle local with
+**zero changes to either** - the existing convention always forwards a
+local's own storage ADDRESS (a struct/enum destructor's receiver IS that
+address), but `coro.destroy` needs the handle BY VALUE, hence the adapter.
+
+Explicit `delete h` (`genCoroDeleteStmt`, dispatched from `genDeleteStmt` by
+checking `info.Types[operand].Kind == TypeCoroutine` before the ordinary
+pointer path) is the one genuinely new wrinkle: a coroutine handle is BOTH
+explicitly `delete`-able AND automatically destructor-tracked, a combination
+no other type in this language has (a plain pointer is never on the
+destructor stack at all; a struct local is never explicitly `delete`-able).
+So an explicit `delete` must also remove `h`'s own entry from
+`Generator.destructors` (`removeDestructorEntry` - searches for it
+wherever it currently sits, since later-declared locals still in scope may
+sit above it, then removes it via `slices.Delete`, preserving every other
+entry's relative order) so a LATER automatic scope-exit unwind never
+double-destroys it - then nulls the local's own slot (mirroring plain
+pointer `delete`'s existing convention, `deleteLocalSlot` - refactored to
+share `localSymForOperand` with this new path), making a second explicit
+`delete`, or a `resume`/`done` afterward, a safe no-op via the nil-handle
+guards above. Since a coroutine handle is non-copyable, there's only ever
+one variable that could hold a given handle value - unlike a raw pointer
+(which can have aliasing copies `delete`'s own nulling can't reach), nulling
+the one local slot is a COMPLETE mitigation for this type, not a partial one.
+
+**A second real bug, found by reasoning about `genIfStmt`'s own snapshot/
+restore discipline, not by a failing test:** `genIfStmt` unconditionally
+restores `Generator.destructors` back to its pre-`if` snapshot after
+generating each branch (`snapshotDestructors`/`restoreDestructors`,
+`stmt.go`'s own doc comments) - so `if cond { delete h }` (with no `else`)
+resurrects `h`'s own destructor entry at the compile-time bookkeeping level
+even after that branch's own `delete` already ran and nulled `h`'s slot at
+runtime. Automatic scope-exit cleanup, generated once at this function's own
+tail, therefore still calls `coroDestroyLocalFn` against `h` regardless of
+which branch actually ran - meaning `coroDestroyLocalFn` MUST itself be
+null-safe (guarded exactly like `genResumeCall`/`genDoneCall`/
+`genCoroDeleteStmt`), not just the explicit-`delete` path. Without this
+guard, the module still compiled, verified, and JIT-executed without
+crashing or an obviously wrong destructor count - but only because the
+optimizer had silently exploited undefined behavior (`llvm.coro.destroy`
+called twice against the same handle) to collapse the two calls down to one
+lucky-looking outcome, confirmed directly by dumping the optimized IR before
+and after adding the guard. This is precisely the "looks fine because
+nobody's test happened to distinguish it from correct" failure mode
+`AGENTS.md`'s review-process section warns about, caught here specifically
+by tracing every other place `Generator.destructors` gets mutated
+(`snapshotDestructors`/`restoreDestructors`) against the new
+`removeDestructorEntry`, not by a test failing first.
+
+### The `-no-opt` trap: a real, confirmed compile-time restriction
+
+Confirmed directly (not assumed): JIT-executing (and separately, `-o`
+AOT-compiling) a coroutine-using program under `-no-opt` crashes outright -
+`LLVM ERROR: Cannot select: intrinsic %llvm.coro.destroy` - since `-no-opt`
+skips `RunPasses` entirely (see "`-no-opt`: disabling the optimization
+pipeline" below), and `llvm.coro.*` intrinsics are only ever lowered into
+real code by the optimization pipeline's own `CoroSplit`/`CoroCleanup`
+passes. Given this failure mode (a hard abort, not even "silently wrong
+output" - though that's also possible in a shape this simple test happened
+not to hit) is worse than a plain compile-time error, `src/compiler`'s
+`finishPipeline` now rejects any program declaring an `async` function
+outright when its own `optimize` parameter is false
+(`checkNoOptAsyncRestriction`, `compiler.go`) - a clean, source-position-
+attributed diagnostic ("cannot compile with -no-opt"), checked before
+`codegen.GeneratePackage` even runs, rather than letting `cmd/llvmc`'s
+`-no-opt` flag reach a coroutine-using program at all.
+
 ## `main` is the real entry point
 
 The function literally named `main` (no receiver) becomes the real LLVM

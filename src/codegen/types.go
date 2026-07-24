@@ -124,6 +124,11 @@ func (g *Generator) llvmType(t sema.Type) llvm.Type {
 		// value (see LANGUAGE.md's "Pointers" section) reuses it directly
 		// rather than needing its own distinct LLVM pointer-to-X type.
 		return g.ptrTy
+	case sema.TypeCoroutine:
+		// A coroutine handle is exactly llvm.coro.begin's own return type - a
+		// single opaque `ptr`, reusing g.ptrTy the same way TypePointer/TypeMap
+		// already do (see CODEGEN.md's "Coroutines" section).
+		return g.ptrTy
 	case sema.TypeMap:
 		// A map's own runtime value is likewise just a single opaque `ptr` -
 		// the address of its own arena-allocated control block (g.mapCtrlTy -

@@ -54,3 +54,7 @@ values:
     string: "yield"
   - name: Range
     string: "range"
+  - name: Async
+    string: "async"
+  - name: Await
+    string: "await"

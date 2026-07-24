@@ -62,6 +62,13 @@ type enclosingFunc struct {
 	// so checkYieldStmt is the only place yieldElem is actually read.
 	isGenerator bool
 	yieldElem   Type
+
+	// isAsync marks an `async func`'s own body (see LANGUAGE.md's
+	// "Coroutines" section) - checkAwaitStmt's only reader. Async and
+	// generator are mutually exclusive in practice (checkFuncDecl already
+	// rejects an async func declaring any return type, which a `yield T`
+	// return-type marker is one), but nothing here assumes that itself.
+	isAsync bool
 }
 
 // matchExprCheckCtx is one live expression-mode match's own running result
@@ -553,13 +560,28 @@ func (c *checker) checkFuncDecl(decl ast.NodeIndex) {
 		c.errorAt(decl, "a method cannot be a generator function (yield return type)")
 	}
 
+	isAsync := c.tree.FuncIsAsync(decl)
+	if isAsync && c.tree.FuncReceiver(decl) != ast.InvalidNode {
+		c.errorAt(decl, "a method cannot be an async function")
+	}
+	if isAsync && c.tree.FuncReturnType(decl) != ast.InvalidNode {
+		// Reading an async function's own final result (once done(h) is
+		// true) needs llvm.coro.promise-based storage this round explicitly
+		// doesn't build - see LANGUAGE.md's "Coroutines" section for the
+		// full reasoning. An async func is void-only for now.
+		c.errorAt(decl, "async functions cannot declare a return type yet - see LANGUAGE.md's Coroutines section")
+	}
+
 	prevFunc := c.curFunc
 	c.curFunc = &enclosingFunc{
 		// A generator's hasReturn stays false, exactly like a void function -
-		// see enclosingFunc's own doc comment and checkReturnStmt.
+		// see enclosingFunc's own doc comment and checkReturnStmt. An async
+		// func is void-only this round (see above), so hasReturn is simply
+		// whatever the ordinary rule already computes for a void function.
 		hasReturn:   c.tree.FuncReturnType(decl) != ast.InvalidNode && !isGenerator,
 		ret:         sig.Return,
 		isGenerator: isGenerator,
+		isAsync:     isAsync,
 	}
 	if isGenerator {
 		c.curFunc.yieldElem = *sig.Return.Elem
@@ -1314,6 +1336,11 @@ func IsNonCopyable(t Type) bool {
 			return false
 		}
 		return IsNonCopyable(*t.Elem)
+	case TypeCoroutine:
+		// Unconditionally non-copyable - a coroutine handle always owns a
+		// real heap frame, unlike a struct/array, which only sometimes owns
+		// one (see LANGUAGE.md's "Coroutines" section).
+		return true
 	default:
 		return false
 	}
@@ -1345,10 +1372,16 @@ func (c *checker) isFreshConstruction(n ast.NodeIndex) bool {
 	case enums.NodeKinds.CallExpr:
 		callee := c.tree.Child(n, 0)
 		sym, ok := c.info.Refs[callee]
-		// A tuple-variant construction call (`Shape.Circle(5.0)`) is exactly
-		// as fresh as a struct constructor call - see LANGUAGE.md's "Enums"
-		// section.
-		return ok && (sym.Kind == SymConstructor || sym.Kind == SymEnumVariant)
+		if ok && (sym.Kind == SymConstructor || sym.Kind == SymEnumVariant) {
+			// A tuple-variant construction call (`Shape.Circle(5.0)`) is
+			// exactly as fresh as a struct constructor call - see
+			// LANGUAGE.md's "Enums" section.
+			return true
+		}
+		// Calling an async func (see LANGUAGE.md's "Coroutines" section) is
+		// exactly as fresh too - every call mints a brand-new heap-allocated
+		// coroutine frame, never an existing one.
+		return c.calleeIsAsyncFunc(callee)
 	case enums.NodeKinds.MemberExpr:
 		// A bare unit-variant reference (`Shape.Point`) - the enum-kind
 		// counterpart to the two cases above, for the one variant kind with
@@ -1878,6 +1911,8 @@ func (c *checker) checkStmt(n ast.NodeIndex) {
 		c.checkMatchStmt(n)
 	case enums.NodeKinds.YieldStmt:
 		c.checkYieldStmt(n)
+	case enums.NodeKinds.AwaitStmt:
+		c.checkAwaitStmt(n)
 	}
 }
 
@@ -1920,6 +1955,16 @@ func (c *checker) checkYieldStmt(n ast.NodeIndex) {
 	c.checkValueExpr(value)
 }
 
+// checkAwaitStmt type-checks a bare `await` (see LANGUAGE.md's "Coroutines"
+// section) - legal only inside an async function's own body, at any nesting
+// depth, mirroring checkYieldStmt's "outside a generator function" rejection
+// one construct over. There is no operand to check this round.
+func (c *checker) checkAwaitStmt(n ast.NodeIndex) {
+	if c.curFunc == nil || !c.curFunc.isAsync {
+		c.errorAt(n, "await outside an async function")
+	}
+}
+
 // checkBreakOrContinue verifies n (a BreakStmt or ContinueStmt) actually
 // appears somewhere inside a ForStmt's body - previously unvalidated by
 // either Resolve or Check (see BLOCKERS.md's codegen-phase entry #6: a bare
@@ -1934,15 +1979,19 @@ func (c *checker) checkBreakOrContinue(n ast.NodeIndex, word string) {
 }
 
 // checkDeleteStmt type-checks `delete p` (see LANGUAGE.md's "Pointers"
-// section) - p must have a pointer type; delete itself produces no value.
+// section) - p must have a pointer type, OR a coroutine handle (see
+// LANGUAGE.md's "Coroutines" section: `delete h` explicitly destroys a
+// not-yet-done coroutine early, reusing this same `new`/`delete` vocabulary
+// rather than inventing a separate destroy-statement form) - delete itself
+// produces no value either way.
 func (c *checker) checkDeleteStmt(n ast.NodeIndex) {
 	expr := c.tree.Child(n, 0)
 	t := c.defaultIfUntyped(expr, c.checkValueExpr(expr))
 	if t.IsInvalid() {
 		return
 	}
-	if t.Kind != TypePointer {
-		c.errorAt(n, "delete requires a pointer, got %s", t)
+	if t.Kind != TypePointer && t.Kind != TypeCoroutine {
+		c.errorAt(n, "delete requires a pointer or a coroutine handle, got %s", t)
 	}
 }
 
@@ -3906,6 +3955,12 @@ func (c *checker) checkCallExpr(n ast.NodeIndex) Type {
 	if c.isBuiltinCall(callee, "remove") {
 		return c.checkRemoveCall(n, args)
 	}
+	if c.isBuiltinCall(callee, "resume") {
+		return c.checkResumeCall(n, args)
+	}
+	if c.isBuiltinCall(callee, "done") {
+		return c.checkDoneCall(n, args)
+	}
 	if t, ok := c.checkConstructorCall(n, callee, args); ok {
 		return t
 	}
@@ -3947,7 +4002,35 @@ func (c *checker) checkCallExpr(n ast.NodeIndex) Type {
 			c.checkNoIllegalCopy(a, sig.Params[i], true, fmt.Sprintf("argument %d", i+1))
 		}
 	}
+
+	// Calling an async func (see LANGUAGE.md's "Coroutines" section)
+	// produces a coroutine handle, not its own declared (void, this round)
+	// signature return type directly - the same "wrap the callee's ordinary
+	// signature into a special result Type" shape a generator call needs no
+	// equivalent of, since a generator's own declared return type already
+	// IS TypeGenerator (see checkFuncDecl); async's marker lives on the
+	// FuncDecl itself instead (Tree.FuncIsAsync), not the return-type
+	// position, so it's the call site, not funcSigForCall, that wraps it.
+	if c.calleeIsAsyncFunc(callee) {
+		ret := sig.Return
+		return Type{Kind: TypeCoroutine, Elem: &ret}
+	}
 	return sig.Return
+}
+
+// calleeIsAsyncFunc reports whether callee names a declared async func (see
+// LANGUAGE.md's "Coroutines" section) - async functions are top-level-only
+// this round (no closures/FuncLit - see LANGUAGE.md), so callee is always a
+// plain Ident resolving to a SymFunc with a real FuncDecl when this is true.
+func (c *checker) calleeIsAsyncFunc(callee ast.NodeIndex) bool {
+	if c.tree.Nodes[callee].Kind != enums.NodeKinds.Ident {
+		return false
+	}
+	sym, ok := c.info.Refs[callee]
+	if !ok || sym.Kind != SymFunc || sym.Decl == ast.InvalidNode {
+		return false
+	}
+	return sym.Tree.FuncIsAsync(sym.Decl)
 }
 
 // isPrintCall reports whether callee names the predeclared print function
@@ -4132,6 +4215,44 @@ func (c *checker) checkLenCall(n ast.NodeIndex, args []ast.NodeIndex) Type {
 	}
 	c.errorAt(args[0], "len is not defined for %s", t)
 	return invalidType
+}
+
+// checkResumeCall type-checks the predeclared `resume(h) bool` builtin (see
+// LANGUAGE.md's "Coroutines" section) - resumes a suspended coroutine handle
+// once, reporting whether it suspended again (true, more to do) or has
+// finished (false).
+func (c *checker) checkResumeCall(n ast.NodeIndex, args []ast.NodeIndex) Type {
+	return c.checkCoroHandleArgCall(n, args, "resume")
+}
+
+// checkDoneCall type-checks the predeclared `done(h) bool` builtin (see
+// LANGUAGE.md's "Coroutines" section) - reports whether h has already
+// finished (normally, or via `delete`/scope exit).
+func (c *checker) checkDoneCall(n ast.NodeIndex, args []ast.NodeIndex) Type {
+	return c.checkCoroHandleArgCall(n, args, "done")
+}
+
+// checkCoroHandleArgCall type-checks resume/done's identical shape - exactly
+// one argument, which must be a coroutine handle - returning bool either
+// way. Shared since the two builtins differ only in name and codegen, not
+// in how their one argument is checked.
+func (c *checker) checkCoroHandleArgCall(n ast.NodeIndex, args []ast.NodeIndex, name string) Type {
+	if len(args) != 1 {
+		c.errorAtNodes(args, n, "%s takes exactly 1 argument, got %d", name, len(args))
+		for _, a := range args {
+			c.checkValueExpr(a)
+		}
+		return invalidType
+	}
+	t := c.checkValueExpr(args[0])
+	if t.IsInvalid() {
+		return invalidType
+	}
+	if t.Kind != TypeCoroutine {
+		c.errorAt(args[0], "%s requires a coroutine handle, got %s", name, t)
+		return invalidType
+	}
+	return boolType
 }
 
 // checkRemoveCall type-checks the predeclared `remove(m, k)` builtin (see

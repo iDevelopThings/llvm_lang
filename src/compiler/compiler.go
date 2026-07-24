@@ -32,6 +32,7 @@ import (
 	"llvm_lang/src/ast"
 	"llvm_lang/src/codegen"
 	"llvm_lang/src/diag"
+	"llvm_lang/src/enums"
 	"llvm_lang/src/frontend"
 	"llvm_lang/src/lexer"
 	"llvm_lang/src/loader"
@@ -206,7 +207,40 @@ func CompileProgram(prog *loader.Program, optimize bool) *Result {
 // entirely, so today's pre-optimization behavior is restored byte-for-byte,
 // useful for isolating whether a bug lives in codegen itself or was
 // introduced by an optimization pass.
+// checkNoOptAsyncRestriction rejects any `async func` when optimize is
+// false (see finishPipeline's own caller, cmd/llvmc's `-no-opt` flag) -
+// llvm.coro.* intrinsics are only ever lowered into real code by the
+// optimization pipeline's own coroutine-splitting passes (see CODEGEN.md's
+// "Coroutines" section), so skipping RunPasses entirely (exactly what
+// optimize=false does) would otherwise leave every coroutine call unlowered:
+// not a clean crash, but silently wrong/garbage behavior at runtime, a far
+// worse failure mode than refusing to compile at all.
+func checkNoOptAsyncRestriction(trees []*ast.Tree) map[*ast.Tree]*diag.Bag {
+	stageDiags := make(map[*ast.Tree]*diag.Bag, len(trees))
+	for _, tree := range trees {
+		bag := diag.NewBag()
+		for decl := range tree.TopLevelDeclsOfKind(enums.NodeKinds.FuncDecl) {
+			if !tree.FuncIsAsync(decl) {
+				continue
+			}
+			span := tree.SpanOf(decl)
+			bag.ErrorfSpan(span.Start, span.End, "async functions require the optimization pipeline (llvm.coro.* intrinsics are only lowered by it) - cannot compile with -no-opt")
+		}
+		stageDiags[tree] = bag
+	}
+	return stageDiags
+}
+
 func finishPipeline(trees []*ast.Tree, diags map[*ast.Tree]*diag.Bag, infos map[*ast.Tree]*sema.Info, moduleName string, optimize bool) *Result {
+	if !optimize {
+		if hasErrors := frontend.MergeStage(diags, trees, checkNoOptAsyncRestriction(trees)); hasErrors {
+			return &Result{
+				Trees: trees,
+				Diags: diags,
+			}
+		}
+	}
+
 	mod, gdiags := codegen.GeneratePackage(trees, infos, moduleName)
 	if frontend.MergeStage(diags, trees, gdiags) {
 		mod.Dispose()

@@ -78,6 +78,19 @@ import (
 // yielded element type) - the same "wraps one other Type" field
 // TypeArray/TypePointer already share.
 //
+// TypeCoroutine is the type of calling an `async func` (see LANGUAGE.md's
+// "Coroutines" section: `h := DoThing(args)`) - unlike TypeGenerator/
+// TypeMultiReturn, a real, storable, non-copyable value (see
+// typeIsNonCopyable/IsNonCopyable below): the whole point is a caller can
+// hold the handle in a variable and drive it by hand (resume/done/delete).
+// Reuses Type's own Elem field for the coroutine's own declared final-result
+// type - the same "wraps one other Type" convention TypeArray/TypePointer/
+// TypeGenerator already share. Async functions declare no return type this
+// round (see LANGUAGE.md's "Coroutines" section for why), so Elem is always
+// TypeVoid for now - kept as a real field rather than omitted so a future
+// round can read a finished coroutine's own result with no representation
+// change here.
+//
 // TypeUntypedNil is the predeclared `nil` identifier's own starting type
 // (see LANGUAGE.md's "Pointers" section), modeled directly on that same
 // untyped-constant precedent but deliberately scoped to pointer types only -
@@ -114,6 +127,7 @@ const (
 
 	TypeMultiReturn
 	TypeGenerator
+	TypeCoroutine
 )
 
 // TypeInt is a synonym for TypeI32, not a distinct TypeKind value: "int" in
@@ -323,6 +337,8 @@ func (t Type) Equal(u Type) bool {
 		return true
 	case TypeGenerator:
 		return t.Elem.Equal(*u.Elem)
+	case TypeCoroutine:
+		return t.Elem.Equal(*u.Elem)
 	default:
 		return true
 	}
@@ -399,6 +415,11 @@ func (t Type) String() string {
 		return "(" + strings.Join(parts, ", ") + ")"
 	case TypeGenerator:
 		return "yield " + t.Elem.String()
+	case TypeCoroutine:
+		if t.Elem == nil || t.Elem.Kind == TypeVoid {
+			return "coroutine"
+		}
+		return "coroutine " + t.Elem.String()
 	default:
 		return "<unknown type>"
 	}

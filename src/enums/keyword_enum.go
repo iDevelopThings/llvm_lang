@@ -36,6 +36,8 @@ const (
 	KeywordMatch       Keyword = "Match"
 	KeywordYield       Keyword = "Yield"
 	KeywordRange       Keyword = "Range"
+	KeywordAsync       Keyword = "Async"
+	KeywordAwait       Keyword = "Await"
 )
 
 type KeywordContainer struct {
@@ -62,6 +64,8 @@ type KeywordContainer struct {
 	Match       Keyword
 	Yield       Keyword
 	Range       Keyword
+	Async       Keyword
+	Await       Keyword
 }
 
 // Keywords is the entry point for the Keyword enum.
@@ -89,6 +93,8 @@ var Keywords = KeywordContainer{
 	Match:       KeywordMatch,
 	Yield:       KeywordYield,
 	Range:       KeywordRange,
+	Async:       KeywordAsync,
+	Await:       KeywordAwait,
 }
 
 // KeywordInfo is the static metadata attached to a Keyword.
@@ -214,6 +220,16 @@ var keywordInfos = map[Keyword]KeywordInfo{
 		Name:    "Range",
 		String:  "range",
 	},
+	KeywordAsync: {
+		Keyword: KeywordAsync,
+		Name:    "Async",
+		String:  "async",
+	},
+	KeywordAwait: {
+		Keyword: KeywordAwait,
+		Name:    "Await",
+		String:  "await",
+	},
 }
 
 var keywordValues = []Keyword{
@@ -240,6 +256,8 @@ var keywordValues = []Keyword{
 	KeywordMatch,
 	KeywordYield,
 	KeywordRange,
+	KeywordAsync,
+	KeywordAwait,
 }
 
 var keywordByName = map[string]Keyword{
@@ -266,6 +284,8 @@ var keywordByName = map[string]Keyword{
 	"match":       KeywordMatch,
 	"yield":       KeywordYield,
 	"range":       KeywordRange,
+	"async":       KeywordAsync,
+	"await":       KeywordAwait,
 }
 
 // Values returns every declared value in declaration order.
