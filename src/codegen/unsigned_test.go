@@ -1,6 +1,9 @@
 package codegen
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // Unsigned widths lower to the same LLVM iN types as their signed
 // counterparts; only division/remainder/ordered-comparison/extension/
@@ -244,6 +247,9 @@ func TestUnsignedLiteralOutOfRangeIsCodegenError(t *testing.T) {
 			if gdiags.ErrorCount() != 1 {
 				t.Fatalf("ErrorCount = %d, want 1: %v", gdiags.ErrorCount(), gdiags.All())
 			}
+			if msg := gdiags.All()[0].Msg; !strings.Contains(msg, "out of range") {
+				t.Fatalf("message = %q, want it to mention out of range", msg)
+			}
 		})
 	}
 }
@@ -256,11 +262,17 @@ func TestNegativeLiteralIntoUnsignedIsCodegenError(t *testing.T) {
 		if gdiags.ErrorCount() != 1 {
 			t.Fatalf("ErrorCount = %d, want 1: %v", gdiags.ErrorCount(), gdiags.All())
 		}
+		if msg := gdiags.All()[0].Msg; !strings.Contains(msg, "negation of unsigned constant") {
+			t.Fatalf("message = %q, want it to mention negation of unsigned constant", msg)
+		}
 	})
 	t.Run("local", func(t *testing.T) {
 		gdiags := compileSrcExpectCodegenError(t, "func main() {\n\tvar x u8 = -1\n\tprint(x)\n}\n")
 		if gdiags.ErrorCount() != 1 {
 			t.Fatalf("ErrorCount = %d, want 1: %v", gdiags.ErrorCount(), gdiags.All())
+		}
+		if msg := gdiags.All()[0].Msg; !strings.Contains(msg, "negation of unsigned constant") {
+			t.Fatalf("message = %q, want it to mention negation of unsigned constant", msg)
 		}
 	})
 }
