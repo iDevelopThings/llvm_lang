@@ -1081,7 +1081,7 @@ func (c *checker) checkMultiShortVarDeclNode(decl ast.NodeIndex) Type {
 		c.declTypes[nodeRef{c.tree, nameNode}] = t
 		c.info.Types[nameNode] = t
 		c.recordLocalDeclLoopDepth(nameNode)
-		c.checkNoIllegalCopy(value, t, true, "short variable declaration")
+		c.checkNoIllegalCopy(c.destructureSourceAt(value, i), t, true, "short variable declaration")
 	}
 	return Type{
 		Kind:   TypeMultiReturn,
@@ -1116,9 +1116,25 @@ func (c *checker) checkMultiAssignStmt(n ast.NodeIndex) {
 			// a fresh construction), so freshness has to be checked against
 			// the destructured source - see checkMultiShortVarDeclNode's own
 			// identical call, its `:=` counterpart.
-			c.checkNoIllegalCopy(value, targetTypes[i], true, fmt.Sprintf("assignment target %d", i+1))
+			c.checkNoIllegalCopy(c.destructureSourceAt(value, i), targetTypes[i], true, fmt.Sprintf("assignment target %d", i+1))
 		}
 	}
+}
+
+// destructureSourceAt returns the actual source expression checkNoIllegalCopy
+// should ask "is this fresh?" about for a destructuring statement's i'th
+// name/target - see checkDestructureSource's own doc comment for value's
+// three possible shapes. Only the parallel MultiValueExpr form has a
+// distinct expression per position; the other two are one shared expression,
+// returned as-is regardless of i.
+func (c *checker) destructureSourceAt(value ast.NodeIndex, i int) ast.NodeIndex {
+	if c.tree.Nodes[value].Kind == enums.NodeKinds.MultiValueExpr {
+		children := c.tree.Children(value)
+		if i < len(children) {
+			return children[i]
+		}
+	}
+	return value
 }
 
 // checkDestructureSource type-checks value - a multi-target destructuring
