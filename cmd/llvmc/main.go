@@ -22,6 +22,7 @@
 //	llvmc <file.llx>
 //	llvmc <directory>
 //	llvmc -emit-llvm <file.llx or directory>
+//	llvmc [-l <lib>]... [-L <dir>]... <file.llx or directory>
 //	llvmc -o <output> [-l <lib>]... [-L <dir>]... <file.llx or directory>
 //	llvmc -no-opt <file.llx or directory>
 //
@@ -51,10 +52,11 @@
 // Neither flag given keeps the default JIT-execution behavior exactly as
 // before.
 //
-// -l / -L (repeatable) append gcc-style linker search dirs and libraries to
-// that AOT link step only - required for third-party C libs that are not on
-// mingw's default import-lib set. Using either without -o is a usage error
-// (JIT/-emit-llvm never invoke the linker).
+// -l / -L (repeatable) make a third-party C library available to whichever
+// backend runs: AOT forwards them as gcc -L/-l; JIT resolves each -l to a
+// real .dll or static .a/.lib under the -L dirs and attaches ORC search
+// generators (see CODEGEN.md / bindExtraLibraries). Using either with
+// -emit-llvm is a usage error (IR dump never loads libraries).
 //
 // Source file extension: this project picks ".llx" for llvm_lang source
 // files - ".ll" is already LLVM's own textual IR format's extension, and
@@ -67,7 +69,7 @@
 //
 // Exit codes:
 //   - 2: usage error - no path argument, an unrecognized flag, both -o and
-//     -emit-llvm given together, -l/-L without -o, the path couldn't be
+//     -emit-llvm given together, -l/-L with -emit-llvm, the path couldn't be
 //     resolved to a real file/directory, or its resolved directory has zero
 //     .llx files in it. A short usage message is printed to stderr; nothing
 //     is compiled.
@@ -80,8 +82,9 @@
 //     diagnostic collected by whichever stage failed first is printed to
 //     stderr via diag.FormatSnippet (a "file:line:col: severity: message" header plus
 //     the offending source line and a caret), and no later stage runs. This
-//     also covers the module failing LLVM's own verifier, and the module
-//     JIT-executing but containing no `main` function to run. With
+//     also covers the module failing LLVM's own verifier, the module
+//     JIT-executing but containing no `main` function to run, and JIT
+//     failing to resolve a -l library under the given -L dirs. With
 //     -emit-llvm, this is the only non-zero exit code possible - a verified
 //     module's IR is always printed and this process always exits 0
 //     afterward. With -o, this also covers a failure in the AOT-specific
@@ -162,11 +165,11 @@ func run(args []string, stderr io.Writer) int {
 		"skip the default LLVM optimization pipeline (default<O2>), keeping the module exactly as codegen produced it - useful for debugging",
 	)
 	var linkLibs, linkDirs []string
-	fs.Func("l", "add a library for the AOT link step (gcc -l); requires -o; repeatable", func(s string) error {
+	fs.Func("l", "add a library for AOT (gcc -l) or JIT (resolve .dll/.a under -L); repeatable", func(s string) error {
 		linkLibs = append(linkLibs, s)
 		return nil
 	})
-	fs.Func("L", "add a library search directory for the AOT link step (gcc -L); requires -o; repeatable", func(s string) error {
+	fs.Func("L", "add a library search directory for AOT/JIT -l resolution; repeatable", func(s string) error {
 		linkDirs = append(linkDirs, s)
 		return nil
 	})
@@ -184,8 +187,12 @@ func run(args []string, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "llvmc: -emit-llvm and -o are mutually exclusive")
 		return exitUsage
 	}
-	if (len(linkLibs) > 0 || len(linkDirs) > 0) && *output == "" {
-		fmt.Fprintln(stderr, "llvmc: -l and -L require -o")
+	if (len(linkLibs) > 0 || len(linkDirs) > 0) && *emitLLVM {
+		fmt.Fprintln(stderr, "llvmc: -l and -L cannot be used with -emit-llvm")
+		return exitUsage
+	}
+	if len(linkDirs) > 0 && len(linkLibs) == 0 {
+		fmt.Fprintln(stderr, "llvmc: -L requires -l")
 		return exitUsage
 	}
 
@@ -277,7 +284,7 @@ func compileAndRunProgram(prog *loader.Program, stderr io.Writer, emitLLVM bool)
 // in src/compiler.
 //
 // linkLibs/linkDirs are the -l/-L values from run (nil/empty for in-process
-// test helpers that never AOT-link). Only meaningful when outputPath != "".
+// test helpers). Used by AOT (gcc) and by JIT (ORC library generators).
 func finish(res *compiler.Result, stderr io.Writer, outputPath string, emitLLVM bool, linkLibs, linkDirs []string) int {
 	for _, tree := range res.Trees {
 		b := res.Diags[tree]
@@ -309,7 +316,7 @@ func finish(res *compiler.Result, stderr io.Writer, outputPath string, emitLLVM 
 		return 0
 	}
 
-	code, err := jitRunMain(res.Module)
+	code, err := jitRunMain(res.Module, linkLibs, linkDirs)
 	if err != nil {
 		fmt.Fprintf(stderr, "llvmc: %v\n", err)
 		return exitCompile
@@ -565,7 +572,7 @@ var (
 // separately), a single jit.Dispose() tears down the module and context
 // together, in the correct order - no separate mod.Ctx.Dispose() call needed
 // at all once jit exists.
-func jitRunMain(mod *codegen.Module) (int, error) {
+func jitRunMain(mod *codegen.Module, linkLibs, linkDirs []string) (int, error) {
 	initJIT()
 
 	jit, err := llvm.NewLLJIT(llvm.NewLLJITBuilder())
@@ -582,6 +589,12 @@ func jitRunMain(mod *codegen.Module) (int, error) {
 		mod.Dispose()
 		jit.Dispose()
 		return 0, fmt.Errorf("failed to bind __main thunk: %w", err)
+	}
+
+	if err := bindExtraLibraries(jit, linkLibs, linkDirs); err != nil {
+		mod.Dispose()
+		jit.Dispose()
+		return 0, err
 	}
 
 	tsctx := llvm.NewThreadSafeContextFromContext(mod.Ctx)
@@ -605,4 +618,33 @@ func jitRunMain(mod *codegen.Module) (int, error) {
 	jit.Dispose()
 
 	return int(int32(uint32(r1))), nil
+}
+
+// bindExtraLibraries attaches ORC definition generators for each -l library
+// after the process-wide generator (bindMinGWMainThunk). Shared libs use
+// ForPath; static archives use StaticLibrarySearchGeneratorForPath.
+func bindExtraLibraries(jit llvm.LLJIT, linkLibs, linkDirs []string) error {
+	if len(linkLibs) == 0 {
+		return nil
+	}
+	arts, err := resolveLibraryArtifacts(linkLibs, linkDirs)
+	if err != nil {
+		return err
+	}
+	for _, art := range arts {
+		var dg llvm.DefinitionGenerator
+		switch art.Kind {
+		case libraryShared:
+			dg, err = llvm.NewDynamicLibrarySearchGeneratorForPath(art.Path, jit.GlobalPrefix())
+		case libraryStatic:
+			dg, err = llvm.NewStaticLibrarySearchGeneratorForPath(jit.ObjLinkingLayer(), art.Path)
+		default:
+			return fmt.Errorf("internal: unknown library kind for %s", art.Path)
+		}
+		if err != nil {
+			return fmt.Errorf("attaching library %s: %w", art.Path, err)
+		}
+		jit.MainJITDylib().AddGenerator(dg)
+	}
+	return nil
 }

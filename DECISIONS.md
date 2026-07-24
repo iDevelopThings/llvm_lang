@@ -1739,18 +1739,17 @@ scheduler_demo.llx`, run JIT and AOT alike.
 ## 2026-07-24 - AOT linker flags: repeatable `-l`/`-L` on `llvmc`
 
 **Decision:** extend `compileToExecutable`'s gcc argv with repeatable
-`-L <dir>` / `-l <lib>` flags (dirs before libs), required when `-o` is
-set; using either without `-o` is a usage error.
+`-L <dir>` / `-l <lib>` flags (dirs before libs).
 
 **Why:** libc and default Win32 import libs already resolve without flags,
 but third-party C libraries (anything not on mingw's default link line) do
 not. Keeping AOT as shell-out-to-gcc (see the 2026-07-23 AOT entry) means
 the natural place for this is the existing link command, not a new linker
-or language-level "link" declaration. JIT still only sees process-loaded
-symbols - documenting that third-party `.a`/`.lib` need `-o` is intentional.
+or language-level "link" declaration.
 
-**Status:** shipped. See `CODEGEN.md`'s `-o` section and
-`TestBinary_AOT_LinkLib` / `TestRun_LinkFlagsRequireOutput`.
+**Status:** shipped, then extended so the same flags also feed JIT (see the
+"JIT third-party libraries" entry below). See `CODEGEN.md`'s `-o` section
+and `TestBinary_AOT_LinkLib`.
 
 ---
 
@@ -1939,6 +1938,33 @@ non-extern-source case), `src/codegen` (bare-`ptr` IR shape, no
 `TestBinary_AOT_LinkLibCFuncCallback` - a real gcc-compiled static library
 that itself calls the passed function pointer, linked via the existing
 `-L`/`-l` path.
+
+---
+
+## 2026-07-24 - JIT third-party libraries: unified `-l`/`-L` via ORC path generators
+
+**Decision:** the same `-l`/`-L` flags used for AOT also feed the default
+JIT path. Each `-l` is resolved under the `-L` dirs to a real `.dll` or
+static `.a`/`.lib`, then attached with
+`NewDynamicLibrarySearchGeneratorForPath` or
+`NewStaticLibrarySearchGeneratorForPath` (after the existing process-wide
+generator). `-emit-llvm` still rejects `-l`/`-L` (IR dump never loads
+libraries). `-L` without `-l` is a usage error.
+
+**Why not LoadLibrary + ForProcess only:** that would work for DLLs but
+not for the static `.a` archives mingw game libs often ship, and it would
+pollute the llvmc process rather than using ORC's intended path-based
+generators (already wrapped in `third_party/go-llvm/orcjit.go`).
+
+**Why skip `*.dll.a`:** mingw import libs don't contain the real object
+code the static generator needs; accepting them would look like success
+and then fail at symbol lookup. Error asks for the real `.dll` or a true
+static archive.
+
+**Status:** shipped. See `CODEGEN.md`'s "JIT third-party libraries"
+section, `cmd/llvmc/linkresolve.go`, and
+`TestBinary_JIT_LinkLibStatic` / `TestBinary_JIT_LinkLibDLL` /
+`TestRun_JIT_MissingLibrary`.
 
 ---
 

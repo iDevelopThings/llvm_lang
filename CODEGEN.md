@@ -2509,9 +2509,10 @@ produces a real `.exe` at the given path instead.
    automatically via mingw64's standard import libraries - confirmed by
    `TestBinary_AOT_ExternFuncScopeTimer`. Third-party libs that are not on
    that default set need explicit repeatable `-L`/`-l` flags (dirs before
-   libs on the gcc argv). Using either without `-o` is a usage error -
-   JIT/`-emit-llvm` never invoke the linker. Confirmed by
-   `TestBinary_AOT_LinkLib` and the struct/`cfunc` AOT link tests.
+   libs on the gcc argv). The same flags also feed the default JIT path
+   (see "JIT third-party libraries" below) - `-emit-llvm` alone still
+   rejects them as a usage error. Confirmed by `TestBinary_AOT_LinkLib`
+   and the struct/`cfunc` AOT link tests.
 
 **`main`'s own LLVM signature needed no change at all** - `main` still
 lowers to the exact same parameterless `i32 @main()` this project has
@@ -2524,6 +2525,30 @@ access for the `args()` builtin instead goes through `__argc`/`__argv` - see
 
 **Mutually exclusive with `-emit-llvm`** - `run` rejects both flags given
 together as a usage error before ever compiling anything.
+
+## JIT third-party libraries (`-L` / `-l` without `-o`)
+
+The default JIT path uses the same `-L`/`-l` flags as AOT. After the
+process-wide symbol generator (`bindMinGWMainThunk`), `bindExtraLibraries`
+resolves each `-l` name under the given `-L` dirs (`resolveLibraryArtifact`
+in `cmd/llvmc/linkresolve.go`) and attaches an ORC definition generator:
+
+- **Shared** (`.dll`, preferred when present): `NewDynamicLibrarySearchGeneratorForPath`
+- **Static** (`.a` / `.lib`): `NewStaticLibrarySearchGeneratorForPath` via
+  `jit.ObjLinkingLayer()`
+
+Search order per name `foo`: `foo.dll`, `libfoo.dll`, then `libfoo.a`,
+`foo.a`, `foo.lib`, `libfoo.lib`. A bare filename that already ends in a
+library extension (`libfoo.a`, `foo.dll`) is looked up as that exact name
+under each `-L` dir. Only a path with a directory separator is treated as a
+literal filesystem path (not searched via `-L`). Mingw import libs (`*.dll.a`)
+are rejected with a clear error - they don't contain real code for the static
+generator; provide the real `.dll` or a true static archive. Resolution is
+limited to the explicit `-L` dirs (no vague system-wide search) so tests stay
+hermetic.
+
+Confirmed by `TestBinary_JIT_LinkLibStatic`, `TestBinary_JIT_LinkLibDLL`,
+and `TestRun_JIT_MissingLibrary`.
 
 ## Source file extension: `.llx`
 
@@ -2541,11 +2566,11 @@ doesn't accidentally pull its siblings into the same package.
 ## Exit codes
 
 - **2** - a usage error: no path argument, an unrecognized flag, both `-o`
-  and `-emit-llvm` given together, `-l`/`-L` without `-o`, the path couldn't
-  be resolved to a real file/directory, its resolved directory has zero
-  `.llx` files in it, an imported package directory couldn't be found, or a
-  real import cycle was detected. A short message goes to stderr; nothing is
-  compiled.
+  and `-emit-llvm` given together, `-l`/`-L` with `-emit-llvm`, `-L` without
+  `-l`, the path couldn't be resolved to a real file/directory, its resolved
+  directory has zero `.llx` files in it, an imported package directory
+  couldn't be found, or a real import cycle was detected. A short message
+  goes to stderr; nothing is compiled.
 - **1** - a compile-time diagnostic from the lexer, parser stage, or from
   `src/compiler`'s `finishPipeline`: `sema.ResolveProgram` (or
   `ResolvePackage`, for an import-less package), `sema.CheckProgram`, or
@@ -2553,7 +2578,8 @@ doesn't accidentally pull its siblings into the same package.
   reporting an error-severity diagnostic in any file) - or the module
   failing LLVM's own verifier, or (rarer still) `finishPipeline`'s own
   target-machine construction or (with optimization on) its `RunPasses`
-  call failing, or a module with no `main` function to JIT-execute. Every
+  call failing, or a module with no `main` function to JIT-execute, or JIT
+  failing to resolve a `-l` library under the given `-L` dirs. Every
   diagnostic is printed to stderr via `diag.FormatSnippet`. With
   `-emit-llvm`, this is the only non-zero exit code reachable at all. With
   `-o`, this also covers every failure mode specific to that path's own

@@ -1011,17 +1011,16 @@ func TestRun_EmitLLVMAndOutputMutuallyExclusive(t *testing.T) {
 	}
 }
 
-// TestRun_LinkFlagsRequireOutput covers -l/-L without -o: those flags only
-// feed the AOT gcc link step, so using them under JIT or -emit-llvm is a
-// usage error rather than silently ignored.
-func TestRun_LinkFlagsRequireOutput(t *testing.T) {
+// TestRun_LinkFlagsWithEmitLLVM covers -l/-L with -emit-llvm: those flags
+// only feed AOT linking or JIT library generators, so using them when only
+// dumping IR is a usage error.
+func TestRun_LinkFlagsWithEmitLLVM(t *testing.T) {
 	cases := []struct {
 		name string
 		args []string
 	}{
-		{"-l without -o", []string{"-l", "m", "../../examples/hello/hello.llx"}},
-		{"-L without -o", []string{"-L", ".", "../../examples/hello/hello.llx"}},
 		{"-l with -emit-llvm", []string{"-emit-llvm", "-l", "m", "../../examples/hello/hello.llx"}},
+		{"-L with -emit-llvm", []string{"-emit-llvm", "-L", ".", "../../examples/hello/hello.llx"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1030,10 +1029,109 @@ func TestRun_LinkFlagsRequireOutput(t *testing.T) {
 			if code != exitUsage {
 				t.Errorf("exit code = %d, want %d, stderr:\n%s", code, exitUsage, stderr.String())
 			}
-			if !strings.Contains(stderr.String(), "-l and -L require -o") {
-				t.Errorf("stderr = %q, want it to mention -l/-L requiring -o", stderr.String())
+			if !strings.Contains(stderr.String(), "-l and -L cannot be used with -emit-llvm") {
+				t.Errorf("stderr = %q, want it to mention -l/-L vs -emit-llvm", stderr.String())
 			}
 		})
+	}
+}
+
+// TestBinary_JIT_LinkLibStatic JIT-runs a program that calls into a tiny
+// static C library via -L/-l - the acceptance path for third-party .a under
+// LLJIT (NewStaticLibrarySearchGeneratorForPath).
+func TestBinary_JIT_LinkLibStatic(t *testing.T) {
+	dir := t.TempDir()
+	cPath := filepath.Join(dir, "addone.c")
+	if err := os.WriteFile(cPath, []byte("int add_one(int x) { return x + 1; }\n"), 0o644); err != nil {
+		t.Fatalf("writing C source: %v", err)
+	}
+	objPath := filepath.Join(dir, "addone.o")
+	if out, err := exec.Command("gcc", "-c", cPath, "-o", objPath).CombinedOutput(); err != nil {
+		t.Fatalf("compiling C object: %v\n%s", err, out)
+	}
+	libPath := filepath.Join(dir, "libaddone.a")
+	if out, err := exec.Command("ar", "rcs", libPath, objPath).CombinedOutput(); err != nil {
+		t.Fatalf("creating static lib: %v\n%s", err, out)
+	}
+
+	srcPath := filepath.Join(dir, "main.llx")
+	src := "extern func add_one(x i32) i32\n" +
+		"func main() int {\n" +
+		"\treturn add_one(41)\n" +
+		"}\n"
+	if err := os.WriteFile(srcPath, []byte(src), 0o644); err != nil {
+		t.Fatalf("writing llx source: %v", err)
+	}
+
+	cmd := exec.Command(llvmcPath, "-L", dir, "-l", "addone", srcPath)
+	if err := cmd.Run(); err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			if ee.ExitCode() != 42 {
+				t.Fatalf("llvmc exit code = %d, want 42\nstderr:\n%s", ee.ExitCode(), ee.Stderr)
+			}
+			return
+		}
+		t.Fatalf("running llvmc: %v", err)
+	}
+	t.Fatal("llvmc exited 0, want 42")
+}
+
+// TestBinary_JIT_LinkLibDLL is TestBinary_JIT_LinkLibStatic's shared-library
+// counterpart (NewDynamicLibrarySearchGeneratorForPath).
+func TestBinary_JIT_LinkLibDLL(t *testing.T) {
+	dir := t.TempDir()
+	cPath := filepath.Join(dir, "addone.c")
+	if err := os.WriteFile(cPath, []byte("int add_one(int x) { return x + 1; }\n"), 0o644); err != nil {
+		t.Fatalf("writing C source: %v", err)
+	}
+	dllPath := filepath.Join(dir, "addone.dll")
+	if out, err := exec.Command("gcc", "-shared", "-o", dllPath, cPath).CombinedOutput(); err != nil {
+		t.Fatalf("compiling DLL: %v\n%s", err, out)
+	}
+
+	srcPath := filepath.Join(dir, "main.llx")
+	src := "extern func add_one(x i32) i32\n" +
+		"func main() int {\n" +
+		"\treturn add_one(41)\n" +
+		"}\n"
+	if err := os.WriteFile(srcPath, []byte(src), 0o644); err != nil {
+		t.Fatalf("writing llx source: %v", err)
+	}
+
+	cmd := exec.Command(llvmcPath, "-L", dir, "-l", "addone", srcPath)
+	if err := cmd.Run(); err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			if ee.ExitCode() != 42 {
+				t.Fatalf("llvmc exit code = %d, want 42\nstderr:\n%s", ee.ExitCode(), ee.Stderr)
+			}
+			return
+		}
+		t.Fatalf("running llvmc: %v", err)
+	}
+	t.Fatal("llvmc exited 0, want 42")
+}
+
+// TestRun_JIT_MissingLibrary covers -l resolution failure under JIT: clear
+// compile-error exit, not a panic, with the missing lib named on stderr.
+func TestRun_JIT_MissingLibrary(t *testing.T) {
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "main.llx")
+	src := "extern func add_one(x i32) i32\n" +
+		"func main() int {\n" +
+		"\treturn add_one(41)\n" +
+		"}\n"
+	if err := os.WriteFile(srcPath, []byte(src), 0o644); err != nil {
+		t.Fatalf("writing llx source: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	code := run([]string{"-L", dir, "-l", "addone", srcPath}, &stderr)
+	if code != exitCompile {
+		t.Errorf("exit code = %d, want %d, stderr:\n%s", code, exitCompile, stderr.String())
+	}
+	got := stderr.String()
+	if !strings.Contains(got, "addone") || !strings.Contains(got, "not found") {
+		t.Errorf("stderr = %q, want missing-library diagnostic naming addone", got)
 	}
 }
 
