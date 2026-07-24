@@ -13,15 +13,10 @@ import (
 // byte-column Position meant only for this compiler's own terminal
 // diagnostics (see diag.FormatSnippet).
 //
-// TODO(lsp): this is the one UTF-16<->byte conversion an LSP genuinely
-// needs that src/lexer has no reason to carry on its own (a diagnostic
-// rendered to a terminal only ever needs a byte column) - kept local to
-// src/lsp rather than added to lexer.File itself, since src/lexer is
-// off-limits to touch this round (see doc.go's scope-constraint note).
-// Worth reconsidering whether this belongs as a lexer.File method once core
-// packages are safe to touch again - byteOffsetToPosition's own line-lookup
-// logic (file.Position + file.Line) duplicates work an eventual
-// lexer.File-native version could do in one pass instead of two.
+// Deliberately stays in src/lsp, not lexer.File: UTF-16 encoding is an
+// LSP-protocol concern with no reason to leak into the lexer's own
+// terminal-diagnostic-only Position (which only ever needs a byte column) -
+// see AGENTS.md's Architecture section.
 func byteOffsetToPosition(file *lexer.File, pos lexer.Pos) protocol.Position {
 	p := file.Position(pos)
 	lineText := file.Line(p.Line)

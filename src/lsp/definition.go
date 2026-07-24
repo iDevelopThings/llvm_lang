@@ -20,7 +20,7 @@ func (w *Workspace) Definition(path string, pos protocol.Position) *protocol.Loc
 	}
 
 	offset := positionToByteOffset(fa.Tree.File.Src, pos)
-	n := nodeAt(fa.Tree, offset)
+	n := fa.Tree.NodeAt(offset)
 	if n == ast.InvalidNode {
 		return nil
 	}

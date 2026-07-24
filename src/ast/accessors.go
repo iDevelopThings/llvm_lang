@@ -4,6 +4,7 @@ import (
 	"iter"
 
 	"llvm_lang/src/enums"
+	"llvm_lang/src/lexer"
 )
 
 // TopLevelDeclsOfKind yields every one of tree's top-level declarations
@@ -374,4 +375,35 @@ func (t *Tree) MultiAssignStmtTargets(n NodeIndex) []NodeIndex {
 func (t *Tree) MultiAssignStmtValue(n NodeIndex) NodeIndex {
 	children := t.Children(n)
 	return children[len(children)-1]
+}
+
+// NodeAt returns the innermost node whose span contains pos, or InvalidNode
+// if pos falls outside the tree entirely - the "what is under the cursor"
+// query a tool like an LSP needs (hover, go-to-definition). Descends only
+// into children whose own span actually contains pos, skipping every
+// sibling subtree that doesn't - O(depth), not O(tree size): span
+// containment forms a strict nesting (a child's span is always inside its
+// parent's), so a node whose span excludes pos can never have a descendant
+// that includes it either.
+func (t *Tree) NodeAt(pos lexer.Pos) NodeIndex {
+	if t.Root == InvalidNode {
+		return InvalidNode
+	}
+	return t.nodeAtIn(t.Root, pos)
+}
+
+func (t *Tree) nodeAtIn(n NodeIndex, pos lexer.Pos) NodeIndex {
+	span := t.SpanOf(n)
+	if pos < span.Start || pos > span.End {
+		return InvalidNode
+	}
+	for _, c := range t.Children(n) {
+		if c == InvalidNode {
+			continue
+		}
+		if found := t.nodeAtIn(c, pos); found != InvalidNode {
+			return found
+		}
+	}
+	return n
 }

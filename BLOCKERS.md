@@ -46,3 +46,35 @@ cleanup" - a non-copyable type's own scope-exit/`delete`-time cleanup - but
 deliberately don't attempt anything like a general GC/refcounting scheme (no
 recursive cascading through embedded fields, no move semantics); the arena's
 own question above is still open regardless.
+
+---
+
+## Incremental reparse / a real green-red tree for the LSP
+
+Building `src/lsp` (an editor language server) surfaced a real, open design
+question: `ast.Tree` today is index/arena-based (`NodeIndex int32` into a
+flat `Tree.Nodes` slice, no pointers) - already structurally close to a
+Roslyn/rust-analyzer "green tree." But `ast.Node.Span` stores **absolute**
+byte offsets, not relative width. A real green tree stores width specifically
+so an unedited subtree's identity is position-invariant and structurally
+shareable across an edit (the "red tree" is then a thin, lazily-materialized
+layer on top that computes absolute positions/parent chains on demand).
+Bolting a red layer onto the current absolute-offset representation would not
+get that sharing - it would need `ast.Node`'s own representation reworked
+first (relative width instead of absolute `Span`, touching the parser and
+every `Span` consumer), a genuinely separate, nontrivial project from "add
+LSP support."
+
+**Why this isn't inferable/default-able:** it's a real product/performance
+tradeoff (how much engineering effort now vs. later, for a benefit that only
+matters once reparse-per-edit is measurably too slow), not something with an
+obvious "right" default the way most engineering calls in this codebase are.
+
+**Current default (explicitly chosen, not just deferred by omission):**
+`src/lsp` re-runs the whole frontend (lexer -> parser -> sema.Resolve/
+CheckProgram) on every debounced edit, no incremental reuse at all.
+`BENCHMARKS.md`'s own numbers - lexer+parser+sema together at ~238us for a
+small fixture, ~3.2ms for a large (40x) one - make this comfortably fast
+enough for an interactive editor loop at this project's current scale.
+Revisit only once a real, large `.llx` file actually demonstrates
+reparse-per-edit is too slow in practice - not speculatively ahead of that.

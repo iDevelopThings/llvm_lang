@@ -8,18 +8,8 @@
 // Deliberately whole-file-reparse-per-edit, not incremental: lexer+parser+
 // sema together benchmark at ~238us (small file) to ~3.2ms (large, per
 // BENCHMARKS.md) - cheap enough to re-run on every debounced edit without a
-// real incremental-reparse (green/red tree) architecture. See
-// BLOCKERS_DRAFT.md in this directory for the full write-up of what a real
-// incremental architecture would need and why it was deliberately deferred.
-//
-// Scope note: every file in this package was written under an explicit
-// constraint (see the approved plan for this round) to touch only
-// src/lsp and cmd/llvmc-lsp, since other work was concurrently touching the
-// language core (src/ast, src/sema, src/parser, src/lexer, src/loader,
-// src/compiler). Anything that conceptually belongs in one of those
-// packages instead - a generic AST helper, a repo-doc entry - is
-// implemented/drafted locally here, each marked with a
-// "TODO(lsp): move to <real location>" comment, so a later pass can migrate
-// it once those packages are safe to touch again. See BLOCKERS_DRAFT.md and
-// nodeat.go/positions.go for the concrete instances.
+// real incremental-reparse (green/red tree) architecture. See BLOCKERS.md's
+// "Incremental reparse / a real green-red tree for the LSP" entry for the
+// full write-up of what a real incremental architecture would need and why
+// it was deliberately deferred.
 package lsp
