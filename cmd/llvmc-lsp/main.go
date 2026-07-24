@@ -49,15 +49,16 @@ func main() {
 	commonlog.Configure(1, nil)
 
 	handler = protocol.Handler{
-		Initialize:                     initialize,
-		Initialized:                    initialized,
-		Shutdown:                       shutdown,
-		TextDocumentDidOpen:            didOpen,
-		TextDocumentDidChange:          didChange,
-		TextDocumentDidClose:           didClose,
-		TextDocumentHover:              hover,
-		TextDocumentDefinition:         definition,
-		TextDocumentSemanticTokensFull: semanticTokensFull,
+		Initialize:                      initialize,
+		Initialized:                     initialized,
+		Shutdown:                        shutdown,
+		WorkspaceDidChangeConfiguration: didChangeConfiguration,
+		TextDocumentDidOpen:             didOpen,
+		TextDocumentDidChange:           didChange,
+		TextDocumentDidClose:            didClose,
+		TextDocumentHover:               hover,
+		TextDocumentDefinition:          definition,
+		TextDocumentSemanticTokensFull:  semanticTokensFull,
 	}
 
 	srv := server.NewServer(&handler, serverName, false)
@@ -101,6 +102,21 @@ func initialized(context *glsp.Context, params *protocol.InitializedParams) erro
 
 func shutdown(context *glsp.Context) error {
 	protocol.SetTraceValue(protocol.TraceValueOff)
+	return nil
+}
+
+// didChangeConfiguration acknowledges the client's own settings changing -
+// a real no-op, since this server has no configuration surface at all yet
+// (no settings.json/initializationOptions consumed anywhere - see
+// src/lsp). A client is free to send this notification unconditionally
+// whenever its own settings change, regardless of whether the server ever
+// declared interest in it - leaving this field nil (glsp's default) is
+// what previously produced a "method not supported: workspace/
+// didChangeConfiguration" error in the client's own LSP log (LSP4IJ sends
+// it on every settings change): protocol.Handler.Handle only dispatches a
+// notification method whose matching field is non-nil, so a real handler,
+// even one that does nothing, is what correctly acknowledges it instead.
+func didChangeConfiguration(context *glsp.Context, params *protocol.DidChangeConfigurationParams) error {
 	return nil
 }
 
