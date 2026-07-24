@@ -79,61 +79,60 @@ func runWatch(cfg watchConfig, stderr io.Writer) int {
 	}
 	defer unload()
 
-	// install replaces the live module. ORC cannot host two modules that
-	// define the same symbols, so the old tracker is removed first; a
-	// failure after that point cannot restore last-good (compile errors
-	// never reach here - they return before install). trees is checked via
-	// validateWatchEntrySig before Init/Tick are ever looked up or called -
-	// jit.Lookup alone only proves a symbol with the right NAME exists, not
-	// that it has the right signature, and calling a wrong-arity/wrong-
-	// return-type function through a raw syscall reads garbage arguments
-	// silently rather than crashing (confirmed directly: a one-int-param
-	// Frame hangs the process forever instead of erroring).
+	// install checks Init/Tick's shape against trees (a pure AST check) before
+	// touching the live module at all, so a shape failure - including Tick
+	// missing entirely, e.g. a non-atomic editor write caught mid-save -
+	// leaves the running module and hasRT untouched and reports via
+	// errCompileFailed like any other reload failure; mod isn't owned by
+	// anything yet at that point, so it must be disposed on those paths. Past
+	// that, ORC can't host two modules defining the same symbols, so the old
+	// tracker is removed first - a failure from there on cannot restore
+	// last-good (see orcjit.go's NewThreadSafeModule doc comment for the
+	// ownership handoff, and jitRunMain for the identical pattern).
 	install := func(mod *codegen.Module, trees []*ast.Tree) error {
+		fail := func(format string, args ...any) error {
+			mod.Dispose()
+			fmt.Fprintf(stderr, "llvmc: "+format+"\n", args...)
+			return errCompileFailed
+		}
+		initFound := false
+		if cfg.InitName != "" {
+			found, verr := validateWatchEntrySig(trees, cfg.InitName, false)
+			if verr != nil {
+				return fail("%v", verr)
+			}
+			if !found && cfg.InitRequired {
+				return fail("no %s function found in module", cfg.InitName)
+			}
+			initFound = found
+		}
+		tickFound, verr := validateWatchEntrySig(trees, cfg.TickName, true)
+		if verr != nil {
+			return fail("%v", verr)
+		}
+		if !tickFound {
+			return fail("no %s function found in module", cfg.TickName)
+		}
+
 		unload()
 		rt = jit.MainJITDylib().CreateResourceTracker()
 		hasRT = true
 		tsctx := llvm.NewThreadSafeContextFromContext(mod.Ctx)
 		tsm := llvm.NewThreadSafeModule(mod.LLVM, tsctx)
 		if err := jit.AddLLVMIRModuleWithRT(rt, tsm); err != nil {
-			// No mod.Dispose() here: NewThreadSafeModule already took
-			// ownership of mod.LLVM the moment it was called, regardless of
-			// whether this call succeeds - see its own doc comment
-			// (orcjit.go) and jitRunMain's identical, correct pattern.
 			unload()
 			return fmt.Errorf("failed to add module to LLJIT: %w", err)
 		}
 		if initAddr, err := jit.Lookup("llvm_lang.global_init"); err == nil {
 			syscall.SyscallN(uintptr(initAddr))
 		}
-		if cfg.InitName != "" {
-			found, verr := validateWatchEntrySig(trees, cfg.InitName, false)
-			switch {
-			case verr != nil:
+		if initFound {
+			initAddr, err := jit.Lookup(cfg.InitName)
+			if err != nil {
 				unload()
-				return verr
-			case !found:
-				if cfg.InitRequired {
-					unload()
-					return fmt.Errorf("no %s function found in module", cfg.InitName)
-				}
-			default:
-				initAddr, err := jit.Lookup(cfg.InitName)
-				if err != nil {
-					unload()
-					return fmt.Errorf("internal: %s passed signature validation but has no address: %w", cfg.InitName, err)
-				}
-				syscall.SyscallN(uintptr(initAddr))
+				return fmt.Errorf("internal: %s passed signature validation but has no address: %w", cfg.InitName, err)
 			}
-		}
-		found, verr := validateWatchEntrySig(trees, cfg.TickName, true)
-		if verr != nil {
-			unload()
-			return verr
-		}
-		if !found {
-			unload()
-			return fmt.Errorf("no %s function found in module", cfg.TickName)
+			syscall.SyscallN(uintptr(initAddr))
 		}
 		return nil
 	}

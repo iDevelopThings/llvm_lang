@@ -376,6 +376,106 @@ func TestBinary_Watch_LastGoodOnError(t *testing.T) {
 	}
 }
 
+// TestBinary_Watch_LastGoodOnMissingTick covers a reload that compiles
+// cleanly but is missing TickName (Frame) - the shape a non-atomic in-place
+// write produces if -watch reads the file mid-write, before the writer has
+// gotten to Frame. This must be treated the same as any other reload
+// failure: keep the last-good module running and retry on the next change,
+// not exit fatally (unlike TestRun_Watch_MissingTick's initial-load case,
+// where there is no last-good module to fall back to).
+func TestBinary_Watch_LastGoodOnMissingTick(t *testing.T) {
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "main.llx")
+	good := "" +
+		"var seen int = 0\n" +
+		"func Init() {\n" +
+		"\tprint(\"init-good\")\n" +
+		"}\n" +
+		"func Frame() int {\n" +
+		"\tif seen == 0 {\n" +
+		"\t\tprint(\"frame-good\")\n" +
+		"\t\tseen = 1\n" +
+		"\t}\n" +
+		"\treturn 0\n" +
+		"}\n"
+	missingTick := "func Init() {\n}\n"
+	final := "" +
+		"func Init() {\n" +
+		"\tprint(\"init-final\")\n" +
+		"}\n" +
+		"func Frame() int {\n" +
+		"\tprint(\"frame-final\")\n" +
+		"\treturn 5\n" +
+		"}\n"
+	if err := os.WriteFile(srcPath, []byte(good), 0o644); err != nil {
+		t.Fatalf("writing source: %v", err)
+	}
+
+	cmd := exec.Command(llvmcPath, "-watch", srcPath)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("StdoutPipe: %v", err)
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatalf("StderrPipe: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	outLines := make(chan string, 128)
+	errLines := make(chan string, 128)
+	go scanLines(stdout, outLines)
+	go scanLines(stderrPipe, errLines)
+
+	waitOut := func(substr string) {
+		t.Helper()
+		waitChan(t, outLines, substr, 10*time.Second, cmd)
+	}
+	waitErr := func(substr string) {
+		t.Helper()
+		waitChan(t, errLines, substr, 10*time.Second, cmd)
+	}
+
+	waitOut("init-good")
+	waitOut("frame-good")
+
+	time.Sleep(20 * time.Millisecond)
+	if err := os.WriteFile(srcPath, []byte(missingTick), 0o644); err != nil {
+		_ = cmd.Process.Kill()
+		t.Fatalf("writing missing-tick source: %v", err)
+	}
+	waitErr("keeping last good module")
+
+	time.Sleep(20 * time.Millisecond)
+	if err := os.WriteFile(srcPath, []byte(final), 0o644); err != nil {
+		_ = cmd.Process.Kill()
+		t.Fatalf("writing final source: %v", err)
+	}
+	waitOut("init-final")
+	waitOut("frame-final")
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("llvmc exited 0, want 5")
+		}
+		ee, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("Wait: %v", err)
+		}
+		if ee.ExitCode() != 5 {
+			t.Fatalf("exit code = %d, want 5", ee.ExitCode())
+		}
+	case <-time.After(10 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatal("timed out waiting for watch process exit")
+	}
+}
+
 func scanLines(r io.Reader, ch chan<- string) {
 	sc := bufio.NewScanner(r)
 	for sc.Scan() {
