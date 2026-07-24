@@ -308,6 +308,98 @@ func run() int {
 	}
 }
 
+// TestDestructorFiresInBareOneLineIfBranch is the regression test for the
+// bare, brace-less `if cond: stmt` form (LANGUAGE.md's "Missing return"
+// section) - its single then-statement is not wrapped in a Block node (see
+// parseIfStmt, parser/stmt.go), so a destructor-owning local declared
+// directly in that position must still get its own destructor call at the
+// if's own merge point, exactly as if it had been written `if cond { r :=
+// Resource(1) }`. Asserts both directions: the branch taken (destructor
+// fires) and not taken (it must not).
+func TestDestructorFiresInBareOneLineIfBranch(t *testing.T) {
+	jm := compileAndJIT(t, `
+struct Resource {
+	id int
+	constructor(v int) {
+		this.id = v
+	}
+	destructor() {
+		calls = calls + 1
+	}
+}
+
+var calls int = 0
+
+func run(cond bool) int {
+	if cond: r := Resource(1)
+	return calls
+}
+`)
+	if got := jm.runInt32(t, "run", 1); got != 1 {
+		t.Errorf("run(true) = %d, want 1 (r's destructor must fire once the bare one-line if branch falls through)", got)
+	}
+}
+
+// TestDestructorDoesNotFireInSkippedBareOneLineIfBranch is the "not taken"
+// counterpart: when the bare one-line if's condition is false, its
+// then-statement never runs at all, so no local was ever constructed and no
+// destructor call should fire either.
+func TestDestructorDoesNotFireInSkippedBareOneLineIfBranch(t *testing.T) {
+	jm := compileAndJIT(t, `
+struct Resource {
+	id int
+	constructor(v int) {
+		this.id = v
+	}
+	destructor() {
+		calls = calls + 1
+	}
+}
+
+var calls int = 0
+
+func run(cond bool) int {
+	if cond: r := Resource(1)
+	return calls
+}
+`)
+	if got := jm.runInt32(t, "run", 0); got != 0 {
+		t.Errorf("run(false) = %d, want 0 (the bare one-line if branch was never taken, so no destructor should fire)", got)
+	}
+}
+
+// TestDestructorFiresInNestedBareElseIfBranch covers the one way a bare
+// colon-form branch can appear nested inside a brace-form if: `else if
+// cond: stmt` recurses into a fresh parseIfStmt/genIfStmt call for that
+// inner IfStmt, whose own thenNode gets the identical genIfBranch fix - a
+// bare `else: stmt` (no `if`) is grammatically impossible (parseIfStmt only
+// ever takes p.parseBlock() for a plain else).
+func TestDestructorFiresInNestedBareElseIfBranch(t *testing.T) {
+	jm := compileAndJIT(t, `
+struct Resource {
+	id int
+	constructor(v int) {
+		this.id = v
+	}
+	destructor() {
+		calls = calls + 1
+	}
+}
+
+var calls int = 0
+
+func run(x int) int {
+	if x == 1 {
+		print(999)
+	} else if x == 2: r := Resource(2)
+	return calls
+}
+`)
+	if got := jm.runInt32(t, "run", 2); got != 1 {
+		t.Errorf("run(2) = %d, want 1 (r's destructor must fire in the nested else-if's own bare branch)", got)
+	}
+}
+
 // TestForLoopInitDeclaredDestructorFiresAtLoopExit is the regression test for
 // the bug fixed alongside this test: a for-loop's init clause (`for r :=
 // Resource(1); ...`) declares r in a scope that closes the moment the loop

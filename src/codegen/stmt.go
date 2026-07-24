@@ -1093,6 +1093,27 @@ func (g *Generator) genRangeGeneratorCallbackFunc(keyNode, bodyNode ast.NodeInde
 	return fn
 }
 
+// genIfBranch generates an if-statement's then-branch, which - unlike an
+// else/else-if branch - can be a single bare statement rather than a real
+// Block (the `if cond: stmt` form - parseIfStmt, parser/stmt.go). A bare
+// statement never goes through genBlock, so without this it would never get
+// its own unwindDestructorsToScope call: a destructor-owning local declared
+// directly in that position would be pushed onto Generator.destructors but
+// never popped with a real destructor call. Treat it as an implicit
+// one-statement block: snapshot before, unwind after, same as genBlock does
+// for a real one.
+func (g *Generator) genIfBranch(n ast.NodeIndex) bool {
+	if g.tree.Nodes[n].Kind == enums.NodeKinds.Block {
+		return g.genBlock(n)
+	}
+	base := g.snapshotDestructorScope()
+	term := g.genStmt(n)
+	if !term {
+		g.unwindDestructorsToScope(base)
+	}
+	return term
+}
+
 // genIfStmt lowers both grammar forms (`if cond: stmt` and the brace form
 // with an optional else/else-if chain) - they produce the identical
 // [cond, then, else] shape post-parse (see ast.Node's IfStmt doc comment),
@@ -1140,7 +1161,7 @@ func (g *Generator) genIfStmt(n ast.NodeIndex) bool {
 	preIf := g.snapshotDestructors()
 
 	g.builder.SetInsertPointAtEnd(thenBB)
-	thenTerm := g.genStmt(thenNode)
+	thenTerm := g.genIfBranch(thenNode)
 	if !thenTerm {
 		g.builder.CreateBr(mergeBB)
 	}
