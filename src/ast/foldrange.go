@@ -77,14 +77,12 @@ func (t *Tree) collectImportFoldRange(out *[]FoldRange) {
 
 // collectCommentFoldRanges re-lexes src (a fresh, throwaway File/Lexer,
 // deliberately not t.File - comments aren't represented as Nodes at all, so
-// reaching them needs a real re-lex, and using a second File instead of
-// t's own can't perturb its already-built trivia arena/line table) and
-// folds every contiguous run of 2+ line comments as one region, stopping a
-// run at a blank line (2+ newlines in an intervening whitespace run) or a
-// block comment. Walking the file's whole trivia arena as one flat,
-// already-in-source-order slice (bounded by the EOF token's own
-// LeadingTrivia.End(), the arena's final index) is simpler than
-// re-deriving order from per-token trivia batches.
+// reaching them needs a real re-lex) and folds every contiguous run of 2+
+// standalone line comments (see isStandaloneComment) as one region.
+// Contiguity is decided by comparing consecutive standalone comments' own
+// line numbers, not by counting blank-line newlines in between - automatic
+// semicolon insertion splits a statement's trailing blank-line whitespace
+// across two trivia chunks, which defeats a newline-counting heuristic.
 func collectCommentFoldRanges(name, src string, out *[]FoldRange) {
 	file := lexer.NewFile(name, src)
 	lx := lexer.New(file)
@@ -97,6 +95,7 @@ func collectCommentFoldRanges(name, src string, out *[]FoldRange) {
 	}
 
 	var run []lexer.Trivia
+	lastLine := 0
 	flush := func() {
 		if len(run) >= 2 {
 			appendFoldRange(file, Span{
@@ -109,16 +108,29 @@ func collectCommentFoldRanges(name, src string, out *[]FoldRange) {
 	for _, tr := range file.Trivia(lexer.Range{Start: 0, Count: lastTrivia.End()}) {
 		switch tr.Kind {
 		case lexer.TriviaKinds.LineComment:
-			run = append(run, tr)
-		case lexer.TriviaKinds.BlockComment:
-			flush()
-		case lexer.TriviaKinds.Whitespace:
-			if strings.Count(file.TriviaText(tr), "\n") >= 2 {
+			if !isStandaloneComment(file, tr) {
+				continue
+			}
+			line := file.Position(tr.Start).Line
+			if len(run) > 0 && line != lastLine+1 {
 				flush()
 			}
+			run = append(run, tr)
+			lastLine = line
+		case lexer.TriviaKinds.BlockComment:
+			flush()
 		}
 	}
 	flush()
+}
+
+// isStandaloneComment reports whether tr sits alone on its own source line -
+// only leading whitespace precedes it - as opposed to trailing real code
+// (e.g. `x := 1 // note`).
+func isStandaloneComment(file *lexer.File, tr lexer.Trivia) bool {
+	pos := file.Position(tr.Start)
+	prefix := file.Line(pos.Line)[:pos.Column-1]
+	return strings.TrimSpace(prefix) == ""
 }
 
 // appendFoldRange converts span to a FoldRange, skipping it entirely if it
