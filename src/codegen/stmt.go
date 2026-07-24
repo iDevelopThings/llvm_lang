@@ -1093,16 +1093,17 @@ func (g *Generator) genRangeGeneratorCallbackFunc(keyNode, bodyNode ast.NodeInde
 	return fn
 }
 
-// genIfBranch generates an if-statement's then-branch, which - unlike an
-// else/else-if branch - can be a single bare statement rather than a real
-// Block (the `if cond: stmt` form - parseIfStmt, parser/stmt.go). A bare
-// statement never goes through genBlock, so without this it would never get
-// its own unwindDestructorsToScope call: a destructor-owning local declared
-// directly in that position would be pushed onto Generator.destructors but
-// never popped with a real destructor call. Treat it as an implicit
-// one-statement block: snapshot before, unwind after, same as genBlock does
-// for a real one.
-func (g *Generator) genIfBranch(n ast.NodeIndex) bool {
+// genScopedStmt generates n giving it the identical destructor-unwind
+// treatment a real Block gets (genBlock), whether or not n actually is one -
+// several grammar positions allow a single bare statement in place of a
+// Block (an if's own `if cond: stmt` then-branch, a for-loop's own init/post
+// clauses - all parsed via parseSimpleStmt/parseIfStmt), and a bare
+// statement never goes through genBlock on its own: a destructor-owning
+// local declared directly in one of those positions would otherwise be
+// pushed onto Generator.destructors but never popped with a real destructor
+// call. Every one of those call sites shares this single helper rather than
+// each re-deriving the identical snapshot-before/unwind-after shape by hand.
+func (g *Generator) genScopedStmt(n ast.NodeIndex) bool {
 	if g.tree.Nodes[n].Kind == enums.NodeKinds.Block {
 		return g.genBlock(n)
 	}
@@ -1161,7 +1162,7 @@ func (g *Generator) genIfStmt(n ast.NodeIndex) bool {
 	preIf := g.snapshotDestructors()
 
 	g.builder.SetInsertPointAtEnd(thenBB)
-	thenTerm := g.genIfBranch(thenNode)
+	thenTerm := g.genScopedStmt(thenNode)
 	if !thenTerm {
 		g.builder.CreateBr(mergeBB)
 	}
@@ -1363,16 +1364,11 @@ func (g *Generator) genForStmt(n ast.NodeIndex) bool {
 		g.locals[loopVarSym] = loopVarOrigAddr
 	}
 	if postNode != ast.InvalidNode {
-		// postNode is a bare statement (parseSimpleStmt), never a Block, so
-		// unlike the body it doesn't go through genBlock's own unwind - a
-		// ShortVarDecl post-clause (`for ...; ...; x := Resource(i) {}`)
-		// would otherwise leave x's destructor entry sitting on the flat
-		// stack across iterations instead of firing once per iteration.
-		// parseSimpleStmt can't produce a return/break/continue, so postNode
-		// never terminates this block.
-		postBase := g.snapshotDestructorScope()
-		g.genStmt(postNode)
-		g.unwindDestructorsToScope(postBase)
+		// genScopedStmt's own doc comment covers why post specifically needs
+		// this (parseSimpleStmt never produces a Block) - it can't itself
+		// terminate (return/break/continue), so its own bool result is
+		// always false and isn't worth naming here.
+		g.genScopedStmt(postNode)
 	}
 	g.builder.CreateBr(condBB)
 
