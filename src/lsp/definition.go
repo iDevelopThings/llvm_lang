@@ -17,6 +17,11 @@ import (
 // different package entirely, than the one being hovered), the returned
 // Location always points at the symbol's own declaring file, not
 // necessarily path.
+//
+// Points at the declaring *name* specifically (sym.DeclaringNameNode - see
+// its own doc comment for why that differs from sym.Decl's full span),
+// falling back to sym.Decl itself only for the one case it can't resolve
+// further (SymReceiver).
 func (w *Workspace) Definition(path string, pos protocol.Position) *protocol.Location {
 	fa, n, ok := w.resolveNode(path, pos)
 	if !ok {
@@ -42,7 +47,11 @@ func (w *Workspace) Definition(path string, pos protocol.Position) *protocol.Loc
 		return nil
 	}
 
-	declSpan := sym.Tree.SpanOf(sym.Decl)
+	target := sym.DeclaringNameNode(sym.Tree)
+	if target == ast.InvalidNode {
+		target = sym.Decl
+	}
+	declSpan := sym.Tree.SpanOf(target)
 	return &protocol.Location{
 		URI: URIFromPath(sym.Tree.File.Name),
 		Range: protocol.Range{
