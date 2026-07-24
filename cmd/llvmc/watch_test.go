@@ -76,6 +76,66 @@ func TestRun_Watch_MissingTick(t *testing.T) {
 	}
 }
 
+// TestRun_Watch_TickWrongArity covers the signature-validation fix: a Frame
+// declaring a parameter is rejected with a clean diagnostic before ever
+// being called - calling a wrong-arity Tick via the raw syscall this driver
+// uses reads garbage arguments silently rather than crashing, confirmed
+// directly (before this fix) to hang the process forever instead of erroring.
+func TestRun_Watch_TickWrongArity(t *testing.T) {
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "main.llx")
+	src := "func Frame(x int) int {\n\treturn x\n}\n"
+	if err := os.WriteFile(srcPath, []byte(src), 0o644); err != nil {
+		t.Fatalf("writing source: %v", err)
+	}
+	var stderr bytes.Buffer
+	code := run([]string{"-watch", srcPath}, &stderr)
+	if code != exitCompile {
+		t.Errorf("exit code = %d, want %d, stderr:\n%s", code, exitCompile, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "no parameters") {
+		t.Errorf("stderr = %q, want a no-parameters diagnostic", stderr.String())
+	}
+}
+
+// TestRun_Watch_TickWrongReturnType is TestRun_Watch_TickWrongArity's
+// return-type counterpart.
+func TestRun_Watch_TickWrongReturnType(t *testing.T) {
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "main.llx")
+	src := "func Frame() bool {\n\treturn true\n}\n"
+	if err := os.WriteFile(srcPath, []byte(src), 0o644); err != nil {
+		t.Fatalf("writing source: %v", err)
+	}
+	var stderr bytes.Buffer
+	code := run([]string{"-watch", srcPath}, &stderr)
+	if code != exitCompile {
+		t.Errorf("exit code = %d, want %d, stderr:\n%s", code, exitCompile, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "must return int") {
+		t.Errorf("stderr = %q, want a must-return-int diagnostic", stderr.String())
+	}
+}
+
+// TestRun_Watch_InitWrongReturnType covers Init's own signature validation -
+// it must be void, since -watch never reads its return value.
+func TestRun_Watch_InitWrongReturnType(t *testing.T) {
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "main.llx")
+	src := "func Init() int {\n\treturn 1\n}\nfunc Frame() int {\n\treturn 1\n}\n"
+	if err := os.WriteFile(srcPath, []byte(src), 0o644); err != nil {
+		t.Fatalf("writing source: %v", err)
+	}
+	var stderr bytes.Buffer
+	code := run([]string{"-watch", srcPath}, &stderr)
+	if code != exitCompile {
+		t.Errorf("exit code = %d, want %d, stderr:\n%s", code, exitCompile, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "must not declare a return type") {
+		t.Errorf("stderr = %q, want a must-not-declare-a-return-type diagnostic", stderr.String())
+	}
+}
+
 // TestBinary_Watch_TickExit runs -watch until Frame returns non-zero.
 func TestBinary_Watch_TickExit(t *testing.T) {
 	dir := t.TempDir()
