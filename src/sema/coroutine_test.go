@@ -142,3 +142,78 @@ func TestPassCoroutineHandleAsArgIsError(t *testing.T) {
 	src := "async func Coro() {\n\tawait\n}\n\nfunc take(h int) {}\n\nfunc use() {\n\th := Coro()\n\ttake(h)\n\tdelete h\n}\n"
 	expectCheckErrors(t, src, 1)
 }
+
+// --- the `coroutine` type keyword - a real, spellable name for TypeCoroutine
+// (see typeFromSymbol's "coroutine" case), usable anywhere an ordinary type
+// name is legal: var decl, struct field, function param ---
+
+func TestCoroutineTypeVarDeclIsFine(t *testing.T) {
+	checkSrc(t, "func f() {\n\tvar h coroutine\n\tdelete h\n}\n")
+}
+
+func TestCoroutineTypeStructFieldIsFine(t *testing.T) {
+	checkSrc(t, "struct Entry {\n\th coroutine\n}\n")
+}
+
+func TestCoroutineTypeFuncParamIsFine(t *testing.T) {
+	src := "async func Coro() {\n\tawait\n}\n\nfunc take(h coroutine) {\n\tdelete h\n}\n\nfunc use() {\n\ttake(Coro())\n}\n"
+	checkSrc(t, src)
+}
+
+// TestPassExistingHandleToCoroutineParamIsError mirrors
+// TestPassCoroutineHandleAsArgIsError, now against a real `coroutine`-typed
+// param rather than an unrelated `int` one - the non-copyable rejection is
+// identical either way, keyed off Kind alone.
+func TestPassExistingHandleToCoroutineParamIsError(t *testing.T) {
+	src := "async func Coro() {\n\tawait\n}\n\nfunc take(h coroutine) {\n\tdelete h\n}\n\nfunc use() {\n\th := Coro()\n\ttake(h)\n\tdelete h\n}\n"
+	expectCheckErrors(t, src, 1)
+}
+
+// TestAssignExistingHandleToCoroutineFieldIsError proves the non-copyable
+// rule still fires for a `coroutine`-typed struct field, not just a param -
+// only a fresh call result may fill it (see checkNoIllegalCopy's fresh-
+// construction exception), never an existing named handle.
+func TestAssignExistingHandleToCoroutineFieldIsError(t *testing.T) {
+	src := "struct Entry {\n\th coroutine\n}\n\nasync func Coro() {\n\tawait\n}\n\nfunc use() {\n\th := Coro()\n\te := Entry{}\n\te.h = h\n\tdelete h\n}\n"
+	expectCheckErrors(t, src, 1)
+}
+
+// TestAssignFreshHandleToCoroutineFieldIsFine is the accepted counterpart -
+// `entry.h = Coro()` fills the field with a brand-new handle, exactly as
+// fresh as a composite-literal element or a function argument.
+func TestAssignFreshHandleToCoroutineFieldIsFine(t *testing.T) {
+	src := "struct Entry {\n\th coroutine\n}\n\nasync func Coro() {\n\tawait\n}\n\nfunc use() {\n\te := Entry{}\n\te.h = Coro()\n}\n"
+	checkSrc(t, src)
+}
+
+// TestDynamicArrayOfCoroutineFieldStructIsError proves a struct containing a
+// `coroutine` field is rejected as a dynamic-array element exactly like any
+// other destructor-owning/non-copyable struct already is (see
+// TestDynamicArrayOfNonCopyableElementTypeIsError) - the coroutine field
+// alone (no explicit destructor()) is enough to make Entry non-copyable.
+func TestDynamicArrayOfCoroutineFieldStructIsError(t *testing.T) {
+	src := "struct Entry {\n\th coroutine\n}\n\nvar arr []Entry\n"
+	expectCheckErrors(t, src, 1)
+}
+
+// TestFixedArrayOfCoroutineFieldStructFreshConstructionIsFine proves a
+// fixed-size array of a coroutine-containing struct still works via the
+// existing fresh-construction exception - each element its own composite
+// literal, each field its own fresh async call.
+func TestFixedArrayOfCoroutineFieldStructFreshConstructionIsFine(t *testing.T) {
+	src := "struct Entry {\n\th coroutine\n}\n\nasync func Coro() {\n\tawait\n}\n\nfunc f() {\n" +
+		"\ta := [2]Entry{Entry{Coro()}, Entry{Coro()}}\n" +
+		"\tdelete a[0].h\n\tdelete a[1].h\n" +
+		"}\n"
+	checkSrc(t, src)
+}
+
+// TestCoroutineFieldOmittedInCompositeLitIsNilHandle proves an omitted
+// `coroutine` field in a composite literal is a safe, defined nil handle -
+// `delete`/resume/done on it are already safe no-ops on a nil handle (see
+// LANGUAGE.md's "Coroutines" section), so a zero-initialized Entry compiles
+// and its field can be deleted with no async call ever having run.
+func TestCoroutineFieldOmittedInCompositeLitIsNilHandle(t *testing.T) {
+	src := "struct Entry {\n\th coroutine\n}\n\nfunc f() {\n\te := Entry{}\n\tdelete e.h\n}\n"
+	checkSrc(t, src)
+}

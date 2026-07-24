@@ -1,0 +1,50 @@
+// scheduler_demo.llx - demonstrates std/scheduler's own Unity-
+// `StartCoroutine`-style API on a real coroutine: the classic "in X
+// seconds, run Y" pattern, driven entirely by Scheduler.Tick rather than
+// hand-written resume/done calls (contrast with examples/coroutines, which
+// drives resume/done by hand).
+//
+// Countdown prints 3, 2, 1 with a 1-second wait between each, via its own
+// nextWait pointer parameter (see std/scheduler/scheduler.llx's own
+// top-of-file usage example) - Entry.Handle/Entry.NextWait must be
+// constructed directly by THIS file, not by Scheduler.Schedule itself (see
+// that file's own doc comment for why: no move semantics means a
+// coroutine handle can only ever be assigned into a field via fresh
+// construction, at the exact call site).
+//
+// Run with:
+//   .\llvmc.exe examples\scheduler_demo\scheduler_demo.llx
+//   echo $LASTEXITCODE   # (PowerShell) -> 0
+//
+// IMPORTANT: like examples/coroutines, this must NOT be compiled with
+// -no-opt - llvm.coro.* intrinsics only lower via the optimization
+// pipeline's own coroutine passes (see CODEGEN.md's "Coroutines" section).
+
+import "../../std/scheduler"
+
+async func Countdown(nextWait *f64) {
+    print(3)
+    *nextWait = 1.0
+    await
+    print(2)
+    *nextWait = 1.0
+    await
+    print(1)
+}
+
+func main() int {
+    var sched scheduler.Scheduler
+
+    e := new scheduler.Entry{}
+    e.Handle = Countdown(&e.NextWait)
+    sched.Schedule(e, 1.0)
+
+    ticks := 0
+    for sched.HasPending() {
+        sched.Tick(0.5)
+        ticks++
+    }
+
+    print(ticks)   // number of 0.5s ticks until the countdown finishes
+    return 0
+}

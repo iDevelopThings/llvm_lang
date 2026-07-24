@@ -10,16 +10,25 @@ import (
 	"tinygo.org/x/go-llvm"
 )
 
-// programHasAsyncFunc reports whether any file in trees declares at least
-// one `async func` - see GeneratePackage's own doc comment for why
-// setupCoroutines is skipped entirely otherwise. A coroutine handle type can
-// only ever originate from calling an async func (sema wouldn't accept one
-// otherwise), so this single check is sufficient to know nothing in the
-// whole package could possibly need any coroutine machinery at all.
-func programHasAsyncFunc(trees []*ast.Tree) bool {
+// programUsesCoroutines reports whether trees needs any coroutine codegen
+// machinery at all - see GeneratePackage's own doc comment for why
+// setupCoroutines is skipped entirely otherwise. Two independent triggers,
+// both checked: declaring an `async func` (even if never called - its own
+// body still needs genCoroPrologue/finishCoroBody's intrinsics), and the
+// `coroutine` type keyword appearing in any var/field/param declaration
+// (info.Types covers every type-position node - see typeFromNode's own doc
+// comment) even with no async func anywhere to ever produce a live handle -
+// a coroutine-typed local still reaches destructorFuncFor's TypeCoroutine
+// case (coroDestroyLocalFn) at codegen time regardless.
+func programUsesCoroutines(trees []*ast.Tree, infos map[*ast.Tree]*sema.Info) bool {
 	for _, tree := range trees {
 		for d := range tree.TopLevelDeclsOfKind(enums.NodeKinds.FuncDecl) {
 			if tree.FuncIsAsync(d) {
+				return true
+			}
+		}
+		for _, t := range infos[tree].Types {
+			if t.Kind == sema.TypeCoroutine {
 				return true
 			}
 		}

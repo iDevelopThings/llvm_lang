@@ -598,6 +598,7 @@ func universeScope() *Scope {
 		"f64",
 		"string",
 		"bool",
+		"coroutine",
 	} {
 		u.Define(&Symbol{
 			Name:  name,

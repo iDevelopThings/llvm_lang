@@ -446,3 +446,22 @@ func run() {
 		t.Errorf("order = %d, want 21 (inner's Res(2) destructs first, then Outer's own Res(1))", got)
 	}
 }
+
+// TestCoroutineTypedVarWithNoAsyncFuncAnywhere covers programUsesCoroutines'
+// own second trigger (coroutine.go): a program with a `coroutine`-typed
+// declaration but ZERO `async func`s anywhere still needs coro.destroylocal
+// set up, since the var's own scope-exit still reaches destructorFuncFor's
+// TypeCoroutine case. h can only ever be nil here (no async func exists to
+// call), so this also proves a nil coroutine handle's own scope-exit cleanup
+// is a safe no-op even when setupCoroutines had nothing else to do.
+func TestCoroutineTypedVarWithNoAsyncFuncAnywhere(t *testing.T) {
+	jm := compileAndJITOptimized(t, `
+func run() int {
+	var h coroutine
+	return 1
+}
+`)
+	if got := jm.runInt32(t, "run"); got != 1 {
+		t.Errorf("run() = %d, want 1", got)
+	}
+}

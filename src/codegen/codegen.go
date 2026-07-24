@@ -643,7 +643,7 @@ func GeneratePackage(trees []*ast.Tree, infos map[*ast.Tree]*sema.Info, moduleNa
 	g.setupTypes()
 	g.setupMapTypes()
 	g.setupRuntime()
-	if programHasAsyncFunc(trees) {
+	if programUsesCoroutines(trees, infos) {
 		// Lazy, like g.argsGlobal/argsUsed just below - not merely for
 		// cleanliness here: coroDestroyLocalFn's own body calls
 		// llvm.coro.destroy, which only ever gets lowered by the

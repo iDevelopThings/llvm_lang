@@ -1938,6 +1938,15 @@ func main() {
   `destructor()` already gets (see "Destructors"). Calling `delete` twice on
   the same handle, or `resume`/`done` after it, is a safe, defined no-op -
   never undefined behavior.
+- **`coroutine`** - a predeclared type keyword naming `TypeCoroutine`
+  directly, usable anywhere an ordinary type name is legal (a `var`
+  declaration, a struct field, a function parameter) - the same non-copyable
+  rules above apply identically regardless of spelling: only a fresh async
+  call may fill a `coroutine`-typed slot, never an existing handle. A struct
+  containing a `coroutine` field is non-copyable like any other destructor-
+  owning struct (see "Destructors"), so a dynamic array of such a struct is
+  rejected the same way; store it behind a pointer instead (see
+  `std/scheduler`'s own `Entry` for the idiom).
 
 ### Explicitly out of scope this round
 
@@ -1950,10 +1959,11 @@ generator functions built on top of it:
   own final result (once `done(h)` is true) needs `llvm.coro.promise`-based
   storage this round doesn't build - see `CODEGEN.md`'s "Coroutines" section
   for the full reasoning behind deferring this rather than half-building it.
-- **No timers/scheduler.** There's no `Wait(seconds)`/`Tick(dt)` - only a
-  bare `await`, resumed purely by an explicit `resume(h)` call. A Unity-style
-  scheduler built from this primitive is a real, natural next round, not
-  this one.
+- **No built-in timers/scheduler.** The core primitive itself is still a
+  bare `await`, resumed purely by an explicit `resume(h)` call - `std/scheduler`
+  now provides a Unity-`StartCoroutine`-style `Schedule`/`Tick` API on top of
+  it, entirely as ordinary stdlib code (see "Standard library" below), not a
+  compiler feature.
 - **No coroutine-to-coroutine interleaving.** An async function can't itself
   call and await another async function - only hand-written driver code
   (like `main` above) resumes a handle. This is arguably the most natural
@@ -2278,6 +2288,16 @@ import "../../std/time"
   untouched; this package is an additive convenience layer, not a
   replacement for it. The tick frequency is cached once via a non-constant
   top-level `var` initializer (see "Global `var` initializers" above).
+- **`std/scheduler`** - a Unity-`StartCoroutine`-style timer scheduler built
+  on top of the `coroutine` type (see "Coroutines" above): `Scheduler.Schedule(e *Entry, initialDelay f64)`,
+  `Scheduler.Tick(dt f64)`, `Scheduler.HasPending() bool`. `Entry` owns one
+  coroutine handle plus its own resume timing, always held behind a pointer
+  (`[]*Entry`, never by value - see "Destructors"' dynamic-array rule).
+  `Entry.Handle`/`Entry.NextWait` are exported so the calling package can
+  construct one directly (`e.Handle = SomeAsyncFunc()`) - `Schedule` itself
+  only ever takes an already-built `*Entry`, never a bare `coroutine`, since
+  this language's non-copyable rule has no move semantics to hand one off
+  through an ordinary parameter (see `DECISIONS.md`'s dated entry).
 
 **Deliberately deferred, not built this round:** Unicode-aware string
 handling (everything above is ASCII-only, matching this language having no

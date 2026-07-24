@@ -1135,6 +1135,25 @@ passes. Given this failure mode is worse than a plain compile-time error,
 (`checkNoOptAsyncRestriction`) - a clean, source-position-attributed
 diagnostic, checked before `codegen.GeneratePackage` even runs.
 
+### The `coroutine` type keyword: zero codegen changes, one gating fix
+
+`coroutine` (`sema/typecheck.go`'s `typeFromSymbol`) resolves straight to
+`Type{Kind: TypeCoroutine, Elem: &voidType}` from the universe scope, the
+same path `int`/`f64`/etc. already use - every codegen site keyed on
+`sema.TypeCoroutine` (`llvmType`, `destructorFuncFor`) already handled it
+generically, so this needed no codegen change of its own.
+
+One real gap it did expose: `programHasAsyncFunc` (now `programUsesCoroutines`,
+`coroutine.go`) used to gate `setupCoroutines` purely on "does the package
+declare an `async func`", on the assumption a coroutine handle could only
+ever originate from calling one. A `coroutine`-typed var/field/param can now
+exist with no async func anywhere in the program - always nil, but still
+destructor-tracked (`destructorFuncFor`'s `TypeCoroutine` case), which would
+reference `coroDestroyLocalFn` uninitialized if `setupCoroutines` were
+skipped. `programUsesCoroutines` now also scans every tree's `info.Types`
+for a `TypeCoroutine` entry (populated for every type-position node - see
+`typeFromNode`'s own doc comment) alongside the original async-func check.
+
 ## `main` is the real entry point
 
 The function literally named `main` (no receiver) becomes the real LLVM
