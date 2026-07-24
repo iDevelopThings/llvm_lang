@@ -62,8 +62,11 @@ func main() int {
 }
 
 // TestAnalyzeProgram_ParseError covers a real syntax error - every file
-// still gets its own parse diagnostics back, but Info stays nil throughout
-// (a structurally broken tree is never safe to hand to Resolve/Check).
+// still gets its own parse diagnostics back, and Info is now still
+// populated best-effort (sema tolerates a partially-malformed tree without
+// panicking - see frontend.RunProgram's own doc comment) rather than going
+// nil for the whole package, so features like completion keep working
+// against everything a parse error didn't directly touch.
 func TestAnalyzeProgram_ParseError(t *testing.T) {
 	prog := loadProgram(t, `
 func Add(a int, b int) int {
@@ -83,8 +86,8 @@ func main() int {
 	}
 	sawError := false
 	for path, fa := range out {
-		if fa.Info != nil {
-			t.Errorf("%s: Info != nil, want nil on a parse error", path)
+		if fa.Info == nil {
+			t.Errorf("%s: Info = nil, want populated best-effort even past a parse error", path)
 		}
 		if fa.Diags != nil && fa.Diags.HasErrors() {
 			sawError = true
@@ -96,9 +99,9 @@ func main() int {
 }
 
 // TestAnalyzeProgram_ResolveError covers a real resolve failure (a reference
-// to an undeclared name) - Info must stay nil (mirroring sema.CheckProgram's
-// own "assumes Resolve succeeded" precondition), but every file still gets
-// its own diagnostics.
+// to an undeclared name) - Info must still be populated best-effort (see
+// TestAnalyzeProgram_ParseError), and every file still gets its own
+// diagnostics.
 func TestAnalyzeProgram_ResolveError(t *testing.T) {
 	prog := loadProgram(t, `
 func Add(a int, b int) int {
@@ -115,8 +118,8 @@ func main() int {
 	out := analyzeProgram(prog, 1)
 	sawError := false
 	for path, fa := range out {
-		if fa.Info != nil {
-			t.Errorf("%s: Info != nil, want nil on a resolve error", path)
+		if fa.Info == nil {
+			t.Errorf("%s: Info = nil, want populated best-effort even past a resolve error", path)
 		}
 		if fa.Diags != nil && fa.Diags.HasErrors() {
 			sawError = true
@@ -124,6 +127,52 @@ func main() int {
 	}
 	if !sawError {
 		t.Error("expected an error-severity diagnostic somewhere, got none")
+	}
+}
+
+// TestAnalyzeProgram_DanglingMemberAccessKeepsSiblingInfo is the concrete
+// completion-blocking case this fix targets: `f.` with nothing typed after
+// it yet (the most common completion trigger position) is itself a parse
+// error by construction (parseMemberExpr's own expectIdent call). A sibling
+// declaration in the SAME file, untouched by that error, must still get a
+// real, usable Info - not just "some file in the package still has Info."
+func TestAnalyzeProgram_DanglingMemberAccessKeepsSiblingInfo(t *testing.T) {
+	prog := loadProgram(t, `
+func Add(a int, b int) int {
+	return a + b
+}
+`, `
+import "../mathutils"
+
+struct Foo {
+	x int
+}
+
+func broken(f Foo) int {
+	f.
+	return f.x
+}
+
+func clean() int {
+	return mathutils.Add(1, 2)
+}
+`)
+
+	out := analyzeProgram(prog, 1)
+	var appFile *FileAnalysis
+	for path, fa := range out {
+		if filepath.Base(path) == "main.llx" {
+			appFile = fa
+		}
+	}
+	if appFile == nil {
+		t.Fatal("app/main.llx not found in analyzeProgram output")
+	}
+	if appFile.Info == nil {
+		t.Fatal("main.llx: Info = nil, want populated despite the dangling `f.` parse error")
+	}
+	if !appFile.Diags.HasErrors() {
+		t.Error("main.llx: expected the dangling `f.` to still produce an error diagnostic")
 	}
 }
 

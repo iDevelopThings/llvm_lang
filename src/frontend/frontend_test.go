@@ -71,8 +71,11 @@ func main() int {
 }
 
 // TestRunProgram_ParseError covers a real syntax error in one package's own
-// file - RunProgram must stop before Resolve/Check ever run (Infos nil),
-// exactly like CompileProgram's own identical guard.
+// file - RunProgram still drives Resolve/Check to completion against
+// whatever the parser recovered (sema tolerates a partially-malformed tree
+// without panicking - see RunProgram's own doc comment), so src/lsp can
+// still get usable Info for the parts of the program a parse error didn't
+// touch. HasErrors still reports true.
 func TestRunProgram_ParseError(t *testing.T) {
 	prog := loadProgram(t, `
 func Add(a int, b int) int {
@@ -90,8 +93,8 @@ func main() int {
 	if !res.HasErrors {
 		t.Fatal("HasErrors = false, want true on a parse error")
 	}
-	if res.Infos != nil {
-		t.Error("Infos != nil, want nil - a parse error must stop the pipeline before Resolve ever runs")
+	if res.Infos == nil {
+		t.Error("Infos = nil, want populated best-effort even past a parse error")
 	}
 	if !anyDiagHasErrors(res) {
 		t.Errorf("expected an error-severity diagnostic somewhere, got: %v", dumpDiags(res))
@@ -99,9 +102,9 @@ func main() int {
 }
 
 // TestRunProgram_ResolveError covers a real sema.ResolveProgram failure - a
-// reference to an undeclared name - which must stop the pipeline before
-// sema.CheckProgram ever runs (Infos nil, mirroring sema.CheckProgram's own
-// "assumes Resolve succeeded" precondition).
+// reference to an undeclared name - which must still drive CheckProgram to
+// completion and populate Infos (ResolveProgram never returns a nil infos
+// map, error or not - see its own doc comment).
 func TestRunProgram_ResolveError(t *testing.T) {
 	prog := loadProgram(t, `
 func Add(a int, b int) int {
@@ -119,8 +122,8 @@ func main() int {
 	if !res.HasErrors {
 		t.Fatal("HasErrors = false, want true on a resolve error")
 	}
-	if res.Infos != nil {
-		t.Error("Infos != nil, want nil - a resolve error must stop the pipeline before Check ever runs")
+	if res.Infos == nil {
+		t.Error("Infos = nil, want populated best-effort even past a resolve error")
 	}
 	if !anyDiagHasErrors(res) {
 		t.Errorf("expected an error-severity diagnostic, got: %v", dumpDiags(res))

@@ -128,13 +128,13 @@ func (w *Workspace) Analysis(path string) (*FileAnalysis, bool) {
 }
 
 // resolveNode is the "what is under the cursor, and does it have a real
-// checked Info to query" preamble Hover/Definition/References all start
-// with identically: look up path's own FileAnalysis, bail if analysis never
-// reached type-checking (fa.Info == nil - a parse/resolve error somewhere in
-// the package, see FileAnalysis's own doc comment), convert pos to a byte
-// offset, and find the innermost node there. ok is false whenever there's
-// nothing meaningful to query - every caller can treat that uniformly as
-// "return nil/no results" without re-deriving why.
+// Info to query" preamble Hover/Definition/References all start with
+// identically: look up path's own FileAnalysis, bail if it has none at all
+// (fa.Info == nil - only possible if analyzeProgram was never run against
+// this file), convert pos to a byte offset, and find the innermost node
+// there. ok is false whenever there's nothing meaningful to query - every
+// caller can treat that uniformly as "return nil/no results" without
+// re-deriving why.
 func (w *Workspace) resolveNode(path string, pos protocol.Position) (fa *FileAnalysis, n ast.NodeIndex, ok bool) {
 	fa, ok = w.Analysis(path)
 	if !ok || fa.Info == nil {

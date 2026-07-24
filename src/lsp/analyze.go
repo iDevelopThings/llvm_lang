@@ -12,10 +12,9 @@ import (
 
 // FileAnalysis is one file's own frontend result within a just-recomputed
 // program: its Tree (always present, even on a parse error), its Info
-// (nil if analysis never reached name resolution/type checking - a parse
-// or resolve error anywhere in the program stops the pipeline before Check
-// ever runs, mirroring src/frontend's own "don't check a tree Resolve
-// didn't finish" rule), and its merged parse+resolve+check diagnostics.
+// (populated best-effort regardless of errors anywhere in the program -
+// see frontend.RunProgram's own doc comment), and its merged
+// parse+resolve+check diagnostics.
 //
 // Generation identifies which single analyzeProgram call produced this
 // FileAnalysis (see Workspace.OpenOrChange) - every *sema.Symbol pointer is
@@ -54,7 +53,7 @@ func analyzeProgram(prog *loader.Program, generation int) map[string]*FileAnalys
 	for _, tree := range fe.Trees {
 		out[tree.File.Name] = &FileAnalysis{
 			Tree:       tree,
-			Info:       fe.Infos[tree], // nil whenever fe.HasErrors stopped the pipeline before Check ran
+			Info:       fe.Infos[tree],
 			Diags:      fe.Diags[tree],
 			Generation: generation,
 		}

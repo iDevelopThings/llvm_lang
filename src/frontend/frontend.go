@@ -19,14 +19,14 @@ import (
 	"llvm_lang/src/sema"
 )
 
-// Result is prog driven through name resolution and type checking as far
-// as it got. Diags always holds every tree's own merged parse+resolve+check
-// diagnostics, however far the pipeline actually reached. Infos/TreePackage
-// are nil whenever HasErrors is true (a parse or resolve error stopped the
-// pipeline before CheckProgram ever ran, mirroring sema.CheckProgram's own
-// "assumes Resolve succeeded" precondition) - HasErrors is the one signal
-// every caller needs to decide whether it's safe to keep going, rather than
-// re-deriving it from Diags itself.
+// Result is prog driven all the way through name resolution and type
+// checking, regardless of errors at any stage (see RunProgram's own doc
+// comment for why). Diags always holds every tree's own merged
+// parse+resolve+check diagnostics. Infos/TreePackage are always populated,
+// best-effort - HasErrors is the signal a caller that needs a fully-checked
+// program (CompileProgram, before running codegen) uses to know the result
+// may be incomplete/unsound; a caller that only wants best-effort partial
+// analysis (src/lsp) can use Infos/TreePackage regardless of HasErrors.
 type Result struct {
 	Trees       []*ast.Tree
 	Diags       map[*ast.Tree]*diag.Bag
@@ -37,16 +37,30 @@ type Result struct {
 
 // RunProgram drives prog (already lexed/parsed by loader.LoadProgram -
 // every file's own parse diagnostics were already collected then, not
-// here) through sema.ResolveProgram then, if that succeeds, sema.
-// CheckProgram. Every package's own PackageUnit is built and resolved
-// before any package that imports it (see prog.Order's own doc comment),
-// so a FileImport's TargetKey (this driver uses each package's own resolved
-// Dir as that key) always names an already-resolved unit.
+// here) through sema.ResolveProgram then sema.CheckProgram, regardless of
+// whether any file had a parse error - sema tolerates a partially-malformed
+// tree without panicking (a parse error only ever leaves localized damage:
+// one bad node, or a sync() run to the nearest recovery point, never an
+// invalid tree shape sema can't walk), so there is no correctness reason to
+// deny every OTHER file in the package a resolved/checked Info just because
+// one file has one error somewhere in it. HasErrors still reports true the
+// moment any file has a parse error, exactly as before - CompileProgram
+// still refuses to run codegen once it's true, the same as when this
+// short-circuited before Resolve/Check ever ran. What's different is that
+// Infos/TreePackage are no longer unconditionally nil in that case: a
+// caller that only wants best-effort partial analysis (src/lsp) can now use
+// them regardless of HasErrors, which a caller that needs a fully-checked
+// program (CompileProgram) never does anyway once it sees HasErrors true.
+//
+// Every package's own PackageUnit is built and resolved before any package
+// that imports it (see prog.Order's own doc comment), so a FileImport's
+// TargetKey (this driver uses each package's own resolved Dir as that key)
+// always names an already-resolved unit.
 func RunProgram(prog *loader.Program) *Result {
 	var trees []*ast.Tree
 	diags := make(map[*ast.Tree]*diag.Bag)
 	units := make([]*sema.PackageUnit, 0, len(prog.Order))
-	anyParseErrors := false
+	hasParseErrors := false
 
 	for _, pkg := range prog.Order {
 		unitTrees := make([]*ast.Tree, len(pkg.Files))
@@ -57,7 +71,7 @@ func RunProgram(prog *loader.Program) *Result {
 			trees = append(trees, f.Tree)
 			diags[f.Tree] = f.Diags
 			if f.Diags.HasErrors() {
-				anyParseErrors = true
+				hasParseErrors = true
 			}
 
 			if len(f.Imports) == 0 {
@@ -84,14 +98,8 @@ func RunProgram(prog *loader.Program) *Result {
 		})
 	}
 
-	if anyParseErrors {
-		return &Result{Trees: trees, Diags: diags, HasErrors: true}
-	}
-
 	infos, rdiags, _, treePackage := sema.ResolveProgram(units)
-	if MergeStage(diags, trees, rdiags) {
-		return &Result{Trees: trees, Diags: diags, HasErrors: true}
-	}
+	hasResolveErrors := MergeStage(diags, trees, rdiags)
 
 	cdiags := sema.CheckProgram(trees, infos, treePackage)
 	hasCheckErrors := MergeStage(diags, trees, cdiags)
@@ -101,7 +109,7 @@ func RunProgram(prog *loader.Program) *Result {
 		Diags:       diags,
 		Infos:       infos,
 		TreePackage: treePackage,
-		HasErrors:   hasCheckErrors,
+		HasErrors:   hasParseErrors || hasResolveErrors || hasCheckErrors,
 	}
 }
 
