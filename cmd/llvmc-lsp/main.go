@@ -64,6 +64,7 @@ func main() {
 		TextDocumentDocumentSymbol:      documentSymbol,
 		TextDocumentFoldingRange:        foldingRange,
 		TextDocumentSemanticTokensFull:  semanticTokensFull,
+		TextDocumentCompletion:          completion,
 	}
 
 	srv := server.NewServer(&handler, serverName, false)
@@ -92,6 +93,13 @@ func initialize(context *glsp.Context, params *protocol.InitializeParams) (any, 
 		semanticOptions.Legend = lsp.SemanticTokensLegend()
 	}
 
+	capabilities.CompletionProvider = &protocol.CompletionOptions{
+		TriggerCharacters: []string{"."},
+	}
+	if root := workspaceRoot(params); root != "" {
+		workspace.SetRoot(root)
+	}
+
 	return protocol.InitializeResult{
 		Capabilities: capabilities,
 		ServerInfo: &protocol.InitializeResultServerInfo{
@@ -99,6 +107,27 @@ func initialize(context *glsp.Context, params *protocol.InitializeParams) (any, 
 			Version: &serverVersion,
 		},
 	}, nil
+}
+
+// workspaceRoot resolves the client's own advertised project root -
+// preferring RootURI, falling back to the first WorkspaceFolders entry -
+// to a real filesystem path, for Workspace.SetRoot (completion's
+// not-yet-imported-package discovery - see lsp.Workspace.PackageIndex).
+// Returns "" if the client never advertised one at all (an editor opening
+// a single loose file rather than a folder) - PackageIndex then just
+// reports no candidates, same as before this feature existed.
+func workspaceRoot(params *protocol.InitializeParams) string {
+	if params.RootURI != nil {
+		if path, err := lsp.PathFromURI(*params.RootURI); err == nil {
+			return path
+		}
+	}
+	if len(params.WorkspaceFolders) > 0 {
+		if path, err := lsp.PathFromURI(params.WorkspaceFolders[0].URI); err == nil {
+			return path
+		}
+	}
+	return ""
 }
 
 func initialized(context *glsp.Context, params *protocol.InitializedParams) error {
@@ -206,6 +235,14 @@ func hover(context *glsp.Context, params *protocol.HoverParams) (*protocol.Hover
 		return nil, err
 	}
 	return workspace.Hover(path, params.Position), nil
+}
+
+func completion(context *glsp.Context, params *protocol.CompletionParams) (any, error) {
+	path, err := lsp.PathFromURI(params.TextDocument.URI)
+	if err != nil {
+		return nil, err
+	}
+	return workspace.Completion(path, params.Position), nil
 }
 
 // declaration reuses Definition outright: this language has no separate

@@ -39,6 +39,17 @@ type Workspace struct {
 	// consumed per OpenOrChange call - see FileAnalysis.Generation's own
 	// doc comment for why every recompute needs a distinct identity.
 	nextGeneration int
+
+	// root is the workspace's own root directory, advertised by the client
+	// at initialize (see cmd/llvmc-lsp's own initialize handler) and used
+	// only by PackageIndex - unset (empty) means "no root known yet",
+	// under which PackageIndex reports no candidates at all rather than
+	// guessing one.
+	root string
+
+	packageIndexMu    sync.Mutex
+	packageIndex      []loader.PackageCandidate
+	packageIndexBuilt bool
 }
 
 // NewWorkspace returns an empty Workspace rooted at the real OS filesystem,
@@ -172,4 +183,31 @@ func (w *Workspace) Forget(path string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	delete(w.analysis, path)
+}
+
+// SetRoot records the workspace's own root directory - call once, from
+// initialize, before any request that might need PackageIndex.
+func (w *Workspace) SetRoot(root string) {
+	w.root = root
+}
+
+// PackageIndex returns every package directory discovered under root (see
+// SetRoot) - completion's source for not-yet-imported package suggestions
+// (src/lsp/completion.go). Built once, lazily, on first use, and cached for
+// the rest of this process's lifetime: a package added to disk mid-session
+// needs a server restart to appear - no file-watcher invalidation this
+// round, a deliberate, documented v1 limitation (matching OpenOrChange's
+// own documented dependents-not-rechecked limitation).
+func (w *Workspace) PackageIndex() []loader.PackageCandidate {
+	w.packageIndexMu.Lock()
+	defer w.packageIndexMu.Unlock()
+	if !w.packageIndexBuilt {
+		if w.root != "" {
+			for c := range loader.DiscoverPackages(w.fs, w.root) {
+				w.packageIndex = append(w.packageIndex, c)
+			}
+		}
+		w.packageIndexBuilt = true
+	}
+	return w.packageIndex
 }
