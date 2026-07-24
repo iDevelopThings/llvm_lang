@@ -378,6 +378,31 @@ func (t *Tree) MultiAssignStmtValue(n NodeIndex) NodeIndex {
 	return children[len(children)-1]
 }
 
+// RangeForKey returns n's (a RangeForStmt's) key-binding child - InvalidNode
+// for the zero-binding `for range subject {}` form (see ast.Node's own
+// RangeForStmt doc comment for the [key, value, subject, body] shape these
+// four accessors index into).
+func (t *Tree) RangeForKey(n NodeIndex) NodeIndex {
+	return t.Child(n, 0)
+}
+
+// RangeForValue returns n's (a RangeForStmt's) value-binding child -
+// InvalidNode for the zero- or one-binding forms.
+func (t *Tree) RangeForValue(n NodeIndex) NodeIndex {
+	return t.Child(n, 1)
+}
+
+// RangeForSubject returns n's (a RangeForStmt's) subject child - the map or
+// array value being ranged over.
+func (t *Tree) RangeForSubject(n NodeIndex) NodeIndex {
+	return t.Child(n, 2)
+}
+
+// RangeForBody returns n's (a RangeForStmt's) body child.
+func (t *Tree) RangeForBody(n NodeIndex) NodeIndex {
+	return t.Child(n, 3)
+}
+
 // NodeAt returns the innermost node whose span contains pos, or InvalidNode
 // if pos falls outside the tree entirely - the "what is under the cursor"
 // query a tool like an LSP needs (hover, go-to-definition). Descends only

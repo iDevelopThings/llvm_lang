@@ -52,3 +52,5 @@ values:
     string: "match"
   - name: Yield
     string: "yield"
+  - name: Range
+    string: "range"

@@ -143,6 +143,8 @@ func (g *Generator) genStmt(n ast.NodeIndex) bool {
 		return g.genIfStmt(n)
 	case enums.NodeKinds.ForStmt:
 		return g.genForStmt(n)
+	case enums.NodeKinds.RangeForStmt:
+		return g.genRangeForStmt(n)
 	case enums.NodeKinds.MatchStmt:
 		return g.genMatchStmt(n, nil)
 	case enums.NodeKinds.YieldStmt:
@@ -623,6 +625,146 @@ func (g *Generator) genYieldStmt(n ast.NodeIndex) bool {
 	top.incomingBlocks = append(top.incomingBlocks, g.builder.GetInsertBlock())
 	g.builder.CreateBr(top.mergeBB)
 	return true
+}
+
+// genRangeForStmt lowers `for [key[, value]] := range subject { body }` (see
+// LANGUAGE.md's "Range loops" section) - dispatching on subject's own
+// resolved type to one of two genuinely different lowering strategies: an
+// ordinary indexed loop over an array/slice (genRangeForArray), or a bucket-
+// array walk over a map's own control block (genRangeForMap, maps.go). Both
+// share the identical loopCtx/destructorBase discipline genForStmt already
+// uses for break/continue - see bindRangeVar's own doc comment for why a
+// fresh key/value binding needs no genForStmt-style per-iteration capture
+// workaround of its own.
+func (g *Generator) genRangeForStmt(n ast.NodeIndex) bool {
+	keyNode := g.tree.RangeForKey(n)
+	valueNode := g.tree.RangeForValue(n)
+	subjectNode := g.tree.RangeForSubject(n)
+	bodyNode := g.tree.RangeForBody(n)
+	subjType := g.info.Types[subjectNode]
+
+	switch subjType.Kind {
+	case sema.TypeMap:
+		return g.genRangeForMap(keyNode, valueNode, subjectNode, bodyNode, subjType)
+	case sema.TypeArray:
+		return g.genRangeForArray(keyNode, valueNode, subjectNode, bodyNode, subjType)
+	default:
+		// Unreachable on a tree that already passed sema.Check (see
+		// checkRangeForStmt) - see the package doc comment.
+		panic("codegen: range-for over unsupported subject type " + subjType.String())
+	}
+}
+
+// bindRangeVar declares one range-for binding (a key or value Ident, see
+// ast.Node's own RangeForStmt doc comment) for the current iteration:
+// allocates its storage (allocLocalSlot), stores value into it, and pushes a
+// destructor entry if its own type owns one - exactly genShortVarDecl's own
+// alloc-store-pushDestructorEntry sequence, just supplying an
+// already-computed value instead of evaluating an initializer expression.
+//
+// This call site sits inside the loop's own bodyBB (genRangeForArray/
+// genRangeForMap), which is generated once but *executes* fresh every
+// dynamic iteration - unlike genForStmt's C-style init clause (generated
+// once, in the loop's preheader, before bodyBB exists at all, which is
+// exactly why THAT construct needs its own explicit per-iteration arena-copy
+// workaround for a captured loop variable). Since allocLocalSlot's own
+// arena-allocating branch (for a sym.Captured binding) is a real runtime
+// call, placing it here already returns a genuinely fresh heap address every
+// time control reaches it - i.e. every iteration - with no special-casing
+// needed: Go 1.22 per-iteration-capture semantics fall out for free.
+func (g *Generator) bindRangeVar(nameNode ast.NodeIndex, value llvm.Value) {
+	sym := g.info.Refs[nameNode]
+	t := g.info.Types[nameNode]
+	llt := g.llvmType(t)
+	addr := g.allocLocalSlot(sym, llt, sym.Name)
+	g.locals[sym] = addr
+	g.pushDestructorEntry(sym, t)
+	g.builder.CreateStore(value, addr)
+}
+
+// genRangeForArray lowers a range-for whose subject is a fixed-size or
+// dynamic array (see LANGUAGE.md's "Range loops" section) to an ordinary
+// indexed loop, 0..len-1: key binds the index (int, always - per Go's own
+// real one-binding rule, see checkRangeForStmt), value binds the element.
+// subject is evaluated exactly once, before the loop starts, matching every
+// other "subject evaluated once" construct in this package.
+//
+// preBindBase/destructorBase mirror genForStmt's own discipline one level
+// down: captured right before key/value are bound (not before, and not
+// after the body), so a break/continue's own unwindDestructorsTo call
+// correctly destructs this iteration's key/value bindings (if their own
+// type owns a destructor - see bindRangeVar) together with whatever the body
+// itself declared - and a normal (non-terminating) fall-through explicitly
+// unwinds down to that same base before looping, since genBlock's own
+// fall-through unwind only ever reaches back to ITS OWN base (which sits
+// above key/value's own entries), never further down to them.
+func (g *Generator) genRangeForArray(keyNode, valueNode, subjectNode, bodyNode ast.NodeIndex, subjType sema.Type) bool {
+	elemType := *subjType.Elem
+	elemLLType := g.llvmType(elemType)
+
+	var (
+		dataPtr llvm.Value
+		arrAddr llvm.Value
+		length  llvm.Value
+	)
+	if subjType.Dynamic {
+		sliceVal := g.genExpr(subjectNode)
+		dataPtr = g.builder.CreateExtractValue(sliceVal, 0, "")
+		length = g.builder.CreateExtractValue(sliceVal, 1, "")
+	} else {
+		arrAddr = g.genAddr(subjectNode)
+		length = llvm.ConstInt(g.i32Ty, uint64(subjType.Size), false)
+	}
+
+	idxAddr := g.createEntryAlloca(g.i32Ty, "range.idx")
+	g.builder.CreateStore(llvm.ConstInt(g.i32Ty, 0, false), idxAddr)
+
+	condBB := g.ctx.AddBasicBlock(g.curFn, "range.cond")
+	bodyBB := g.ctx.AddBasicBlock(g.curFn, "range.body")
+	postBB := g.ctx.AddBasicBlock(g.curFn, "range.post")
+	endBB := g.ctx.AddBasicBlock(g.curFn, "range.end")
+
+	g.builder.CreateBr(condBB)
+	g.builder.SetInsertPointAtEnd(condBB)
+	idx := g.builder.CreateLoad(g.i32Ty, idxAddr, "")
+	g.builder.CreateCondBr(g.builder.CreateICmp(llvm.IntSLT, idx, length, ""), bodyBB, endBB)
+
+	g.builder.SetInsertPointAtEnd(bodyBB)
+	bodyIdx := g.builder.CreateLoad(g.i32Ty, idxAddr, "")
+	preBindBase := len(g.destructors)
+	if keyNode != ast.InvalidNode {
+		g.bindRangeVar(keyNode, bodyIdx)
+	}
+	if valueNode != ast.InvalidNode {
+		var elemAddr llvm.Value
+		if subjType.Dynamic {
+			elemAddr = g.builder.CreateInBoundsGEP(elemLLType, dataPtr, []llvm.Value{bodyIdx}, "")
+		} else {
+			zero := llvm.ConstInt(g.i32Ty, 0, false)
+			elemAddr = g.builder.CreateInBoundsGEP(g.llvmType(subjType), arrAddr, []llvm.Value{zero, bodyIdx}, "")
+		}
+		g.bindRangeVar(valueNode, g.builder.CreateLoad(elemLLType, elemAddr, ""))
+	}
+
+	g.loopStack = append(g.loopStack, loopCtx{
+		breakTarget:    endBB,
+		continueTarget: postBB,
+		destructorBase: preBindBase,
+	})
+	bodyTerm := g.genBlock(bodyNode)
+	g.loopStack = g.loopStack[:len(g.loopStack)-1]
+	if !bodyTerm {
+		g.unwindDestructorsTo(preBindBase)
+		g.builder.CreateBr(postBB)
+	}
+
+	g.builder.SetInsertPointAtEnd(postBB)
+	nextIdx := g.builder.CreateAdd(g.builder.CreateLoad(g.i32Ty, idxAddr, ""), llvm.ConstInt(g.i32Ty, 1, false), "")
+	g.builder.CreateStore(nextIdx, idxAddr)
+	g.builder.CreateBr(condBB)
+
+	g.builder.SetInsertPointAtEnd(endBB)
+	return false
 }
 
 // genIfStmt lowers both grammar forms (`if cond: stmt` and the brace form

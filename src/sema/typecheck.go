@@ -1819,6 +1819,8 @@ func (c *checker) checkStmt(n ast.NodeIndex) {
 		c.checkIfStmt(n)
 	case enums.NodeKinds.ForStmt:
 		c.checkForStmt(n)
+	case enums.NodeKinds.RangeForStmt:
+		c.checkRangeForStmt(n)
 	case enums.NodeKinds.MatchStmt:
 		c.checkMatchStmt(n)
 	case enums.NodeKinds.YieldStmt:
@@ -2124,6 +2126,78 @@ func (c *checker) checkForStmt(n ast.NodeIndex) {
 	c.loopDepth++
 	c.checkBlock(c.tree.Child(n, 3))
 	c.loopDepth--
+}
+
+// checkRangeForStmt type-checks `for [key[, value]] := range subject { ... }`
+// (see LANGUAGE.md's "Range loops" section) - subject must be a map or a
+// fixed/dynamic array; anything else is a clean diagnostic. Per Go's own real
+// rule (deliberately easy to get backwards by symmetry/intuition - see
+// DECISIONS.md's dated entry for this round): a map's one-binding form binds
+// the KEY, never the value; an array's one-binding form binds the INDEX
+// (always int), never the element. The two-binding form is (K, V) for a map,
+// (int, elem) for an array. key/value each have no single declaring node of
+// their own (mirroring MultiShortVarDecl's identical binding shape - see
+// checkMultiShortVarDeclNode), so their Type is seeded directly here rather
+// than computed lazily via declType.
+//
+// Every iteration's key/value is a genuine copy out of the map/array's own
+// storage (see codegen's bindRangeVar) - exactly like any other short-var-decl
+// destructuring a call/index result - so a non-copyable K/V is rejected here
+// too (checkNoIllegalCopy, allowFresh=false: an existing element read out of
+// a container is never a fresh construction), the same rule `v := m[k]`/
+// `v := arr[i]` already enforce. Without this, ranging over a container of a
+// destructor-having element type would silently produce an extra, illegal
+// destructor call per iteration on a value the type's own copy rule says
+// should never exist as a duplicate at all.
+func (c *checker) checkRangeForStmt(n ast.NodeIndex) {
+	keyNode := c.tree.RangeForKey(n)
+	valueNode := c.tree.RangeForValue(n)
+	subjectNode := c.tree.RangeForSubject(n)
+
+	subjType := c.checkValueExpr(subjectNode)
+
+	switch subjType.Kind {
+	case TypeMap:
+		c.seedRangeBindingChecked(keyNode, *subjType.Key, "range key binding")
+		c.seedRangeBindingChecked(valueNode, *subjType.Elem, "range value binding")
+	case TypeArray:
+		c.seedRangeBinding(keyNode, i32Type)
+		c.seedRangeBindingChecked(valueNode, *subjType.Elem, "range value binding")
+	case TypeInvalid:
+		c.seedRangeBinding(keyNode, invalidType)
+		c.seedRangeBinding(valueNode, invalidType)
+	default:
+		c.errorAt(subjectNode, "range requires a map or array value, got %s", subjType)
+		c.seedRangeBinding(keyNode, invalidType)
+		c.seedRangeBinding(valueNode, invalidType)
+	}
+
+	c.loopDepth++
+	c.checkBlock(c.tree.RangeForBody(n))
+	c.loopDepth--
+}
+
+// seedRangeBinding seeds nameNode's (a RangeForStmt's key or value binding,
+// when present - a no-op for ast.InvalidNode, the omitted-binding case) Type
+// directly into both declType's memoization cache and info.Types, the same
+// "no single declaring node" seeding checkMultiShortVarDeclNode's own doc
+// comment explains.
+func (c *checker) seedRangeBinding(nameNode ast.NodeIndex, t Type) {
+	if nameNode == ast.InvalidNode {
+		return
+	}
+	c.declTypes[nodeRef{c.tree, nameNode}] = t
+	c.info.Types[nameNode] = t
+}
+
+// seedRangeBindingChecked is seedRangeBinding plus checkNoIllegalCopy - see
+// checkRangeForStmt's own doc comment for why every real (non-omitted)
+// key/value binding needs this and a plain array index (always int) doesn't.
+func (c *checker) seedRangeBindingChecked(nameNode ast.NodeIndex, t Type, context string) {
+	c.seedRangeBinding(nameNode, t)
+	if nameNode != ast.InvalidNode {
+		c.checkNoIllegalCopy(nameNode, t, false, context)
+	}
 }
 
 func (c *checker) checkCondition(n ast.NodeIndex) {
@@ -2727,6 +2801,17 @@ func (c *checker) inferExpr(n ast.NodeIndex) Type {
 		// panic - matching this codebase's "lower already-correct code, not
 		// re-derive semantics" contract for codegen (see CODEGEN.md).
 		c.errorAt(n, "array type used as a value")
+		return invalidType
+	case enums.NodeKinds.RangeExpr:
+		// Reachable only when `range` appears somewhere other than directly
+		// as a for-loop header's value (parser/stmt.go's finishRangeForStmt
+		// already unwraps and consumes a range-for's own RangeExpr before it
+		// ever reaches checkExpr - see LANGUAGE.md's "Range loops" section) -
+		// e.g. a bare `x := range m` statement, or `range m` nested inside
+		// another expression. Still checks the subject, so a later reference
+		// to it doesn't cascade into an unrelated diagnostic.
+		c.checkValueExpr(c.tree.Child(n, 0))
+		c.errorAt(n, "range is only valid directly in a for-loop header (for k, v := range x { ... })")
 		return invalidType
 	default:
 		// Bad has no sensible value type; already diagnosed upstream.
@@ -4619,6 +4704,11 @@ func isTerminatingStmt(tree *ast.Tree, info *Info, n ast.NodeIndex) bool {
 		cond := tree.Child(n, 1)
 		body := tree.Child(n, 3)
 		return cond == ast.InvalidNode && !forHasOwnBreak(tree, body)
+	case enums.NodeKinds.RangeForStmt:
+		// Always data-dependent - a map/array can have zero entries at
+		// runtime, unlike a truly bare `for {}` with no cond clause at all -
+		// so this can never terminate, regardless of its own body.
+		return false
 	case enums.NodeKinds.IfStmt:
 		elseBranch := tree.Child(n, 2)
 		if elseBranch == ast.InvalidNode {
@@ -4764,6 +4854,11 @@ func mustYieldEveryPath(tree *ast.Tree, info *Info, n ast.NodeIndex) bool {
 		cond := tree.Child(n, 1)
 		body := tree.Child(n, 3)
 		return cond == ast.InvalidNode && !forHasOwnBreak(tree, body)
+	case enums.NodeKinds.RangeForStmt:
+		// Same reasoning as isTerminatingStmt's own identical case: always
+		// data-dependent, so it can never guarantee a yield on every path
+		// either.
+		return false
 	case enums.NodeKinds.IfStmt:
 		elseBranch := tree.Child(n, 2)
 		if elseBranch == ast.InvalidNode {
@@ -4842,8 +4937,9 @@ func forHasOwnBreak(tree *ast.Tree, n ast.NodeIndex) bool {
 		}
 		return false
 	default:
-		// ForStmt (its break targets the inner loop, not this one) and
-		// every other non-nesting statement kind: nothing to find here.
+		// ForStmt/RangeForStmt (their own break targets the inner loop, not
+		// this one) and every other non-nesting statement kind: nothing to
+		// find here.
 		return false
 	}
 }

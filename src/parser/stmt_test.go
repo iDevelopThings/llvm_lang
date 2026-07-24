@@ -324,3 +324,101 @@ func TestBlockMissingSemicolonStillRecovers(t *testing.T) {
 		t.Fatalf("Block has %d statements, want 2 (recovery should still find both): %s", len(kids), p.tree.Dump(n))
 	}
 }
+
+// TestRangeForShape covers all three range-for binding shapes (see
+// LANGUAGE.md's "Range loops" section) - key/value are InvalidNode
+// (<missing>) when that binding is omitted (ast.Node's own RangeForStmt doc
+// comment).
+func TestRangeForShape(t *testing.T) {
+	tests := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{
+			name: "two-binding map/array form",
+			src:  "for k, v := range m {\n\tbreak\n}",
+			want: "" +
+				"RangeForStmt \"for\"\n" +
+				"  Ident \"k\"\n" +
+				"  Ident \"v\"\n" +
+				"  Ident \"m\"\n" +
+				"  Block\n" +
+				"    BreakStmt \"break\"\n",
+		},
+		{
+			name: "one-binding form",
+			src:  "for k := range m {\n\tbreak\n}",
+			want: "" +
+				"RangeForStmt \"for\"\n" +
+				"  Ident \"k\"\n" +
+				"  <missing>\n" +
+				"  Ident \"m\"\n" +
+				"  Block\n" +
+				"    BreakStmt \"break\"\n",
+		},
+		{
+			name: "zero-binding form",
+			src:  "for range m {\n\tbreak\n}",
+			want: "" +
+				"RangeForStmt \"for\"\n" +
+				"  <missing>\n" +
+				"  <missing>\n" +
+				"  Ident \"m\"\n" +
+				"  Block\n" +
+				"    BreakStmt \"break\"\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tree, n := parseStmtSrc(t, tt.src)
+			got := tree.Dump(n)
+			if got != tt.want {
+				t.Errorf("Dump(%q):\n got:\n%s\nwant:\n%s", tt.src, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRangeForTooManyBindingsRecovers covers a malformed range-for with more
+// than 2 bindings (`for a, b, c := range m {}`) - a real diagnostic (not a
+// panic), and recovery still parses a usable RangeForStmt (clamped to the
+// first two names) rather than falling through to the ordinary for-loop's
+// much more confusing "condition must be a boolean expression" error.
+func TestRangeForTooManyBindingsRecovers(t *testing.T) {
+	p := New(lexer.NewFile("t.ll", "for a, b, c := range m { }"))
+	n := p.parseStmt()
+	if p.diags.ErrorCount() != 1 {
+		t.Fatalf("ErrorCount = %d, want 1: %v", p.diags.ErrorCount(), p.diags.All())
+	}
+	if got := p.tree.Nodes[n].Kind.String(); got != "RangeForStmt" {
+		t.Fatalf("node kind = %s, want RangeForStmt (best-effort recovery)", got)
+	}
+}
+
+// TestOrdinaryForFormsUnaffectedByRangeFor is a direct regression check that
+// adding range-for's own detection ahead of parseForStmt's existing three-
+// clause/cond-only dispatch didn't change any of the three pre-existing
+// ordinary for-loop forms (see TestStmtShape's own "bare infinite for"/
+// "cond-only for"/"full three-clause for" cases, which already cover this
+// implicitly - this is a second, explicit, no-`range`-keyword-anywhere-in-
+// sight proof) - none of these should ever become a RangeForStmt.
+func TestOrdinaryForFormsUnaffectedByRangeFor(t *testing.T) {
+	tests := []struct {
+		name string
+		src  string
+	}{
+		{"bare infinite for", "for { break }"},
+		{"cond-only for", "for c < 10 { c = c + 1 }"},
+		{"three-clause for", "for i := 0; i < 10; i++ { print(i) }"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tree, n := parseStmtSrc(t, tt.src)
+			if got := tree.Nodes[n].Kind.String(); got != "ForStmt" {
+				t.Errorf("node kind = %s, want ForStmt", got)
+			}
+		})
+	}
+}

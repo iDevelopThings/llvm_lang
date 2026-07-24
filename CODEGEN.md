@@ -573,6 +573,68 @@ runtime error: assignment to entry in nil map
 failure mode as every other trap in this package, not a softer recoverable
 panic.)
 
+## Range loops
+
+See `LANGUAGE.md`'s "Range loops" section for the language-level feature
+(`for [key[, value]] := range subject { ... }` over a map or array, the three
+binding shapes, the map-binds-key/array-binds-index one-binding wrinkle).
+`genRangeForStmt` (`src/codegen/stmt.go`) dispatches on the subject's own
+resolved type to one of two genuinely different lowering strategies -
+neither reuses a general iterator protocol; both are hardcoded loops built
+directly out of each type's own existing runtime representation, matching
+this feature's own "hardcoded for performance" scope (see `DECISIONS.md`'s
+dated entry for this round).
+
+**Array/slice subject (`genRangeForArray`, `stmt.go`): an ordinary indexed
+loop, `0..len-1`.** The subject is evaluated exactly once, before the loop
+starts (its `{ptr, len, cap}` value for a dynamic array via `genExpr`, or its
+own address via `genAddr` for a fixed-size array - reusing exactly the same
+GEP shapes `genAddr`'s own `IndexExpr` case already uses for ordinary
+indexing, just without a per-iteration bounds check: the loop's own index is
+provably in range by construction, so there's nothing left to check). `key`
+(when present) binds the index directly; `value` (when present) is loaded
+from the computed element address each iteration.
+
+**Map subject (`genRangeForMap`, `maps.go`): a linear walk over the map's own
+bucket array**, skipping any slot that isn't `mapTagOccupied` - no probing
+needed (unlike a lookup/insert, this doesn't need to *find* a specific key,
+just visit every live one). The subject's control-block pointer is evaluated
+once; a nil (never-`make`'d) map is handled by phi-ing `bucketCount` down to
+0 rather than a separate zero-trip-count branch, so the loop itself needs no
+nil-awareness of its own - it simply never enters the body. `key`/`value`
+(when present) are loaded directly out of the current live bucket's own
+`key`/`value` fields.
+
+**Loop control and destructor discipline**: both lowerings push the
+identical `loopCtx` `genForStmt` already uses for break/continue
+(`breakTarget`/`continueTarget`/`destructorBase`) - a `break`/`continue`
+inside a range-for behaves exactly like inside an ordinary `for`. The one
+genuinely new wrinkle is *where* `destructorBase` is captured: right before
+`key`/`value` are bound each iteration (not before, and not after the loop
+body), so a `break`/`continue`'s own `unwindDestructorsTo` call correctly
+destructs that iteration's own bindings (see `bindRangeVar`'s own doc
+comment) together with whatever the body itself declared - and a normal,
+non-terminating fall-through explicitly unwinds down to that same point
+before looping, since `genBlock`'s own fall-through unwind only ever reaches
+back to *its own* base, never further down to `key`/`value`'s entries above
+it.
+
+**A fresh key/value binding needs no `genForStmt`-style per-iteration-capture
+workaround.** `genForStmt`'s own C-style `init` clause needs one (a
+`loopVarSym`/arena-copy dance, documented in that function's own doc
+comment) specifically because `init` is generated once, in the loop's
+*preheader*, before the loop body even exists - so its own storage is
+naturally shared across every iteration even when arena-allocated. A
+range-for's `key`/`value` bindings, by contrast, are generated directly
+inside the loop's own body block (`bindRangeVar`), which - though only
+*generated* once at compile time - *executes* fresh every dynamic iteration.
+`allocLocalSlot`'s existing `sym.Captured` dispatch (see "Capture analysis
+and heap promotion" above - stack alloca vs. a real arena-allocator call)
+then already does the right thing for free: a captured binding's
+arena-allocation call sits at a program point re-executed every iteration, so
+it returns a genuinely fresh heap address each time control reaches it - Go
+1.22 per-iteration-capture semantics fall out with zero extra bookkeeping.
+
 ## Runtime trap diagnostics
 
 Every runtime safety trap this package emits - `genBoundsCheck`/

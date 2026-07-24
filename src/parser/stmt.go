@@ -544,6 +544,10 @@ func (p *Parser) parseForStmt() ast.NodeIndex {
 
 	first := p.parseSimpleStmt()
 
+	if rangeFor, ok := p.finishRangeForStmt(kwTok, first, savedLev); ok {
+		return rangeFor
+	}
+
 	if _, ok := p.accept(enums.Lexemes.Semicolon); ok {
 		return p.finishThreeClauseFor(kwTok, first, savedLev)
 	}
@@ -590,6 +594,79 @@ func (p *Parser) finishThreeClauseFor(kwTok lexer.Token, init ast.NodeIndex, sav
 		End:   p.tree.SpanOf(body).End,
 	}
 	return p.tree.NewNode(enums.NodeKinds.ForStmt, kwTok, span, init, cond, post, body)
+}
+
+// finishRangeForStmt reports whether first (parseForStmt's own already-parsed
+// first clause) is one of the three range-for shapes (see LANGUAGE.md's
+// "Range loops" section), and if so, finishes parsing the rest (the body)
+// and returns the resulting RangeForStmt node:
+//
+//   - `range subject { ... }` - zero-binding (first is an ExprStmt wrapping
+//     a RangeExpr).
+//   - `name := range subject { ... }` - one-binding (first is a ShortVarDecl
+//     whose value is a RangeExpr) - name binds the map key or array index,
+//     never the value (see LANGUAGE.md's "Range loops" section).
+//   - `name0, name1 := range subject { ... }` - two-binding (first is a
+//     MultiShortVarDecl whose value is a RangeExpr).
+//
+// Any other shape (a bare non-range expression, `=` instead of `:=`, ...)
+// reports false, leaving first for the caller's own existing three-clause/
+// cond-only dispatch untouched - so an ordinary for-loop is completely
+// unaffected. savedLev is restored before parsing the body, the same
+// composite-literal exprLev restore finishThreeClauseFor already does.
+//
+// The `=`-reuse form (`k, v = range m {}`, rebinding already-declared
+// variables instead of declaring fresh ones) is deliberately not supported -
+// it doesn't fall out of this shape-detection for free (an AssignStmt/
+// MultiAssignStmt's targets are existing lvalues, not fresh names, which
+// would need a genuinely different RangeForStmt binding representation and
+// its own sema/codegen path) and was scoped as a nice-to-have, not a hard
+// requirement, for this round.
+func (p *Parser) finishRangeForStmt(kwTok lexer.Token, first ast.NodeIndex, savedLev int) (ast.NodeIndex, bool) {
+	key, value := ast.InvalidNode, ast.InvalidNode
+	var rangeExpr ast.NodeIndex
+
+	switch p.tree.Nodes[first].Kind {
+	case enums.NodeKinds.ExprStmt:
+		wrapped := p.tree.Child(first, 0)
+		if p.tree.Nodes[wrapped].Kind != enums.NodeKinds.RangeExpr {
+			return ast.InvalidNode, false
+		}
+		rangeExpr = wrapped
+	case enums.NodeKinds.ShortVarDecl:
+		wrapped := p.tree.Child(first, 1)
+		if p.tree.Nodes[wrapped].Kind != enums.NodeKinds.RangeExpr {
+			return ast.InvalidNode, false
+		}
+		key = p.tree.Child(first, 0)
+		rangeExpr = wrapped
+	case enums.NodeKinds.MultiShortVarDecl:
+		names := p.tree.MultiShortVarDeclNames(first)
+		wrapped := p.tree.MultiShortVarDeclValue(first)
+		if p.tree.Nodes[wrapped].Kind != enums.NodeKinds.RangeExpr {
+			return ast.InvalidNode, false
+		}
+		if len(names) != 2 {
+			span := p.tree.SpanOf(first)
+			p.errorAtSpan(span.Start, span.End, "range produces at most 2 values (key, value), got %d target(s)", len(names))
+		}
+		key = names[0]
+		if len(names) > 1 {
+			value = names[1]
+		}
+		rangeExpr = wrapped
+	default:
+		return ast.InvalidNode, false
+	}
+
+	subject := p.tree.Child(rangeExpr, 0)
+	p.exprLev = savedLev
+	body := p.parseBlock()
+	span := ast.Span{
+		Start: kwTok.Start,
+		End:   p.tree.SpanOf(body).End,
+	}
+	return p.tree.NewNode(enums.NodeKinds.RangeForStmt, kwTok, span, key, value, subject, body), true
 }
 
 // parseReturnStmt parses a bare `return`, a plain single-value `return expr`

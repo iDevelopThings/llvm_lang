@@ -184,6 +184,8 @@ func parseIdentExpr(p *Parser) ast.NodeIndex {
 		return p.parseNewExpr()
 	case enums.Keywords.Match:
 		return p.parseMatchExpr()
+	case enums.Keywords.Range:
+		return p.parseRangeExpr()
 	case "":
 		p.advance()
 		ident := p.tree.NewNode(enums.NodeKinds.Ident, tok, tokenSpan(tok))
@@ -337,6 +339,22 @@ func (p *Parser) parseMatchExprArm() ast.NodeIndex {
 	}
 	children := append(patterns, body)
 	return p.tree.NewNode(enums.NodeKinds.MatchArm, lexer.Token{}, span, children...)
+}
+
+// parseRangeExpr parses `range subject` in EXPRESSION position (see
+// LANGUAGE.md's "Range loops" section) - grammatically legal anywhere an
+// expression is (mirroring match/new above), though only ever meaningful
+// directly as a for-loop header's `:=` value (parser/stmt.go's
+// finishRangeForStmt); anywhere else sema rejects it with a clean
+// diagnostic rather than a panic (checkExpr's own RangeExpr case).
+func (p *Parser) parseRangeExpr() ast.NodeIndex {
+	kwTok := p.expectKeyword(enums.Keywords.Range)
+	subject := p.parseExpr(precLowest)
+	span := ast.Span{
+		Start: kwTok.Start,
+		End:   p.tree.SpanOf(subject).End,
+	}
+	return p.tree.NewNode(enums.NodeKinds.RangeExpr, kwTok, span, subject)
 }
 
 func parseNumberExpr(p *Parser) ast.NodeIndex {
