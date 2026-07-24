@@ -135,12 +135,13 @@ func TestDestructureShortVarDeclFromSingleReturnRejected(t *testing.T) {
 }
 
 func TestDestructureShortVarDeclFromNonCallRejected(t *testing.T) {
-	// The explicitly out-of-scope Go-style parallel multi-assign
-	// (`a, b := 1, 2`) can't even reach this check on a real parenthesized
-	// value list (the parser only ever accepts one expression here - see
-	// parser's own TestParallelMultiAssignRejectedCleanly), but a single
-	// non-call expression on the right (e.g. a parenthesized one) must still
-	// be rejected cleanly by sema, not just by accident of the grammar.
+	// A single, non-comma-separated parenthesized expression is neither a
+	// CallExpr, an IndexExpr, nor a MultiValueExpr (see
+	// parser.finishMultiShortVarDecl's own doc comment: a MultiValueExpr only
+	// ever gets built when a comma actually follows the first parsed value -
+	// a bare `(1)` never has one), so this must still be rejected cleanly by
+	// checkDestructureSource's own catch-all, not just by accident of the
+	// grammar.
 	src := "func g() {\n\ta, b := (1)\n}\n"
 	expectCheckErrors(t, src, 1)
 }
@@ -177,6 +178,103 @@ func TestDestructureAssignStmtNonIdentTargetsWellTyped(t *testing.T) {
 func TestDestructureAssignStmtWrongTargetCount(t *testing.T) {
 	src := "func f() (int, bool) {\n\treturn 1, true\n}\n" +
 		"func g() {\n\tvar a int\n\tvar b bool\n\tvar c bool\n\ta, b, c = f()\n}\n"
+	expectCheckErrors(t, src, 1)
+}
+
+// --- parallel multi-assignment (`a, b := 1, 2` / `a, b = 1, 2`) ---
+//
+// This round's own general Go-style parallel multi-assignment (see
+// LANGUAGE.md's "Go-style multi-return values" section) - each value is an
+// ordinary, independent expression, positionally paired with a name/target,
+// never unified against each other or against a function's declared return
+// signature (checkMultiValueReturn's own per-value checkAssignable is the
+// return-statement-only counterpart to this).
+
+func TestParallelMultiShortVarDeclOk(t *testing.T) {
+	checkSrc(t, "func g() {\n\ta, b := 1, 2\n\tprint(a)\n\tprint(b)\n}\n")
+}
+
+// Each position is independently typed - an untyped-int literal alongside an
+// untyped-string literal, neither adapting to the other (there is no "the
+// other side's type" to adapt to the way a BinaryExpr's own two operands
+// would unify).
+func TestParallelMultiShortVarDeclMixedTypes(t *testing.T) {
+	src := "func g() {\n\tx, s := 5, \"hi\"\n\tprint(x)\n\tprint(s)\n}\n"
+	tree, info := checkSrc(t, src)
+	gDecl := tree.Children(tree.Root)[0]
+	body := tree.FuncBody(gDecl)
+	multiDecl := tree.Child(body, 0)
+	names := tree.MultiShortVarDeclNames(multiDecl)
+	if got := info.Types[names[0]]; got.Kind != TypeI32 {
+		t.Errorf("Types[x] = %v, want int (untyped int defaults to i32)", got)
+	}
+	if got := info.Types[names[1]]; got.Kind != TypeString {
+		t.Errorf("Types[s] = %v, want string", got)
+	}
+}
+
+// An untyped literal still defaults exactly like a plain single-value
+// `x := 5` already would - proven against a non-default width/kind
+// (f64/i64), not just the untyped-int-defaults-to-i32 case above.
+func TestParallelMultiShortVarDeclUntypedDefaulting(t *testing.T) {
+	src := "func g() {\n\tv, f := 5, 2.5\n\tprint(v)\n\tprint(f)\n}\n"
+	tree, info := checkSrc(t, src)
+	gDecl := tree.Children(tree.Root)[0]
+	body := tree.FuncBody(gDecl)
+	multiDecl := tree.Child(body, 0)
+	names := tree.MultiShortVarDeclNames(multiDecl)
+	if got := info.Types[names[0]]; got.Kind != TypeI32 {
+		t.Errorf("Types[v] = %v, want int", got)
+	}
+	if got := info.Types[names[1]]; got.Kind != TypeF64 {
+		t.Errorf("Types[f] = %v, want f64", got)
+	}
+}
+
+func TestParallelMultiShortVarDeclTooFewValues(t *testing.T) {
+	expectCheckErrors(t, "func g() {\n\ta, b, c := 1, 2\n}\n", 1)
+}
+
+func TestParallelMultiShortVarDeclTooManyValues(t *testing.T) {
+	expectCheckErrors(t, "func g() {\n\ta, b := 1, 2, 3\n}\n", 1)
+}
+
+func TestParallelMultiAssignOk(t *testing.T) {
+	src := "func g() {\n\tvar a int\n\tvar b int\n\ta, b = 1, 2\n\tprint(a)\n\tprint(b)\n}\n"
+	checkSrc(t, src)
+}
+
+// The swap idiom (`a, b = b, a`) - the concrete case that proves evaluation
+// order/positional-independence actually matters (see CODEGEN.md/DECISIONS.md
+// for the codegen-level ordering this depends on) - type-checks cleanly at
+// this layer: each side is just an ordinary Ident reference, independently
+// checked.
+func TestParallelMultiAssignSwapOk(t *testing.T) {
+	src := "func g() {\n\ta := 1\n\tb := 2\n\ta, b = b, a\n\tprint(a)\n\tprint(b)\n}\n"
+	checkSrc(t, src)
+}
+
+func TestParallelMultiAssignWrongTargetCount(t *testing.T) {
+	src := "func g() {\n\tvar a int\n\tvar b int\n\tvar c int\n\ta, b, c = 1, 2\n}\n"
+	expectCheckErrors(t, src, 1)
+}
+
+func TestParallelMultiAssignTypeMismatch(t *testing.T) {
+	src := "func g() {\n\tvar a int\n\tvar b string\n\ta, b = true, 2\n}\n"
+	expectCheckErrors(t, src, 2)
+}
+
+// A further multi-return call among a parallel multi-assignment's own value
+// positions is still rejected exactly like any other single-value position -
+// no argument-spreading here either, same as this feature's own explicitly
+// out-of-scope call-argument case (TestMultiReturnCallAsArgumentRejected
+// below): each MultiValueExpr child goes through the ordinary checkValueExpr
+// (see checkDestructureSource's own MultiValueExpr branch), which already
+// rejects a TypeMultiReturn result everywhere except the two real consuming
+// positions - no special-casing needed here at all.
+func TestParallelMultiAssignNestedMultiReturnRejected(t *testing.T) {
+	src := "func f() (int, bool) {\n\treturn 1, true\n}\n" +
+		"func g() {\n\ta, b := f(), 1\n}\n"
 	expectCheckErrors(t, src, 1)
 }
 

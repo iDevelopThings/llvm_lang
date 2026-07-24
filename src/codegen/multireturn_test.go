@@ -203,6 +203,86 @@ func testReassignPlainVars() int {
 	}
 }
 
+// --- parallel multi-assignment (`a, b := 1, 2` / `a, b = 1, 2`) ---
+//
+// This round's own general Go-style parallel multi-assignment (see
+// LANGUAGE.md's "Go-style multi-return values" section) - nothing to do with
+// a multi-return call at all: genMultiShortVarDecl/genMultiAssignStmt's own
+// new MultiValueExpr branch evaluates every value into a temporary first, in
+// source order, before any target is written - see CODEGEN.md/DECISIONS.md
+// for why that ordering is what makes the swap idiom work.
+
+// TestParallelMultiShortVarDeclInit covers plain parallel initialization -
+// `a, b := 1, 2` - the simplest case, no aliasing concern at all.
+func TestParallelMultiShortVarDeclInit(t *testing.T) {
+	jm := compileAndJIT(t, `
+func testInit() int {
+	a, b := 1, 2
+	return a*10 + b
+}
+`)
+	if got := jm.runInt32(t, "testInit"); got != 12 {
+		t.Errorf("testInit() = %d, want 12 (a=1, b=2)", got)
+	}
+}
+
+// TestParallelMultiAssignSwap is the concrete proof evaluation order matters:
+// `a, b = b, a` must read both old values before either target is
+// overwritten - a codegen-ordering bug here would silently produce
+// wrong-but-plausible output (both ending up equal to whichever was written
+// first) rather than an obvious crash.
+func TestParallelMultiAssignSwap(t *testing.T) {
+	jm := compileAndJIT(t, `
+func testSwap() int {
+	a := 1
+	b := 2
+	a, b = b, a
+	return a*10 + b
+}
+`)
+	// After the swap: a == 2, b == 1 -> 2*10 + 1 == 21. A broken
+	// left-to-right non-simultaneous assignment (store into a first, then
+	// read the now-clobbered a for b) would instead produce a == 2, b == 2
+	// -> 22.
+	if got := jm.runInt32(t, "testSwap"); got != 21 {
+		t.Errorf("testSwap() = %d, want 21 (a=2, b=1 after the swap)", got)
+	}
+}
+
+// TestParallelMultiAssignMixedTypes covers each position being independently
+// typed - an int alongside a string, neither adapting to the other.
+func TestParallelMultiAssignMixedTypes(t *testing.T) {
+	jm := compileAndJIT(t, `
+func testMixed() bool {
+	x, s := 5, "hi"
+	x, s = 6, "bye"
+	return x != 6 || s != "bye"
+}
+`)
+	if got := jm.runBool(t, "testMixed"); got != false {
+		t.Errorf("testMixed() = %v, want false", got)
+	}
+}
+
+// TestParallelMultiAssignThreeWayRotation is a genuine 3-way rotation, one
+// step further than a plain 2-way swap - proving the "evaluate every value
+// first, then store" discipline generalizes past exactly two positions.
+func TestParallelMultiAssignThreeWayRotation(t *testing.T) {
+	jm := compileAndJIT(t, `
+func testRotate() int {
+	a := 1
+	b := 2
+	c := 3
+	a, b, c = b, c, a
+	return a*100 + b*10 + c
+}
+`)
+	// After rotation: a=2, b=3, c=1 -> 231.
+	if got := jm.runInt32(t, "testRotate"); got != 231 {
+		t.Errorf("testRotate() = %d, want 231 (a=2, b=3, c=1 after rotation)", got)
+	}
+}
+
 // TestMultiReturnThreeValues proves the feature generalizes past exactly two
 // return values.
 func TestMultiReturnThreeValues(t *testing.T) {

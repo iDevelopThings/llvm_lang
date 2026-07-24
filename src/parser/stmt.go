@@ -272,11 +272,26 @@ func (p *Parser) finishMultiTargetStmt(first ast.NodeIndex) ast.NodeIndex {
 	return p.badNode(tok)
 }
 
-// finishMultiShortVarDecl parses `:= call` given names already collected by
-// finishMultiTargetStmt - the multi-name counterpart to finishShortVarDecl.
-// Every name must be a plain identifier, same check finishShortVarDecl's own
-// single-name form already makes (Bad is accepted the same already-reported-
-// once way).
+// finishMultiShortVarDecl parses `:= value0, value1, ...` given names already
+// collected by finishMultiTargetStmt - the multi-name counterpart to
+// finishShortVarDecl. Every name must be a plain identifier, same check
+// finishShortVarDecl's own single-name form already makes (Bad is accepted
+// the same already-reported-once way).
+//
+// The right-hand side is either the existing single-expression forms (a
+// multi-return call, `a, b := f()`; or a map two-result index, `v, ok :=
+// m[k]` - see LANGUAGE.md's "Go-style multi-return values"/"Maps" sections),
+// or - this round's own general Go-style parallel multi-assignment (`a, b :=
+// 1, 2`, each side individually evaluated and paired positionally, nothing to
+// do with a multi-return call at all) - a genuine comma-separated value list.
+// Parsing this is the identical pattern parseReturnStmt's own multi-value
+// `return a, b, ...` already uses: parse the first value, then, only if a
+// comma actually follows it, collect the rest and wrap ALL of them (including
+// the first) in a MultiValueExpr node occupying this statement's own trailing
+// value slot - no comma at all leaves value as that one plain expression,
+// completely unchanged from before this feature (the existing multi-return-
+// call/map-index forms never have a leading comma after their single call/
+// index expression, so they never build this wrapper).
 func (p *Parser) finishMultiShortVarDecl(names []ast.NodeIndex) ast.NodeIndex {
 	for _, name := range names {
 		if kind := p.tree.Nodes[name].Kind; kind != enums.NodeKinds.Ident && kind != enums.NodeKinds.Bad {
@@ -285,7 +300,7 @@ func (p *Parser) finishMultiShortVarDecl(names []ast.NodeIndex) ast.NodeIndex {
 		}
 	}
 	opTok := p.expect(enums.Lexemes.ColonEqual)
-	value := p.parseExpr(precLowest)
+	value := p.parseCommaValueList(p.parseExpr(precLowest))
 	span := ast.Span{
 		Start: p.tree.SpanOf(names[0]).Start,
 		End:   p.tree.SpanOf(value).End,
@@ -294,23 +309,61 @@ func (p *Parser) finishMultiShortVarDecl(names []ast.NodeIndex) ast.NodeIndex {
 	return p.tree.NewNode(enums.NodeKinds.MultiShortVarDecl, opTok, span, children...)
 }
 
-// finishMultiAssignStmt parses `= call` given targets already collected by
-// finishMultiTargetStmt - the multi-target counterpart to finishAssignStmt.
-// Only plain `=` is supported here (no compound `+=`-style form makes sense
-// against more than one target at once), so finishMultiTargetStmt only ever
-// reaches this via its own explicit `p.at(enums.Lexemes.Equal)` check.
+// finishMultiAssignStmt parses `= value0, value1, ...` given targets already
+// collected by finishMultiTargetStmt - the multi-target counterpart to
+// finishAssignStmt. Only plain `=` is supported here (no compound `+=`-style
+// form makes sense against more than one target at once), so
+// finishMultiTargetStmt only ever reaches this via its own explicit
+// `p.at(enums.Lexemes.Equal)` check.
+//
+// The right-hand side follows the identical "single expression, or a genuine
+// comma-separated MultiValueExpr list" shape finishMultiShortVarDecl's own
+// doc comment describes - see there for the full reasoning. This is also
+// what makes the classic swap idiom (`a, b = b, a`) expressible: codegen
+// (genMultiAssignStmt) evaluates every value first, in source order, before
+// storing into any target.
 func (p *Parser) finishMultiAssignStmt(targets []ast.NodeIndex) ast.NodeIndex {
 	for _, target := range targets {
 		p.checkAssignTarget(target)
 	}
 	opTok := p.expect(enums.Lexemes.Equal)
-	value := p.parseExpr(precLowest)
+	value := p.parseCommaValueList(p.parseExpr(precLowest))
 	span := ast.Span{
 		Start: p.tree.SpanOf(targets[0]).Start,
 		End:   p.tree.SpanOf(value).End,
 	}
 	children := append(append([]ast.NodeIndex{}, targets...), value)
 	return p.tree.NewNode(enums.NodeKinds.MultiAssignStmt, opTok, span, children...)
+}
+
+// parseCommaValueList is the shared "wrap a variable-arity comma-separated
+// value list into a MultiValueExpr, or pass a lone value through unchanged"
+// helper behind every one of this grammar's comma-separated value lists:
+// parseReturnStmt's own multi-value `return a, b, ...`, and
+// finishMultiShortVarDecl/finishMultiAssignStmt's own general Go-style
+// parallel multi-assignment right-hand side (`a, b := 1, 2` - see
+// LANGUAGE.md's "Go-style multi-return values" section). first is the
+// already-parsed first value; if no comma follows it, it's returned as-is -
+// a plain single-value `return expr`/multi-return-call/map-index right-hand
+// side, completely unchanged from before this feature. Only when a comma
+// genuinely follows does this collect the rest and build the wrapper node,
+// spanning from first's own start to the last collected value's end.
+func (p *Parser) parseCommaValueList(first ast.NodeIndex) ast.NodeIndex {
+	if !p.at(enums.Lexemes.Comma) {
+		return first
+	}
+	values := []ast.NodeIndex{first}
+	for {
+		if _, ok := p.accept(enums.Lexemes.Comma); !ok {
+			break
+		}
+		values = append(values, p.parseExpr(precLowest))
+	}
+	span := ast.Span{
+		Start: p.tree.SpanOf(values[0]).Start,
+		End:   p.tree.SpanOf(values[len(values)-1]).End,
+	}
+	return p.tree.NewNode(enums.NodeKinds.MultiValueExpr, lexer.Token{}, span, values...)
 }
 
 func (p *Parser) finishShortVarDecl(name ast.NodeIndex) ast.NodeIndex {
@@ -324,9 +377,13 @@ func (p *Parser) finishShortVarDecl(name ast.NodeIndex) ast.NodeIndex {
 	}
 	opTok := p.expect(enums.Lexemes.ColonEqual)
 	value := p.parseExpr(precLowest)
+	end := p.tree.SpanOf(value).End
+	if p.at(enums.Lexemes.Comma) {
+		end = p.reportSingleTargetValueCountMismatch(1, value)
+	}
 	span := ast.Span{
 		Start: p.tree.SpanOf(name).Start,
-		End:   p.tree.SpanOf(value).End,
+		End:   end,
 	}
 	return p.tree.NewNode(enums.NodeKinds.ShortVarDecl, opTok, span, name, value)
 }
@@ -336,11 +393,52 @@ func (p *Parser) finishAssignStmt(target ast.NodeIndex) ast.NodeIndex {
 	opTok := p.tok
 	p.advance()
 	value := p.parseExpr(precLowest)
+	end := p.tree.SpanOf(value).End
+	if p.at(enums.Lexemes.Comma) {
+		end = p.reportSingleTargetValueCountMismatch(1, value)
+	}
 	span := ast.Span{
 		Start: p.tree.SpanOf(target).Start,
-		End:   p.tree.SpanOf(value).End,
+		End:   end,
 	}
 	return p.tree.NewNode(enums.NodeKinds.AssignStmt, opTok, span, target, value)
+}
+
+// reportSingleTargetValueCountMismatch is a nice-to-have diagnostic upgrade
+// for a single-target `:=`/`=` followed by a comma (`a := 1, 2` - never
+// itself a MultiShortVarDecl/MultiAssignStmt, since those need a comma
+// *before* `:=`/`=` too - see finishMultiTargetStmt): without this, the
+// trailing `, 2, ...` would simply be left unconsumed for parseSemiList's own
+// statement-separator check to choke on, surfacing as a confusing raw
+// "expected ; found ','" syntax error instead of a real semantic complaint.
+// Consumes (and discards) every extra comma-separated value - mirroring Go's
+// own real "assignment mismatch: N variable(s) but M value(s)" wording - then
+// returns the true end position (the last extra value's own end) for the
+// caller's own span.
+func (p *Parser) reportSingleTargetValueCountMismatch(wantCount int, firstValue ast.NodeIndex) lexer.Pos {
+	count := 1
+	last := firstValue
+	for {
+		if _, ok := p.accept(enums.Lexemes.Comma); !ok {
+			break
+		}
+		last = p.parseExpr(precLowest)
+		count++
+	}
+	start := p.tree.SpanOf(firstValue).Start
+	end := p.tree.SpanOf(last).End
+	p.errorAtSpan(start, end, "assignment mismatch: %d variable%s but %d value%s", wantCount, plural(wantCount), count, plural(count))
+	return end
+}
+
+// plural returns "s" for anything but exactly 1 - shared pluralization for
+// reportSingleTargetValueCountMismatch's own Go-style "1 variable but 2
+// values" wording.
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 func (p *Parser) finishIncDecStmt(target ast.NodeIndex) ast.NodeIndex {
@@ -496,30 +594,16 @@ func (p *Parser) finishThreeClauseFor(kwTok lexer.Token, init ast.NodeIndex, sav
 // (completely unchanged), or a multi-value `return a, b, ...` (see
 // LANGUAGE.md's "Go-style multi-return values" section) - the latter wraps
 // its comma-separated value list in a MultiValueExpr node occupying
-// ReturnStmt's own single expr slot, the same "wrap the variable part in its
-// own node" convention parseFuncDeclReturnType's MultiReturnType already
-// uses one level up (see ast.Node's own MultiValueExpr doc comment).
+// ReturnStmt's own single expr slot (parseCommaValueList), the same "wrap the
+// variable part in its own node" convention parseFuncDeclReturnType's
+// MultiReturnType already uses one level up (see ast.Node's own
+// MultiValueExpr doc comment).
 func (p *Parser) parseReturnStmt() ast.NodeIndex {
 	kwTok := p.expectKeyword(enums.Keywords.Return)
 	value := ast.InvalidNode
 	end := kwTok.End
 	if !p.at(enums.Lexemes.Semicolon) && !p.at(enums.Lexemes.RightBrace) && !p.at(enums.Lexemes.EOF) {
-		first := p.parseExpr(precLowest)
-		value = first
-		if p.at(enums.Lexemes.Comma) {
-			values := []ast.NodeIndex{first}
-			for {
-				if _, ok := p.accept(enums.Lexemes.Comma); !ok {
-					break
-				}
-				values = append(values, p.parseExpr(precLowest))
-			}
-			listSpan := ast.Span{
-				Start: p.tree.SpanOf(first).Start,
-				End:   p.tree.SpanOf(values[len(values)-1]).End,
-			}
-			value = p.tree.NewNode(enums.NodeKinds.MultiValueExpr, lexer.Token{}, listSpan, values...)
-		}
+		value = p.parseCommaValueList(p.parseExpr(precLowest))
 		end = p.tree.SpanOf(value).End
 	}
 	span := ast.Span{

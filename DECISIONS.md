@@ -1699,3 +1699,89 @@ plain-value-pattern bullet moved from deferred to shipped, replaced by the
 binding-unification-across-multiple-enum-patterns bullet as the new
 deliberate scope limit) and `CODEGEN.md`'s "match" sections for the
 resolution/check/codegen split this entry describes.
+
+---
+
+## 2026-07-24 - General Go-style parallel multi-assignment: reusing `MultiValueExpr`, evaluate-all-then-assign-all
+
+**Decision:** ship the one piece the original multi-return-values round
+explicitly scoped out (see that round's own dated entry above) - `a, b := 1,
+2` and `a, b = 1, 2`, each side individually evaluated and paired
+positionally, with no multi-return call or map index involved at all. The
+grammar change is minimal: `finishMultiShortVarDecl`/`finishMultiAssignStmt`
+(`src/parser/stmt.go`) now check for a trailing comma after the first parsed
+value, exactly the way `parseReturnStmt`'s own multi-value `return a, b, ...`
+already does - collecting the rest and wrapping *all* of them (including the
+first) in a `MultiValueExpr` node, the destructuring statement's existing
+trailing "value" slot. No comma at all leaves that slot exactly as it was
+before this round - a single call/map-index expression, unchanged.
+
+**Why reuse `MultiValueExpr` rather than a new node kind:** it already means
+"a variable-arity, comma-separated list of independent value expressions
+sitting in a fixed slot that used to hold exactly one expression" - literally
+the shape this feature also needs, just in a different fixed slot
+(`MultiShortVarDecl`/`MultiAssignStmt`'s trailing child instead of
+`ReturnStmt`'s sole child). Inventing a second node kind for the identical
+shape would only exist to distinguish "this comma list came from a `return`"
+vs. "this comma list came from a destructuring statement" - a distinction
+already implicit in which parent node the `MultiValueExpr` sits under, so a
+new kind would carry zero extra information sema/codegen actually need.
+
+**Why sema defaults each value independently, right inside
+`checkDestructureSource`, rather than deferring to the caller:** the new
+`MultiValueExpr` branch there checks (and, where untyped, defaults) every
+value via `checkValueExpr`/`defaultIfUntyped` - the exact same per-position
+defaulting a plain single-value `x := expr` already gets
+(`checkShortVarDeclNode`) - and returns already-concrete types, mirroring
+`checkMultiValueReturn`'s own per-value `checkValueExpr` loop one layer up
+(adapted to not check against a function's declared return signature, since
+there isn't one here). This was a genuine design choice, not the only
+option: `checkMultiAssignStmt`'s own later `checkAssignable` call against
+each *existing* target's type could in principle have been left to adapt an
+untyped value directly (the way a plain single-target `x = 5` already lets
+an untyped literal adapt to `x`'s own declared type, even a different
+numeric width). Defaulting eagerly inside `checkDestructureSource` instead
+keeps every value position's own type independent and decided in exactly one
+place, matching how `MultiShortVarDecl`'s fresh-declare case has no target
+type to adapt to at all - at the cost of a narrow, deliberate asymmetry
+with plain single-target assignment: `var x f64; a, x = 1, 5` types `5` as
+`int` (not adapted to `x`'s own `f64`) before ever comparing it against `x`,
+so a differently-widened numeric literal in a parallel multi-assign's target
+position needs an explicit conversion where a plain single-target assignment
+wouldn't. Not exercised by anything in `LANGUAGE.md`'s own worked example or
+this round's request (which only asks for parallel init, the swap idiom, and
+mixed-type fresh declarations) - worth revisiting if a real program ever
+needs it.
+
+**Why evaluation order needed real codegen attention (the swap idiom):**
+`genMultiShortVarDecl`/`genMultiAssignStmt` (`src/codegen/stmt.go`) evaluate
+every `MultiValueExpr` child into its own temporary SSA value first, in
+source order, *before* any store happens - for `genMultiAssignStmt` this
+means every target's address is computed (already true before this round),
+then every value is read, then every store runs. This is what makes `a, b =
+b, a` a genuine swap: both `b` and `a` are read at their pre-assignment
+values before either target is overwritten, matching Go's own real
+assignment semantics exactly (Go's own spec calls this out explicitly - the
+right-hand side is fully evaluated before any left-hand assignment happens).
+Getting this ordering wrong wouldn't crash or produce an obviously-broken
+result - it would silently produce a plausible-looking wrong answer (`a, b =
+b, a` degenerating into `a = b; b = a` reading `a`'s already-overwritten
+value), which is exactly why this needed a dedicated codegen test proving
+the swap (`TestParallelMultiAssignSwap`, `src/codegen/multireturn_test.go`)
+and a real 3-way rotation past just two positions
+(`TestParallelMultiAssignThreeWayRotation`), not just "it built, it ran, the
+values looked right."
+
+**Status:** shipped. See `LANGUAGE.md`'s "Go-style multi-return values"
+section's new "General Go-style parallel multi-assignment" subsection for
+the full language-level rule (including the still-deferred argument-
+spreading/no-tuple-type boundaries, unchanged from the original round). New
+coverage across `src/parser` (`multireturn_test.go` - `MultiValueExpr` shape
+on both statement forms including the swap idiom, plus the single-target
+comma-count-mismatch clean-rejection cases), `src/sema`
+(`multireturn_test.go` - independent per-position typing/defaulting and
+every count-mismatch rejection), and `src/codegen` (`multireturn_test.go`,
+JIT-executed - plain parallel init, the swap idiom, mixed-type positions,
+and a 3-way rotation), plus a real worked example
+(`examples/multi_assign/multi_assign.llx`) exercised end to end - JIT and
+AOT alike - by `cmd/llvmc/main_test.go`.

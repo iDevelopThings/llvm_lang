@@ -221,6 +221,32 @@ func (g *Generator) genMultiShortVarDecl(n ast.NodeIndex) {
 		return
 	}
 
+	// `a, b := 1, 2` - this round's own general Go-style parallel
+	// multi-assignment (see LANGUAGE.md's "Go-style multi-return values"
+	// section): valueNode is a MultiValueExpr, one independent value
+	// expression per declared name, positionally paired - never a single
+	// aggregate to ExtractValue out of the way a real multi-return call's
+	// result is. Every value is evaluated into its own temporary SSA value
+	// first, in source order, before any name's own storage is even
+	// allocated - the fresh-declare counterpart to genMultiAssignStmt's own
+	// identical evaluate-then-store discipline (there, ordering also has to
+	// beat the swap idiom's aliasing; here there's no existing storage yet to
+	// race against, but evaluating every value up front keeps both forms
+	// consistent with each other).
+	if g.tree.Nodes[valueNode].Kind == enums.NodeKinds.MultiValueExpr {
+		temps := g.genMultiValueExprTemps(valueNode)
+		for i, nameNode := range names {
+			sym := g.info.Refs[nameNode]
+			t := g.info.Types[nameNode]
+			llt := g.llvmType(t)
+			addr := g.allocLocalSlot(sym, llt, sym.Name)
+			g.locals[sym] = addr
+			g.pushDestructorEntry(sym, t)
+			g.builder.CreateStore(temps[i], addr)
+		}
+		return
+	}
+
 	aggregate := g.genExpr(valueNode)
 	for i, nameNode := range names {
 		sym := g.info.Refs[nameNode]
@@ -231,6 +257,25 @@ func (g *Generator) genMultiShortVarDecl(n ast.NodeIndex) {
 		g.pushDestructorEntry(sym, t)
 		g.builder.CreateStore(g.builder.CreateExtractValue(aggregate, i, ""), addr)
 	}
+}
+
+// genMultiValueExprTemps evaluates every child of a MultiValueExpr
+// destructuring source (see LANGUAGE.md's "Go-style multi-return values"
+// section's "General Go-style parallel multi-assignment" subsection) into
+// its own temporary SSA value, in source order, before returning them all -
+// shared by genMultiShortVarDecl's and genMultiAssignStmt's own identical
+// MultiValueExpr branches. Evaluating every value up front, before either
+// caller does anything else with the results (allocating fresh storage, or
+// storing into an already-computed target address), is what makes the swap
+// idiom (`a, b = b, a`) correct - see genMultiAssignStmt's own doc comment
+// for the full reasoning.
+func (g *Generator) genMultiValueExprTemps(valueNode ast.NodeIndex) []llvm.Value {
+	values := g.tree.Children(valueNode)
+	temps := make([]llvm.Value, len(values))
+	for i, v := range values {
+		temps[i] = g.genExpr(v)
+	}
+	return temps
 }
 
 // storeValueInto stores valueNode's value into the already-computed address
@@ -405,6 +450,26 @@ func (g *Generator) genMultiAssignStmt(n ast.NodeIndex) {
 		values := [2]llvm.Value{value, found}
 		for i, addr := range addrs {
 			g.builder.CreateStore(values[i], addr)
+		}
+		return
+	}
+
+	// `a, b = 1, 2` (and the classic swap, `a, b = b, a`) - this round's own
+	// general Go-style parallel multi-assignment (see LANGUAGE.md's "Go-style
+	// multi-return values" section): valueNode is a MultiValueExpr, one
+	// independent value expression per target, positionally paired. Every
+	// value is evaluated into its own temporary SSA value first - in source
+	// order, and critically *before* any store below runs - exactly Go's own
+	// real evaluation order: every target's address (addrs, above) is
+	// already computed at this point too, but computing an address never
+	// reads through it, so `b, a` are both read here at their pre-assignment
+	// values even when `a`/`b` are also among this same statement's own
+	// targets. This is what makes `a, b = b, a` swap correctly instead of
+	// clobbering b's value before a ever reads it.
+	if g.tree.Nodes[valueNode].Kind == enums.NodeKinds.MultiValueExpr {
+		temps := g.genMultiValueExprTemps(valueNode)
+		for i, addr := range addrs {
+			g.builder.CreateStore(temps[i], addr)
 		}
 		return
 	}

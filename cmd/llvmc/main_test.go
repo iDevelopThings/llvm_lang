@@ -310,6 +310,38 @@ func TestBinary_MultiReturnExample(t *testing.T) {
 	}
 }
 
+// multiAssignWant is the expected stdout for
+// examples/multi_assign/multi_assign.llx - shared by both the JIT
+// (TestBinary_MultiAssignExample) and AOT (TestBinary_AOT_MultiAssign)
+// end-to-end runs below, so both stay byte-identical to each other and to
+// the source file's own inline comments.
+const multiAssignWant = "1\n2\n1\n2\n2\n1\n5\nhi"
+
+// TestBinary_MultiAssignExample runs examples/multi_assign/multi_assign.llx
+// end to end via the real binary - the worked dogfooding demo for this
+// round's general Go-style parallel multi-assignment (see LANGUAGE.md's
+// "Go-style multi-return values" section): plain parallel init (`a, b := 1,
+// 2`), the classic swap idiom (`a, b = b, a` - the concrete proof this
+// feature's own evaluate-all-then-assign-all ordering actually matters), and
+// mixed-type positions (`x, s := 5, "hi"`).
+func TestBinary_MultiAssignExample(t *testing.T) {
+	cmd := exec.Command(llvmcPath, "../../examples/multi_assign/multi_assign.llx")
+	out, err := cmd.Output()
+	if err != nil {
+		ee, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("running llvmc: %v", err)
+		}
+		t.Fatalf("llvmc exited %v, stderr:\n%s", err, ee.Stderr)
+	}
+
+	normalized := strings.ReplaceAll(string(out), "\r\n", "\n")
+	normalized = strings.TrimRight(normalized, "\n")
+	if normalized != multiAssignWant {
+		t.Errorf("stdout = %q, want %q", normalized, multiAssignWant)
+	}
+}
+
 // TestBinary_EnumsExample runs examples/enums/enums.llx end to end via the
 // real binary - the worked dogfooding demo for this round's Rust-style enums
 // plus `match` feature (see LANGUAGE.md's "Enums"/"match" sections): a
@@ -541,6 +573,29 @@ func TestBinary_AOT_MultiReturn(t *testing.T) {
 	want := "5\ndivision by zero\n2\nnot found"
 	if normalized != want {
 		t.Errorf("stdout = %q, want %q", normalized, want)
+	}
+}
+
+// TestBinary_AOT_MultiAssign AOT-compiles examples/multi_assign and confirms
+// identical output to its JIT-executed behavior
+// (TestBinary_MultiAssignExample) - proving the swap idiom's own
+// evaluate-then-store codegen ordering round-trips correctly through a real,
+// standalone linked executable too, not just under JIT execution.
+func TestBinary_AOT_MultiAssign(t *testing.T) {
+	exePath := aotCompile(t, "../../examples/multi_assign/multi_assign.llx")
+
+	out, err := exec.Command(exePath).Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			t.Fatalf("%s exited %v, stderr:\n%s", exePath, err, ee.Stderr)
+		}
+		t.Fatalf("running %s: %v", exePath, err)
+	}
+
+	normalized := strings.ReplaceAll(string(out), "\r\n", "\n")
+	normalized = strings.TrimRight(normalized, "\n")
+	if normalized != multiAssignWant {
+		t.Errorf("stdout = %q, want %q", normalized, multiAssignWant)
 	}
 }
 

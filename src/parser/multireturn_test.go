@@ -274,21 +274,99 @@ func TestReturnStmtSingleValueUnchanged(t *testing.T) {
 	}
 }
 
-// TestParallelMultiAssignRejectedCleanly proves the explicitly out-of-scope
-// Go-style parallel multi-assign (`a, b := 1, 2` - each side individually
-// evaluated and paired positionally, not one multi-return call being
-// destructured) produces a real, clean parse diagnostic rather than a panic
-// or a silently-wrong tree: this grammar only ever parses one expression as
-// the right-hand side of a multi-target `:=`/`=` (see finishMultiShortVarDecl/
-// finishMultiAssignStmt), so a second, comma-separated value left over is an
-// unconsumed token the statement-separator logic then rejects - needs a real
-// block/statement-list context (not a bare parseSimpleStmt call) to actually
-// reach that separator check.
-func TestParallelMultiAssignRejectedCleanly(t *testing.T) {
-	p := New(lexer.NewFile("t.ll", "{ a, b := 1, 2 }"))
-	p.parseBlock()
-	if !p.diags.HasErrors() {
-		t.Fatalf("expected a parse error for parallel multi-assign, got none")
+// TestParallelMultiAssignShape covers this round's own general Go-style
+// parallel multi-assignment (`a, b := 1, 2`/`a, b = 1, 2` - each side
+// individually evaluated and paired positionally, nothing to do with a
+// multi-return call at all - see LANGUAGE.md's "Go-style multi-return
+// values" section): finishMultiShortVarDecl/finishMultiAssignStmt build a
+// MultiValueExpr wrapping every comma-separated value, the identical
+// wrap-the-variable-arity-part convention parseReturnStmt's own multi-value
+// `return a, b, ...` already uses (see TestFuncDeclMultiReturnTypeShape
+// above) - occupying the exact same trailing "value" slot the existing
+// CallExpr/IndexExpr shapes (TestMultiShortVarDeclShape/
+// TestMultiAssignStmtShape above) already sit in.
+func TestParallelMultiAssignShape(t *testing.T) {
+	tests := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{
+			name: "two-value parallel := ",
+			src:  "a, b := 1, 2",
+			want: "" +
+				"MultiShortVarDecl \":=\"\n" +
+				"  Ident \"a\"\n" +
+				"  Ident \"b\"\n" +
+				"  MultiValueExpr\n" +
+				"    NumberLit \"1\"\n" +
+				"    NumberLit \"2\"\n",
+		},
+		{
+			name: "the swap idiom",
+			src:  "a, b = b, a",
+			want: "" +
+				"MultiAssignStmt \"=\"\n" +
+				"  Ident \"a\"\n" +
+				"  Ident \"b\"\n" +
+				"  MultiValueExpr\n" +
+				"    Ident \"b\"\n" +
+				"    Ident \"a\"\n",
+		},
+		{
+			name: "mixed-type positions",
+			src:  "x, s := 5, \"hi\"",
+			want: "" +
+				"MultiShortVarDecl \":=\"\n" +
+				"  Ident \"x\"\n" +
+				"  Ident \"s\"\n" +
+				"  MultiValueExpr\n" +
+				"    NumberLit \"5\"\n" +
+				"    StringLit \"\\\"hi\\\"\"\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := New(lexer.NewFile("t.ll", tt.src))
+			n := p.parseSimpleStmt()
+			if p.diags.HasErrors() {
+				t.Fatalf("unexpected parse errors for %q: %v", tt.src, p.diags.All())
+			}
+			got := p.tree.Dump(n)
+			if got != tt.want {
+				t.Errorf("Dump(%q):\n got:\n%s\nwant:\n%s", tt.src, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSingleTargetValueCountMismatchRejectedCleanly covers this round's own
+// nice-to-have: a single-target `a := 1, 2`/`a = 1, 2` never reaches
+// finishMultiShortVarDecl/finishMultiAssignStmt at all (those need a comma
+// *before* `:=`/`=` too - see finishMultiTargetStmt) - it goes through the
+// separate single-name finishShortVarDecl/finishAssignStmt instead, which
+// would otherwise leave the trailing `, 2` unconsumed for the enclosing
+// statement-list's own separator check to choke on (a confusing raw
+// "expected ; found ','"). reportSingleTargetValueCountMismatch upgrades this
+// to a real, clean "assignment mismatch" diagnostic instead.
+func TestSingleTargetValueCountMismatchRejectedCleanly(t *testing.T) {
+	tests := []struct {
+		name string
+		src  string
+	}{
+		{name: "short var decl", src: "a := 1, 2"},
+		{name: "plain assignment", src: "a = 1, 2"},
+		{name: "three values", src: "a := 1, 2, 3"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := New(lexer.NewFile("t.ll", tt.src))
+			p.parseSimpleStmt()
+			if !p.diags.HasErrors() {
+				t.Fatalf("expected a parse error for %q, got none", tt.src)
+			}
+		})
 	}
 }
 

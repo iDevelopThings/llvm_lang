@@ -866,20 +866,56 @@ func (c *checker) checkMultiAssignStmt(n ast.NodeIndex) {
 // checkDestructureSource type-checks value - a multi-target destructuring
 // statement's (MultiShortVarDecl/MultiAssignStmt) sole right-hand side - and
 // returns the wantCount component types to match against each name/target in
-// order. Per this feature's own deliberate restriction (see LANGUAGE.md's
-// "Go-style multi-return values" section: "destructuring only", no first-
-// class tuple type, no argument-spreading, no Go-style parallel
-// `a, b := 1, 2`), value must be exactly one call expression whose own
-// signature returns exactly wantCount values - never any other expression
-// shape, and never a mismatched count. Every rejection path still returns a
-// same-length, invalidType-filled slice (rather than nil or a short one) so
-// every caller can always safely index it once by position, the same
+// order. value is one of three shapes:
+//
+//   - a map two-result index (`v, ok := m[k]`/`v, ok = m[k]` - see
+//     LANGUAGE.md's "Maps" section) - an IndexExpr, checked structurally.
+//   - a multi-return call (`a, b := f()`/`a, b = f()` - see LANGUAGE.md's
+//     "Go-style multi-return values" section) - a CallExpr whose own
+//     signature returns exactly wantCount values.
+//   - a genuine Go-style parallel multi-assignment (`a, b := 1, 2`/
+//     `a, b = 1, 2`, each side individually evaluated and paired
+//     positionally - LANGUAGE.md's own section above) - a MultiValueExpr
+//     wrapping exactly wantCount independent value expressions.
+//
+// Any other expression shape, or a mismatched count on any of the three
+// branches, is rejected with a clean diagnostic. Every rejection path still
+// returns a same-length, invalidType-filled slice (rather than nil or a short
+// one) so every caller can always safely index it once by position, the same
 // "already reported once, don't cascade" recovery invalidType itself always
 // provides elsewhere in this pass.
 func (c *checker) checkDestructureSource(value ast.NodeIndex, wantCount int, context string) []Type {
 	invalid := make([]Type, wantCount)
 	for i := range invalid {
 		invalid[i] = invalidType
+	}
+
+	// `a, b := 1, 2` - this round's own general Go-style parallel
+	// multi-assignment (see LANGUAGE.md's "Go-style multi-return values"
+	// section): each value is an ordinary, wholly independent expression,
+	// checked (and, where untyped, defaulted) exactly like a plain
+	// single-value `x := expr` already checks its own one value - never
+	// unified against each other or against some further "want" type the way
+	// checkMultiValueReturn's own per-value checkAssignable against a
+	// function's declared return type is. This is checked before the
+	// IndexExpr/CallExpr branches below since a MultiValueExpr is never
+	// itself produced by anything else - only finishMultiShortVarDecl/
+	// finishMultiAssignStmt build one, exactly when a comma actually follows
+	// the first parsed value (see their own doc comments).
+	if c.tree.Nodes[value].Kind == enums.NodeKinds.MultiValueExpr {
+		values := c.tree.Children(value)
+		if len(values) != wantCount {
+			c.errorAtNodes(values, value, "assignment mismatch: %d variable%s but %d value%s", wantCount, plural(wantCount), len(values), plural(len(values)))
+			for _, v := range values {
+				c.checkValueExpr(v)
+			}
+			return invalid
+		}
+		types := make([]Type, len(values))
+		for i, v := range values {
+			types[i] = c.defaultIfUntyped(v, c.checkValueExpr(v))
+		}
+		return types
 	}
 
 	// `v, ok := m[k]` - Go's own "two-result index expression" rule, specific
@@ -934,6 +970,17 @@ func (c *checker) checkDestructureSource(value ast.NodeIndex, wantCount int, con
 		return invalid
 	}
 	return t.Params
+}
+
+// plural returns "s" for anything but exactly 1 - shared pluralization for
+// checkDestructureSource's own Go-style "1 variable but 2 values" wording
+// (parser.plural, src/parser/stmt.go, is this same helper's package-local
+// twin for the identical single-target parse-time diagnostic).
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // defaultIfUntyped applies Go's own untyped-constant defaulting rule (see

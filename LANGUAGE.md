@@ -1004,20 +1004,69 @@ x := f()        // error: multi-value result (int, bool) cannot be used as
 print(f())       // error, same reason
 ```
 
-**Deliberately out of scope this round** - each a real, separate feature in
-its own right, not needed for the motivating error-handling use case:
+### General Go-style parallel multi-assignment
 
-- **General Go-style parallel multi-assignment** (`a, b := 1, 2` - each side
-  individually evaluated and paired positionally, nothing to do with a
-  multi-return call at all). This language's own destructuring grammar only
-  ever accepts a *single* expression as the right-hand side of a
-  multi-target `:=`/`=` - a second, comma-separated value is simply a syntax
-  error (a plain "expected `;`", not a dedicated diagnostic naming this
-  specifically), not a supported form quietly doing something else.
+`a, b := 1, 2` and `a, b = 1, 2` also work - each side individually evaluated
+and paired positionally, nothing to do with a multi-return call at all. This
+reuses the identical `MultiShortVarDecl`/`MultiAssignStmt` grammar the
+call-destructuring forms above already use - the sole difference is a genuine
+comma-separated value list on the right (wrapped in the same `MultiValueExpr`
+node `return a, b, ...` already uses for its own value list) instead of a
+single call/map-index expression:
+
+```go
+a, b := 1, 2          // a == 1, b == 2
+x, s := 5, "hi"        // each position independently typed: x is int, s is string
+```
+
+Every value is type-checked (and, where untyped, defaulted) completely
+independently, position by position - never unified against each other or
+against some other position's type the way a `BinaryExpr`'s own two operands
+would be. A count mismatch either way is a clean diagnostic, matching Go's own
+real wording:
+
+```go
+a, b := 1, 2, 3   // error: assignment mismatch: 2 variables but 3 values
+a, b, c := 1, 2   // error: assignment mismatch: 3 variables but 2 values
+```
+
+**Evaluation order: every value first, then every target, exactly like Go.**
+Every value on the right is evaluated, in source order, before any target on
+the left is written to - this is what makes the classic swap idiom actually
+swap, rather than silently reading a just-overwritten value back out:
+
+```go
+a := 1
+b := 2
+a, b = b, a   // a == 2, b == 1 - a genuine swap, not a=b followed by
+              // b=a's own already-clobbered a
+```
+
+A single-target `a := 1, 2` (no second name/target on the left at all) still
+gets a real, clean diagnostic rather than a confusing raw syntax error:
+
+```go
+a := 1, 2   // error: assignment mismatch: 1 variable but 2 values
+```
+
+See `examples/multi_assign/multi_assign.llx` for the full worked example
+(parallel init, the swap idiom, and mixed-type positions), and
+`DECISIONS.md`'s dated entry for why this reuses `MultiValueExpr` rather than
+a new node kind.
+
+**Still deliberately out of scope** - each a real, separate feature in its
+own right, not needed for the motivating error-handling use case (or, for
+argument-spreading, this round's own parallel-multi-assignment use case
+either):
+
 - **Argument-spreading** (Go's own `f(g())`, forwarding a multi-return
   call's results onward as multiple arguments to another call). Every
   argument position is an ordinary single-value context, so a multi-return
   call there is rejected exactly like any other single-value position.
+- **No first-class tuple type.** `MultiValueExpr` stays a syntax-only wrapper
+  legal only in the destructuring position above (and `return`'s own
+  position) - it is never itself a real, storable value usable anywhere else,
+  the same restriction the call-destructuring case above already has.
 - **A blank identifier (`_`) for discarding one of several destructured
   values.** This language has no blank-identifier concept anywhere yet (see
   `src/sema/resolve_test.go`'s own note on this) - every destructured value

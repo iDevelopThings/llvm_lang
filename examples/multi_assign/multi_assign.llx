@@ -1,0 +1,50 @@
+// multi_assign.llx - demonstrates this round's Go-style parallel
+// multi-assignment (see LANGUAGE.md's "Go-style multi-return values"
+// section): `a, b := 1, 2` / `a, b = 1, 2` - each side individually
+// evaluated and paired positionally, nothing to do with a multi-return call
+// at all (see examples/multireturn for that, separate, feature). Reuses the
+// exact same MultiShortVarDecl/MultiAssignStmt grammar as a multi-return
+// destructuring - just with a genuine comma-separated value list on the
+// right instead of a single call/map-index expression.
+//
+// Run with:
+//   .\llvmc.exe examples\multi_assign\multi_assign.llx
+//   echo $LASTEXITCODE   # (PowerShell) -> 0
+// Expected stdout:
+//   1
+//   2
+//   1
+//   2
+//   2
+//   1
+//   5
+//   hi
+
+func main() int {
+	// Plain parallel init - each side is its own independent expression,
+	// positionally paired with a target on the left.
+	a, b := 1, 2
+	print(a)   // 1
+	print(b)   // 2
+
+	// The classic swap idiom - the concrete proof this feature's own
+	// evaluate-all-values-then-assign-all-targets ordering actually matters:
+	// both old values (b's and a's) are read *before* either a or b is
+	// overwritten, so this is a genuine swap, not a=b followed by b=a's own
+	// already-clobbered a.
+	print(a)   // 1 - a, before the swap
+	print(b)   // 2 - b, before the swap
+	a, b = b, a
+	print(a)   // 2 - a now holds b's old value
+	print(b)   // 1 - b now holds a's old value
+
+	// Mixed-type positions - each position is independently typed (an
+	// untyped-int literal defaulting to int, an untyped-string literal to
+	// string), never unified against each other the way two operands of a
+	// binary expression would be.
+	x, s := 5, "hi"
+	print(x)   // 5
+	print(s)   // hi
+
+	return 0
+}
