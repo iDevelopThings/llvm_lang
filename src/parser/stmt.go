@@ -113,6 +113,9 @@ func (p *Parser) parseTypeExpr() ast.NodeIndex {
 	if p.atKeyword(enums.Keywords.Func) {
 		return p.parseFuncType()
 	}
+	if p.atKeyword(enums.Keywords.CFunc) {
+		return p.parseCFuncType()
+	}
 	if kwTok, ok := p.acceptKeyword(enums.Keywords.Map); ok {
 		p.expect(enums.Lexemes.LeftBracket)
 		key := p.parseTypeExpr()
@@ -172,19 +175,55 @@ func (p *Parser) parseFuncType() ast.NodeIndex {
 	return p.tree.NewNode(enums.NodeKinds.FuncType, kwTok, span, paramList, returnType)
 }
 
+// parseCFuncType parses a bare-C-function-pointer type expression:
+// `cfunc(T1, T2) R` (or `cfunc(T1, T2)` with no return type, implicitly
+// void) - parseFuncType's own grammar, just keyed on the `cfunc` keyword
+// and building a CFuncType node instead of FuncType (see LANGUAGE.md's
+// "External functions (FFI)" section). Unlike FuncType, which lowers to a
+// fat `{fnPtr, ctxPtr}` closure value, a CFuncType lowers to a bare
+// function pointer with no capture context at all - a distinct sema
+// TypeKind (TypeCFunc), never folded into TypeFunc with a flag.
+func (p *Parser) parseCFuncType() ast.NodeIndex {
+	kwTok := p.expectKeyword(enums.Keywords.CFunc)
+
+	openTok := p.expect(enums.Lexemes.LeftParen)
+	paramTypes := p.parseCommaList(enums.Lexemes.RightParen, p.parseTypeExpr)
+	closeTok := p.expect(enums.Lexemes.RightParen)
+	listSpan := ast.Span{
+		Start: openTok.Start,
+		End:   closeTok.End,
+	}
+	paramList := p.tree.NewNode(enums.NodeKinds.ParamTypeList, lexer.Token{}, listSpan, paramTypes...)
+
+	returnType := ast.InvalidNode
+	end := closeTok.End
+	if p.atTypeStart() {
+		returnType = p.parseTypeExpr()
+		end = p.tree.SpanOf(returnType).End
+	}
+
+	span := ast.Span{
+		Start: kwTok.Start,
+		End:   end,
+	}
+	return p.tree.NewNode(enums.NodeKinds.CFuncType, kwTok, span, paramList, returnType)
+}
+
 // atTypeStart reports whether the current token could begin a type
-// expression (parseTypeExpr): a `[` (array type), the `func` keyword
-// (function type), or a plain identifier naming a builtin/struct type.
-// Unlike parseFuncDecl's own return-type check (unambiguous there - a
-// FuncDecl's return type is always followed by `{`), a FuncType's optional
-// return type can be followed by all sorts of things depending on context
-// (`,` inside an outer param list, `)`, `=`, `;`, EOF, ...), so this decides
-// positively whether a type could start here, rather than negatively
-// checking for one specific terminator. A keyword other than `func` (`if`,
-// `true`, `this`, ...) also lexes as Lexeme.Identifier (see Token.Keyword)
-// but can never start a type, hence the explicit Keyword == "" check.
+// expression (parseTypeExpr): a `[` (array type), `*` (pointer type), the
+// `func`/`cfunc`/`map` keyword, or a plain identifier naming a builtin/
+// struct type. Unlike parseFuncDecl's own return-type check (unambiguous
+// there - a FuncDecl's return type is always followed by `{`), a FuncType's
+// optional return type can be followed by all sorts of things depending on
+// context (`,` inside an outer param list, `)`, `=`, `;`, EOF, ...), so this
+// decides positively whether a type could start here, rather than
+// negatively checking for one specific terminator. A keyword other than one
+// of the type-leading ones (`if`, `true`, `this`, ...) also lexes as
+// Lexeme.Identifier (see Token.Keyword) but can never start a type, hence
+// the explicit Keyword == "" check on the plain-identifier fallback.
 func (p *Parser) atTypeStart() bool {
-	if p.at(enums.Lexemes.LeftBracket) || p.at(enums.Lexemes.Asterisk) || p.atKeyword(enums.Keywords.Func) {
+	if p.at(enums.Lexemes.LeftBracket) || p.at(enums.Lexemes.Asterisk) ||
+		p.atKeyword(enums.Keywords.Func) || p.atKeyword(enums.Keywords.CFunc) || p.atKeyword(enums.Keywords.Map) {
 		return true
 	}
 	return p.at(enums.Lexemes.Identifier) && p.tok.Keyword == ""

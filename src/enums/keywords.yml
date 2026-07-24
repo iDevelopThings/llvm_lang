@@ -24,6 +24,8 @@ values:
     string: "return"
   - name: Func
     string: "func"
+  - name: CFunc
+    string: "cfunc"
   - name: True
     string: "true"
   - name: False

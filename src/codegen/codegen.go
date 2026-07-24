@@ -163,6 +163,15 @@ type funcEntry struct {
 	fnType   llvm.Type
 	retType  sema.Type
 	isMethod bool
+
+	// sretReturn is true iff fnType's own LLVM return type is void with a
+	// synthesized leading `ptr` parameter standing in for retType's real
+	// value (see ffi.go's externReturnType) - only ever set for an
+	// ExternFuncDecl whose declared struct return doesn't fit the Windows
+	// x64 "as an integer" case. genFuncCall reads this to allocate that
+	// hidden return slot and thread it through as the call's real first
+	// argument.
+	sretReturn bool
 }
 
 // structLayout is one struct type's LLVM shape: its (named) LLVM struct
@@ -457,14 +466,22 @@ type Generator struct {
 	memcmpFn          llvm.Value
 	memsetType        llvm.Type
 	memsetFn          llvm.Value
-	trapType          llvm.Type
-	trapFn            llvm.Value
-	fflushType        llvm.Type
-	fflushFn          llvm.Value
-	fmtInt            llvm.Value
-	fmtInt64          llvm.Value
-	fmtFloat          llvm.Value
-	fmtStr            llvm.Value
+	// strlenType/strlenFn cache strlenExtern's (runtime.go) own lazily
+	// resolved "strlen" declaration - reused as-is by both of its callers
+	// (the args() builtin's own argv marshaling, args.go, and the
+	// cstring->string conversion, genCStringToString, runtime.go) rather
+	// than each adding its own colliding declaration of the same symbol.
+	// strlenFn.IsNil() means "not yet resolved for this module".
+	strlenType llvm.Type
+	strlenFn   llvm.Value
+	trapType   llvm.Type
+	trapFn     llvm.Value
+	fflushType llvm.Type
+	fflushFn   llvm.Value
+	fmtInt     llvm.Value
+	fmtInt64   llvm.Value
+	fmtFloat   llvm.Value
+	fmtStr     llvm.Value
 
 	// Runtime trap diagnostic messages (see CODEGEN.md's "Runtime trap
 	// diagnostics" section) - printed via printf immediately before every

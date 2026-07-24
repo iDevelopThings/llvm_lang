@@ -1011,6 +1011,340 @@ func TestRun_EmitLLVMAndOutputMutuallyExclusive(t *testing.T) {
 	}
 }
 
+// TestRun_LinkFlagsRequireOutput covers -l/-L without -o: those flags only
+// feed the AOT gcc link step, so using them under JIT or -emit-llvm is a
+// usage error rather than silently ignored.
+func TestRun_LinkFlagsRequireOutput(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"-l without -o", []string{"-l", "m", "../../examples/hello/hello.llx"}},
+		{"-L without -o", []string{"-L", ".", "../../examples/hello/hello.llx"}},
+		{"-l with -emit-llvm", []string{"-emit-llvm", "-l", "m", "../../examples/hello/hello.llx"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			code := run(tc.args, &stderr)
+			if code != exitUsage {
+				t.Errorf("exit code = %d, want %d, stderr:\n%s", code, exitUsage, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "-l and -L require -o") {
+				t.Errorf("stderr = %q, want it to mention -l/-L requiring -o", stderr.String())
+			}
+		})
+	}
+}
+
+// TestBinary_AOT_LinkLib builds a tiny static C library, AOT-compiles a
+// program that calls it via extern func, and links with -L/-l - the
+// acceptance path for third-party C libs that are not on mingw's default
+// import-lib set.
+func TestBinary_AOT_LinkLib(t *testing.T) {
+	dir := t.TempDir()
+	cPath := filepath.Join(dir, "addone.c")
+	if err := os.WriteFile(cPath, []byte("int add_one(int x) { return x + 1; }\n"), 0o644); err != nil {
+		t.Fatalf("writing C source: %v", err)
+	}
+	objPath := filepath.Join(dir, "addone.o")
+	if out, err := exec.Command("gcc", "-c", cPath, "-o", objPath).CombinedOutput(); err != nil {
+		t.Fatalf("compiling C object: %v\n%s", err, out)
+	}
+	libPath := filepath.Join(dir, "libaddone.a")
+	if out, err := exec.Command("ar", "rcs", libPath, objPath).CombinedOutput(); err != nil {
+		t.Fatalf("creating static lib: %v\n%s", err, out)
+	}
+
+	srcPath := filepath.Join(dir, "main.llx")
+	src := "extern func add_one(x i32) i32\n" +
+		"func main() int {\n" +
+		"\treturn add_one(41)\n" +
+		"}\n"
+	if err := os.WriteFile(srcPath, []byte(src), 0o644); err != nil {
+		t.Fatalf("writing llx source: %v", err)
+	}
+
+	exePath := filepath.Join(dir, "out.exe")
+	cmd := exec.Command(llvmcPath, "-o", exePath, "-L", dir, "-l", "addone", srcPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("llvmc -o with -L/-l: %v\n%s", err, out)
+	}
+
+	run := exec.Command(exePath)
+	if err := run.Run(); err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			if ee.ExitCode() != 42 {
+				t.Fatalf("exe exit code = %d, want 42", ee.ExitCode())
+			}
+			return
+		}
+		t.Fatalf("running exe: %v", err)
+	}
+	t.Fatal("exe exited 0, want 42")
+}
+
+// TestBinary_AOT_LinkLibStructByValue is struct-by-value FFI's real
+// end-to-end proof (see LANGUAGE.md's "External functions (FFI)" section
+// and DECISIONS.md's dated entry): a tiny static C library takes and
+// returns `struct point { int x; int y; }` by value - the exact real C ABI
+// shape sema's isFFISafeType now allows crossing an extern signature -
+// linked the same -L/-l way TestBinary_AOT_LinkLib already proves for a
+// scalar param. If LLVM's own Win64 ABI lowering (driven by the module's
+// pinned DataLayout/triple - see finishPipeline) didn't handle aggregate
+// pass/return correctly for a real C call, this would link fine but return
+// the wrong value (or crash) at run time, not fail to compile - exactly why
+// this needs a real run, not just an IR-shape assertion.
+func TestBinary_AOT_LinkLibStructByValue(t *testing.T) {
+	dir := t.TempDir()
+	cPath := filepath.Join(dir, "point.c")
+	cSrc := "struct point { int x; int y; };\n" +
+		"struct point make_point(int x, int y) {\n" +
+		"\tstruct point p;\n" +
+		"\tp.x = x;\n" +
+		"\tp.y = y;\n" +
+		"\treturn p;\n" +
+		"}\n" +
+		"int point_sum(struct point p) {\n" +
+		"\treturn p.x + p.y;\n" +
+		"}\n"
+	if err := os.WriteFile(cPath, []byte(cSrc), 0o644); err != nil {
+		t.Fatalf("writing C source: %v", err)
+	}
+	objPath := filepath.Join(dir, "point.o")
+	if out, err := exec.Command("gcc", "-c", cPath, "-o", objPath).CombinedOutput(); err != nil {
+		t.Fatalf("compiling C object: %v\n%s", err, out)
+	}
+	libPath := filepath.Join(dir, "libpoint.a")
+	if out, err := exec.Command("ar", "rcs", libPath, objPath).CombinedOutput(); err != nil {
+		t.Fatalf("creating static lib: %v\n%s", err, out)
+	}
+
+	srcPath := filepath.Join(dir, "main.llx")
+	src := "struct Point {\n" +
+		"\tx int\n" +
+		"\ty int\n" +
+		"}\n" +
+		"extern func make_point(x int, y int) Point\n" +
+		"extern func point_sum(p Point) int\n" +
+		"func main() int {\n" +
+		"\tp := make_point(19, 23)\n" +
+		"\treturn point_sum(p)\n" +
+		"}\n"
+	if err := os.WriteFile(srcPath, []byte(src), 0o644); err != nil {
+		t.Fatalf("writing llx source: %v", err)
+	}
+
+	exePath := filepath.Join(dir, "out.exe")
+	cmd := exec.Command(llvmcPath, "-o", exePath, "-L", dir, "-l", "point", srcPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("llvmc -o with -L/-l: %v\n%s", err, out)
+	}
+
+	run := exec.Command(exePath)
+	if err := run.Run(); err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			if ee.ExitCode() != 42 {
+				t.Fatalf("exe exit code = %d, want 42 (19+23)", ee.ExitCode())
+			}
+			return
+		}
+		t.Fatalf("running exe: %v", err)
+	}
+	t.Fatal("exe exited 0, want 42")
+}
+
+// TestBinary_AOT_LinkLibLargeStructByValue is
+// TestBinary_AOT_LinkLibStructByValue's counterpart for the "otherwise pass
+// by reference" half of the Windows x64 aggregate ABI (see ffi.go's
+// externReturnType and this test's own struct: 3 ints = 12 bytes, neither
+// 8 nor any other power-of-two size that qualifies for integer coercion) -
+// a real gcc-compiled callee expecting a hidden sret return slot and an
+// indirect (pointer) parameter, exactly what declareExternFuncSignature now
+// emits for this shape.
+func TestBinary_AOT_LinkLibLargeStructByValue(t *testing.T) {
+	dir := t.TempDir()
+	cPath := filepath.Join(dir, "triple.c")
+	cSrc := "struct triple { int x; int y; int z; };\n" +
+		"struct triple make_triple(int x, int y, int z) {\n" +
+		"\tstruct triple t;\n" +
+		"\tt.x = x;\n" +
+		"\tt.y = y;\n" +
+		"\tt.z = z;\n" +
+		"\treturn t;\n" +
+		"}\n" +
+		"int triple_sum(struct triple t) {\n" +
+		"\treturn t.x + t.y + t.z;\n" +
+		"}\n"
+	if err := os.WriteFile(cPath, []byte(cSrc), 0o644); err != nil {
+		t.Fatalf("writing C source: %v", err)
+	}
+	objPath := filepath.Join(dir, "triple.o")
+	if out, err := exec.Command("gcc", "-c", cPath, "-o", objPath).CombinedOutput(); err != nil {
+		t.Fatalf("compiling C object: %v\n%s", err, out)
+	}
+	libPath := filepath.Join(dir, "libtriple.a")
+	if out, err := exec.Command("ar", "rcs", libPath, objPath).CombinedOutput(); err != nil {
+		t.Fatalf("creating static lib: %v\n%s", err, out)
+	}
+
+	srcPath := filepath.Join(dir, "main.llx")
+	src := "struct Triple {\n" +
+		"\tx int\n" +
+		"\ty int\n" +
+		"\tz int\n" +
+		"}\n" +
+		"extern func make_triple(x int, y int, z int) Triple\n" +
+		"extern func triple_sum(t Triple) int\n" +
+		"func main() int {\n" +
+		"\tt := make_triple(10, 15, 17)\n" +
+		"\treturn triple_sum(t)\n" +
+		"}\n"
+	if err := os.WriteFile(srcPath, []byte(src), 0o644); err != nil {
+		t.Fatalf("writing llx source: %v", err)
+	}
+
+	exePath := filepath.Join(dir, "out.exe")
+	cmd := exec.Command(llvmcPath, "-o", exePath, "-L", dir, "-l", "triple", srcPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("llvmc -o with -L/-l: %v\n%s", err, out)
+	}
+
+	run := exec.Command(exePath)
+	if err := run.Run(); err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			if ee.ExitCode() != 42 {
+				t.Fatalf("exe exit code = %d, want 42 (10+15+17)", ee.ExitCode())
+			}
+			return
+		}
+		t.Fatalf("running exe: %v", err)
+	}
+	t.Fatal("exe exited 0, want 42")
+}
+
+// TestBinary_AOT_LinkLibCFuncCallback is cfunc's real end-to-end proof (see
+// LANGUAGE.md's "External functions (FFI)" section): a tiny static C
+// library takes a real C function pointer and calls it itself, exactly the
+// motivating "pass a callback to a C API" shape cfunc exists for - linked
+// the same -L/-l way TestBinary_AOT_LinkLib already proves for a plain
+// scalar param. The language side passes a top-level func by name
+// (converted to cfunc via checkFuncToCFuncConversion, sema/typecheck.go) -
+// if genCFuncCall's bare-pointer, no-ctxPtr calling convention (codegen/
+// expr.go) didn't genuinely match a real C function pointer's own calling
+// convention, this would link fine but crash or return garbage at run time,
+// not fail to compile.
+func TestBinary_AOT_LinkLibCFuncCallback(t *testing.T) {
+	dir := t.TempDir()
+	cPath := filepath.Join(dir, "apply.c")
+	cSrc := "int apply_callback(int (*cb)(int), int x) {\n" +
+		"\treturn cb(x);\n" +
+		"}\n"
+	if err := os.WriteFile(cPath, []byte(cSrc), 0o644); err != nil {
+		t.Fatalf("writing C source: %v", err)
+	}
+	objPath := filepath.Join(dir, "apply.o")
+	if out, err := exec.Command("gcc", "-c", cPath, "-o", objPath).CombinedOutput(); err != nil {
+		t.Fatalf("compiling C object: %v\n%s", err, out)
+	}
+	libPath := filepath.Join(dir, "libapply.a")
+	if out, err := exec.Command("ar", "rcs", libPath, objPath).CombinedOutput(); err != nil {
+		t.Fatalf("creating static lib: %v\n%s", err, out)
+	}
+
+	srcPath := filepath.Join(dir, "main.llx")
+	src := "extern func apply_callback(cb cfunc(int) int, x int) int\n" +
+		"func double(x int) int {\n" +
+		"\treturn x * 2\n" +
+		"}\n" +
+		"func main() int {\n" +
+		"\treturn apply_callback(double, 21)\n" +
+		"}\n"
+	if err := os.WriteFile(srcPath, []byte(src), 0o644); err != nil {
+		t.Fatalf("writing llx source: %v", err)
+	}
+
+	exePath := filepath.Join(dir, "out.exe")
+	cmd := exec.Command(llvmcPath, "-o", exePath, "-L", dir, "-l", "apply", srcPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("llvmc -o with -L/-l: %v\n%s", err, out)
+	}
+
+	run := exec.Command(exePath)
+	if err := run.Run(); err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			if ee.ExitCode() != 42 {
+				t.Fatalf("exe exit code = %d, want 42 (double(21))", ee.ExitCode())
+			}
+			return
+		}
+		t.Fatalf("running exe: %v", err)
+	}
+	t.Fatal("exe exited 0, want 42")
+}
+
+// TestBinary_AOT_LinkLibCFuncStructField is the regression for cfunc-as-
+// struct-field FFI (LANGUAGE.md): Handlers{onClick cfunc(int) int} must be
+// accepted by isFFISafeStructField and sized by abiSizeAlign as an 8-byte
+// pointer (coerced to i64 on Win64), then round-trip through a real gcc-
+// linked C struct containing a function pointer. Without both fixes this
+// either failed at sema or panicked in abiSizeAlign.
+func TestBinary_AOT_LinkLibCFuncStructField(t *testing.T) {
+	dir := t.TempDir()
+	cPath := filepath.Join(dir, "handlers.c")
+	cSrc := "typedef struct {\n" +
+		"\tint (*onClick)(int);\n" +
+		"} Handlers;\n" +
+		"int register_handlers(Handlers h, int x) {\n" +
+		"\treturn h.onClick(x);\n" +
+		"}\n"
+	if err := os.WriteFile(cPath, []byte(cSrc), 0o644); err != nil {
+		t.Fatalf("writing C source: %v", err)
+	}
+	objPath := filepath.Join(dir, "handlers.o")
+	if out, err := exec.Command("gcc", "-c", cPath, "-o", objPath).CombinedOutput(); err != nil {
+		t.Fatalf("compiling C object: %v\n%s", err, out)
+	}
+	libPath := filepath.Join(dir, "libhandlers.a")
+	if out, err := exec.Command("ar", "rcs", libPath, objPath).CombinedOutput(); err != nil {
+		t.Fatalf("creating static lib: %v\n%s", err, out)
+	}
+
+	srcPath := filepath.Join(dir, "main.llx")
+	src := "struct Handlers {\n" +
+		"\tonClick cfunc(int) int\n" +
+		"}\n" +
+		"extern func register_handlers(h Handlers, x int) int\n" +
+		"func double(x int) int {\n" +
+		"\treturn x * 2\n" +
+		"}\n" +
+		"func main() int {\n" +
+		"\th := Handlers{double}\n" +
+		"\treturn register_handlers(h, 21)\n" +
+		"}\n"
+	if err := os.WriteFile(srcPath, []byte(src), 0o644); err != nil {
+		t.Fatalf("writing llx source: %v", err)
+	}
+
+	exePath := filepath.Join(dir, "out.exe")
+	cmd := exec.Command(llvmcPath, "-o", exePath, "-L", dir, "-l", "handlers", srcPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("llvmc -o with -L/-l: %v\n%s", err, out)
+	}
+
+	run := exec.Command(exePath)
+	if err := run.Run(); err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			if ee.ExitCode() != 42 {
+				t.Fatalf("exe exit code = %d, want 42 (double(21))", ee.ExitCode())
+			}
+			return
+		}
+		t.Fatalf("running exe: %v", err)
+	}
+	t.Fatal("exe exited 0, want 42")
+}
+
 // TestRun_OutputLinkFailureIsCompileError covers -o's own link-failure exit
 // code (see the package doc comment): an output path inside a directory that
 // doesn't exist makes gcc's own link step fail - this must surface as

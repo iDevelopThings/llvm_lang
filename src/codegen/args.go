@@ -90,9 +90,6 @@ func (g *Generator) buildArgsInitFn() llvm.Value {
 	argcGlobal := llvm.AddGlobal(g.mod, g.i32Ty, "__argc")
 	argvGlobal := llvm.AddGlobal(g.mod, g.ptrTy, "__argv")
 
-	strlenType := llvm.FunctionType(g.i64Ty, []llvm.Type{g.ptrTy}, false)
-	strlenFn := llvm.AddFunction(g.mod, "strlen", strlenType)
-
 	fnType := llvm.FunctionType(g.voidTy, nil, false)
 	fn := llvm.AddFunction(g.mod, "llvm_lang.args_init", fnType)
 	fn.SetLinkage(llvm.PrivateLinkage)
@@ -127,6 +124,7 @@ func (g *Generator) buildArgsInitFn() llvm.Value {
 	g.builder.SetInsertPointAtEnd(bodyBB)
 	argvSlotAddr := g.builder.CreateInBoundsGEP(g.ptrTy, argv, []llvm.Value{idx}, "")
 	cstr := g.builder.CreateLoad(g.ptrTy, argvSlotAddr, "")
+	strlenType, strlenFn := g.strlenExtern()
 	strLen64 := g.builder.CreateCall(strlenType, strlenFn, []llvm.Value{cstr}, "")
 	strLen32 := g.builder.CreateTrunc(strLen64, g.i32Ty, "")
 	hdr := llvm.Undef(g.stringTy)

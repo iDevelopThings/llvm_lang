@@ -1733,3 +1733,209 @@ pipeline (`compileAndJITOptimized`, coroutine intrinsics only lower there)
 a changing `NextWait`, simultaneous due entries, and removal not disturbing
 neighboring entries. Worked example: `examples/scheduler_demo/
 scheduler_demo.llx`, run JIT and AOT alike.
+
+---
+
+## 2026-07-24 - AOT linker flags: repeatable `-l`/`-L` on `llvmc`
+
+**Decision:** extend `compileToExecutable`'s gcc argv with repeatable
+`-L <dir>` / `-l <lib>` flags (dirs before libs), required when `-o` is
+set; using either without `-o` is a usage error.
+
+**Why:** libc and default Win32 import libs already resolve without flags,
+but third-party C libraries (anything not on mingw's default link line) do
+not. Keeping AOT as shell-out-to-gcc (see the 2026-07-23 AOT entry) means
+the natural place for this is the existing link command, not a new linker
+or language-level "link" declaration. JIT still only sees process-loaded
+symbols - documenting that third-party `.a`/`.lib` need `-o` is intentional.
+
+**Status:** shipped. See `CODEGEN.md`'s `-o` section and
+`TestBinary_AOT_LinkLib` / `TestRun_LinkFlagsRequireOutput`.
+
+---
+
+## 2026-07-24 - Pin module DataLayout/triple from the host TargetMachine
+
+**Decision:** after `buildTargetMachine` in `finishPipeline`, set the
+module's data layout (`tm.CreateTargetData().String()`) and target triple
+(`tm.Triple()`) before `RunPasses` / object emit.
+
+**Why:** FFI struct-by-value ABI coercion (and correct object emission in
+general) needs the module to describe the same layout the TargetMachine
+will emit for. Leaving both empty made aggregate C ABI a guess.
+
+**Status:** shipped alongside the FFI struct-by-value round. See
+`CODEGEN.md`'s Optimization pipeline / TargetMachine notes.
+
+---
+
+## 2026-07-24 - `cstring`: a new predeclared type, not a `string` ABI change
+
+**Decision:** add `cstring` as its own predeclared builtin type (like
+`string`/`bool`) lowering to a single raw `ptr` - not a mode/flag on
+`string` itself - reachable only via two explicit conversions,
+`cstring(s)`/`string(cs)`. This is the FFI round's second piece, after the
+`-l`/`-L` linker flags: `extern func` could already declare a pointer
+parameter, but every real C API taking/returning `char*` had no legal way
+to actually get one from this language's own `string`.
+
+**Why a separate type instead of relaxing `string`'s own extern
+restriction:** `string`'s `{ptr, i32}` representation and `cstring`'s bare
+`ptr` are genuinely different ABI shapes, not two views of the same data -
+letting `string` itself cross an extern signature would need codegen to
+either silently drop the length (data loss for a non-NUL-terminated string)
+or implicitly marshal on every call (a hidden allocation this project's own
+"no auto-marshal of `string` at extern call sites" rule for this round
+deliberately avoids - see `LANGUAGE.md`'s "The `cstring` type" section).
+A dedicated type makes the marshaling boundary an explicit, visible
+conversion instead.
+
+**Why skip the arena-copy for a literal argument:** `cstring("hello")`
+recognizes its argument as a `StringLit` node directly (not a general
+"is this constant-foldable" check) and reuses `constStringValue`'s own
+already-NUL-terminated backing global as-is - the same convention `print`'s
+own format-string globals already use. Every other `string` value (a variable,
+a concatenation result, ...) genuinely needs the arena-copy-plus-NUL path,
+since nothing else guarantees NUL termination.
+
+**The real bug this round found, worth flagging:** the reverse conversion,
+`string(cs)`, needs a real `strlen` call, and the `args()` builtin already
+declares its own local `strlen` extern (`buildArgsInitFn`, args.go).
+Giving `cstring`'s own conversion a second, independent local
+`llvm.AddFunction(g.mod, "strlen", ...)` compiled and JIT-executed fine in
+isolation, but a program combining `args()`-with-cstring, or - the case
+that actually surfaced it - a user's own `extern func strlen(...)` alongside
+`string(cs)`, failed at JIT-lookup time with `Symbols not found: [
+strlen.1 ]`: LLVM silently renames a second declaration of an
+already-used name rather than erroring, and the JIT can never resolve a
+symbol literally named `strlen.1` against real libc. Fixed by
+`strlenExtern` (runtime.go): look up `g.mod.NamedFunction("strlen")` first,
+reuse whatever's already there, and only declare fresh if genuinely
+nothing exists yet - now the single shared path both callers go through.
+This same category of risk (a user's own `extern func` re-declaring
+`malloc`/`printf`/`memcpy`/`memcmp`/`memset`, this package's other
+unconditionally-declared internal externs) pre-dates this round and is
+**not** fixed here - out of scope for a `cstring`-only round, tracked as a
+follow-up rather than silently left unmentioned.
+
+**Status:** shipped. See `LANGUAGE.md`'s "The `cstring` type" section and
+`CODEGEN.md`'s "`string` representation"/"External functions (FFI)"
+sections. Test coverage spans `src/sema` (the type itself, both
+conversions, and explicit rejection from `==`/`print`/`+`/`len`) and
+`src/codegen` (JIT-executed round trips through real libc `strlen`/
+`strcmp`, plus the shared-`strlen`-declaration regression case above).
+
+---
+
+## 2026-07-24 - FFI struct-by-value: allowlist a POD struct, with real ABI coercion
+
+**Decision:** let a named struct type cross an extern func signature
+(`isFFISafeType`/`isFFISafeStructField`, `src/sema/typecheck.go`) iff every
+field is itself FFI-safe, recursively - a numeric/bool/cstring/pointer, a
+nested FFI-safe struct, or a fixed-size array of one (a fixed array is
+FFI-safe as a struct *field* only, never as a bare parameter/return - a real
+C array parameter decays to a pointer, which this compiler doesn't do
+implicitly). `string`/`[]T`/a function type stay rejected everywhere,
+including as a struct field.
+
+**Why codegen needed more than "just declare it with `g.llvmType`":**
+verified empirically, not assumed correct from the module's already-pinned
+`DataLayout`/triple (see the `-l`/`-L` entry above) - a first attempt doing
+exactly that produced a real, silent corruption: an AOT-linked call to a
+real gcc-compiled `int point_sum(struct point p)` (`struct point { int x,
+y; }`) returned `19` (`p.x` alone) instead of `42` (`p.x + p.y`). LLVM's
+default aggregate-argument lowering flattens a direct (uncoerced) struct
+parameter into one independent register/stack slot *per field*, but the
+real Windows x64 ABI requires the opposite for a struct this size: the
+*whole* 8-byte struct coerced into one integer register, never split.
+(Confirmed against Microsoft's own x64 calling-convention documentation:
+a struct/union of size 1, 2, 4, or 8 bytes is passed/returned as an integer
+of that size; any other size is passed by reference, i.e. the caller
+allocates a copy and passes its address, shifted in as a hidden first
+argument for a return.) `src/codegen/ffi.go` implements this classification
+directly (`abiSizeAlign`, computed from field types rather than LLVM's own
+`TargetData`, which doesn't exist yet at codegen time) and `genFuncCall`
+adapts each natural struct value to/from the coerced shape via a temp
+alloca (`coerceExternArg`/`bitcastThroughMemory`) at every call site.
+
+**Scoped to direct calls only.** This coercion lives in `genFuncCall`, not
+`genFuncThunk`/`genIndirectCallValue` - a bare reference to a struct-by-value
+extern func, later called *indirectly* through a first-class function value,
+isn't covered. Not a functional regression (nothing exercised this before),
+but a real, deliberate gap: LANGUAGE.md's only documented extern-func
+calling form is a direct call, and generalizing the ABI coercion through the
+`{fnPtr, ctxPtr}` closure convention as well was judged separate, non-trivial
+scope not worth taking on speculatively this round.
+
+**Status:** shipped. See `LANGUAGE.md`'s "External functions (FFI)" section
+for the allowlist rule and `CODEGEN.md`'s section of the same name for the
+lowering. Test coverage spans `src/sema` (POD/nested/array-field acceptance,
+and rejection of a non-FFI-safe field, a bare fixed array, string/`[]T`/
+func-typed fields) and `src/codegen` (declared-signature IR-shape assertions
+for both the coerced-integer and indirect/`sret` cases), with the real
+end-to-end proof in `cmd/llvmc`'s AOT suite: `TestBinary_AOT_LinkLibStructByValue`
+(the 8-byte, coerced-integer case) and `TestBinary_AOT_LinkLibLargeStructByValue`
+(the 12-byte, indirect/`sret` case), both linking a real gcc-compiled static
+library via the existing `-L`/`-l` path.
+
+---
+
+## 2026-07-24 - `cfunc`: a new bare-C-function-pointer type, not a `TypeFunc` flag
+
+**Decision:** add `cfunc(T1, T2) R` as its own keyword, AST node
+(`CFuncType`), and sema `TypeKind` (`TypeCFunc`) - a bare C function
+pointer (`sema.TypeCFunc` lowers to a plain `g.ptrTy`), distinct from an
+ordinary `func` value's `{fnPtr, ctxPtr}` fat pointer (`sema.TypeFunc`/
+`g.funcValTy`). Only a direct reference to a top-level `FuncDecl`/
+`ExternFuncDecl` with a structurally matching signature may become one
+(`checkFuncToCFuncConversion`, `sema/typecheck.go`) - a function literal or
+any function value already sitting in a variable/parameter/field is a
+compile error, not a silent fallback.
+
+**Why a new `TypeKind` rather than a `TypeFunc{IsBare: true}` flag:** every
+existing `TypeFunc`-aware switch (`Equal`, `String`, `llvmType`,
+`isFFISafeType`, `funcSigForCall`, `genCallExpr`'s call-shape dispatch)
+would otherwise need an `if t.IsBare` branch buried inside its `TypeFunc`
+case rather than a parallel, equally-visible `TypeCFunc` case next to it -
+the same reasoning `TypeCString` already established over reusing
+`TypeString` with a flag (see that entry above). The two kinds share
+`Params`/`Return` (identical shape, just a different calling convention),
+so this costs no duplicated field, only a second explicit case per switch.
+
+**Why the conversion is a sema-layer decision, not a codegen coercion:**
+`cfunc` has no capture context at all - there is no way to synthesize a
+context-free real C function pointer for an arbitrary closure without a
+trampoline (a small per-closure stub allocated at run time, mapping a
+fixed C ABI call back to a specific `{fnPtr, ctxPtr}` pair), which is a
+real, separate feature of its own (dynamic code generation or a limited
+fixed-arity dispatch table), not attempted this round. Restricting the
+source to a direct top-level declaration reference sidesteps needing one
+at all: that function's own address is already fixed and already has no
+implicit context, so `checkFuncToCFuncConversion` just retypes the
+reference in place (`info.Types[at] = want`) and `genExpr`'s `Ident` case
+reads `g.funcs[sym].fn` directly - zero runtime cost, and genuinely
+correct, rather than a coercion papering over a shape mismatch.
+
+**The one real ABI hazard this surfaces: an ordinary (non-extern) `FuncDecl`
+with a struct-by-value parameter/return can't convert.** An extern func's
+own real signature is already built with `ffi.go`'s Windows x64 struct
+coercion, matching a `cfunc` call site's identical coercion automatically.
+An ordinary `FuncDecl`'s real signature instead uses this compiler's own
+uncoerced, internally-consistent struct-passing convention (correct between
+two intra-language call sites, but not what a `cfunc`-shaped, ABI-coerced
+call site expects) - `checkFuncToCFuncConversion` rejects this shape
+outright rather than let codegen produce a real, silent ABI mismatch.
+Teaching an ordinary `FuncDecl` to carry a second, ABI-coerced calling
+convention just for this case was judged separate, non-trivial scope.
+
+**Status:** shipped. See `LANGUAGE.md`'s "External functions (FFI)"
+section's own `cfunc` subsection and `CODEGEN.md`'s section of the same
+name for the lowering. Test coverage spans `src/parser` (type-grammar
+`Tree.Dump` shape), `src/sema` (extern-signature acceptance, FFI-safety
+recursion, the conversion's happy path and every rejection - a closure, a
+stored func value, a mismatched signature, and the struct-by-value/
+non-extern-source case), `src/codegen` (bare-`ptr` IR shape, no
+`extractvalue`/no `.thunk`, real JIT execution), and `cmd/llvmc`'s own
+`TestBinary_AOT_LinkLibCFuncCallback` - a real gcc-compiled static library
+that itself calls the passed function pointer, linked via the existing
+`-L`/`-l` path.

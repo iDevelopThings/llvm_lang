@@ -1321,11 +1321,14 @@ g := i32(a)     // same type - passes the value through unchanged, no
                 // instruction emitted at all (see codegen's genConversion)
 ```
 
-Scoped to **numeric-to-numeric only** - a conversion whose target or
-argument isn't numeric (`i64("hello")`, `Point(x)`, `bool(x)`, `string(x)`)
-is rejected: `string`/`struct`/`array`/`bool` conversions aren't meaningfully
-"conversions" in the C-cast sense this feature covers, and are out of scope.
-A wrong argument count (`i64(1, 2)` or `i64()`) is also a real error
+Scoped to **numeric-to-numeric only**, plus two dedicated FFI crossings -
+`cstring(s)` and `string(cs)` (see "The `cstring` type" above) - checked as
+their own special case ahead of the numeric-only rule. Every other
+conversion whose target or argument isn't numeric (`i64("hello")`,
+`Point(x)`, `bool(x)`) is rejected: `struct`/`array`/`bool` conversions
+aren't meaningfully "conversions" in the C-cast sense this feature covers,
+and are out of scope. A wrong argument count (`i64(1, 2)` or `i64()`) is also
+a real error
 ("conversion to i64 requires exactly one argument, got N"). The conversion's
 own target `Type` is recorded as the `CallExpr` node's own type in
 `Info.Types`, exactly like any other expression - codegen recognizes the
@@ -2186,38 +2189,157 @@ languages spell this (`extern "C"`): this project only ever targets one ABI
 disambiguate, so nothing to write.
 
 **Type restriction.** Every parameter type and the return type of an extern
-func must be one of:
+func must be **FFI-safe**: one of
 
 - a numeric type (`i8`/`i16`/`i32`/`i64`/`f32`/`f64`)
 - `bool`
+- `cstring` (a raw `char*` - see "The `cstring` type" below)
 - a pointer type (`*T`, recursively - `T` itself is never restricted, since a
   pointer is always just a raw address at the ABI level regardless of what it
   points to)
+- a named struct type, **iff every one of its fields is itself FFI-safe,
+  recursively** (a nested struct is fine as long as its own fields are; see
+  below)
 
-`string`, a struct type by value, a dynamic array (`[]T`), and a function
-type are all explicitly rejected with a compile error, not silently
-mishandled: none of these have a well-defined "just pass this to a real C
-function" representation in this compiler's current ABI-level shape (each is
-really a small fat struct/closure under the hood, not a single scalar/pointer
-value a C caller would recognize) - solving that is explicitly out of scope
-for this round.
+`string`, a dynamic array (`[]T`), and a function type are all explicitly
+rejected with a compile error, not silently mishandled, both as a bare
+parameter/return type and as a struct field: none of these have a
+well-defined "just pass this to a real C function" representation in this
+compiler's current ABI-level shape (each is really a small fat struct/
+closure under the hood, not a single scalar/pointer value a C caller would
+recognize) - solving that is explicitly out of scope for this round. A
+**fixed-size array (`[N]T`) is FFI-safe only as a struct field**, never as a
+bare parameter/return type by itself - a real C array parameter decays to a
+pointer, a conversion this compiler doesn't perform implicitly, so there's
+no legal way to pass one directly:
 
 ```go
-extern func bad1(s string) int        // error: string is not supported
-extern func bad2() []int              // error: []int is not supported
-extern func bad3(p Point) int         // error: a struct by value is not supported
-extern func bad4(cb func(int) int) int // error: a function type is not supported
+struct Point { x int, y int }             // every field FFI-safe -> Point itself is
+
+extern func bad1(s string) int            // error: string is not supported
+extern func bad2() []int                  // error: []int is not supported
+extern func bad3(cb func(int) int) int    // error: a function type is not supported
+extern func bad4(a [4]int) int            // error: a bare fixed-size array is not supported
 
 extern func ok1(p *string) int   // fine - a pointer is always just an address,
                                   // whatever it points to
+extern func ok2(s cstring) i64   // fine - a raw C string is just a pointer too
+extern func ok3(p Point) Point   // fine - Point is FFI-safe by value
 ```
+
+A struct containing even one non-FFI-safe field (a `string`, a `[]T`, a
+function type, or another struct that isn't itself FFI-safe) is rejected the
+same way that field's own bare type would be:
+
+```go
+struct Bad { s string }
+extern func bad5(b Bad) int   // error: Bad has a non-FFI-safe field
+
+struct Buf { data [4]i8 }     // a fixed-size array field is fine, unlike bare
+extern func ok4(b Buf) int    // fine
+```
+
+### The `cstring` type
+
+`cstring` is a predeclared builtin type, like `string`/`bool` - not a
+keyword. Unlike `string`'s own `{ptr, i32}` fat struct, `cstring` is a raw
+pointer with no length, matching C's own `char*` exactly - the reason it may
+cross an extern func signature while `string` may not. There is no `cstring`
+literal syntax and no operator support (`+`, `==`, `print`, `len`, indexing -
+none are defined for it); the only way to produce or consume one is the pair
+of explicit conversions below.
+
+```go
+extern func strlen(s cstring) i64
+
+s := "hello"
+c := cstring(s)     // arena-copies s's bytes plus a trailing NUL
+n := strlen(c)      // a real C call, n == 5
+
+back := string(c)   // strlen's own length, then an arena copy of the bytes
+```
+
+`cstring(s)` (`s` a `string`) produces a NUL-terminated buffer: a string
+literal argument is already NUL-terminated internally and is passed through
+directly, but any other `string` value (a variable, a concatenation result,
+...) is arena-copied to a fresh `len(s)+1`-byte buffer with the trailing NUL
+appended, since a language string's own representation carries no such
+guarantee. If `s` itself contains an embedded NUL byte, C APIs that read the
+result via `strlen` (or equivalent) see a truncated string at that byte -
+matching Go's `C.CString`, not a crash. `string(cs)` (`cs` a `cstring`) does
+the reverse: `strlen(cs)` finds the real length, then those bytes are
+arena-copied into a fresh `string` - a copy, not a borrow, so the result
+stays valid independent of whatever produced `cs`. Neither conversion is
+implicit - `cstring`/`string` never adapt to each other anywhere except
+through `T(x)`.
+
+### `cfunc`: bare C function pointers
+
+`cfunc(T1, T2) R` (an optional return type, exactly like `func`) is a
+**bare C function pointer type** - a keyword, like `func`/`map`, and its own
+distinct type, never just a variant of `func`. Unlike an ordinary `func`
+value (a fat `{fnPtr, ctxPtr}` closure pointer - see "First-class
+functions" below), a `cfunc` value is a single, bare function pointer with
+no capture context at all, matching a real C function pointer's own ABI
+exactly - the type this language uses for **passing one of its own
+functions to C as a callback**:
+
+```go
+extern func apply_callback(cb cfunc(int) int, x int) int
+
+func double(x int) int {
+    return x * 2
+}
+
+func main() int {
+    return apply_callback(double, 21)   // 42 - a real C call through cb
+}
+```
+
+`cfunc` is FFI-safe (it may appear anywhere the "Type restriction" section
+above allows an FFI-safe type - a parameter/return, or recursively as a
+struct field) - every one of its own parameter/return types must themselves
+be FFI-safe, the identical recursive rule an extern func's own signature
+already follows. An ordinary `func` type is still rejected on an extern
+signature exactly as before - `cfunc` doesn't loosen that rule, it adds a
+second, narrower type for the one shape a real C ABI can actually call.
+
+**Only a direct reference to a top-level `func`/`extern func` may become a
+`cfunc` value** - assigned to a `cfunc`-typed variable/parameter/field, or
+passed as a `cfunc`-typed argument, its signature must structurally match:
+
+```go
+func add(x int, y int) int { return x + y }
+
+var cb cfunc(int, int) int = add   // fine - add's own real address
+```
+
+A function literal, or any function value already stored in a variable/
+parameter/field (even one that's itself `func`-typed and never actually
+captures anything), is rejected - there is no trampoline this round to
+synthesize a real, context-free C function pointer for a closure:
+
+```go
+var bad cfunc(int) int = func(x int) int { return x }   // error: no closures
+f := add
+var bad2 cfunc(int, int) int = f                        // error: not a direct reference
+```
+
+A struct-by-value parameter/return additionally requires the source to be
+an `extern func`, not an ordinary `func` - see `CODEGEN.md` for why an
+ordinary `func`'s own real signature can't safely stand in for a `cfunc`
+value there. Calling a `cfunc` value is a direct call with no leading
+context argument at all, using the identical Windows x64 ABI coercion an
+extern func call already applies to a struct-by-value parameter/return
+(see `CODEGEN.md`'s "External functions (FFI)" section).
 
 **Explicitly out of scope for this round** (deliberately deferred, not
 built): `extern var` (binding an external global variable), variadic extern
-functions, struct-by-value ABI marshaling/rename syntax for the linked symbol
-name, and any platform other than Windows. See `DECISIONS.md` for why this
-round is scoped this narrowly, and `CODEGEN.md` for how an extern func
-declaration actually lowers.
+functions, rename syntax for the linked symbol name, and any platform other
+than Windows. Struct-by-value FFI marshaling and `cfunc` **are** built (see
+above) - this entry previously deferred both. See `DECISIONS.md` for why
+this round is scoped this narrowly, and `CODEGEN.md` for how an extern func
+declaration (struct-by-value ABI coercion included) actually lowers.
 
 **A caller obligation this restriction doesn't cover: binding a real Win32
 `BOOL`-returning API as this language's `bool`.** This language's own `bool`

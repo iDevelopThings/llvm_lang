@@ -106,6 +106,14 @@ length decides it whenever the two differ within that shared prefix, and the
 lengths break the tie when one string is a prefix of the other (`"ab" <
 "abc"`, matching Go).
 
+`cstring` (see LANGUAGE.md's "The `cstring` type" section) is a completely
+different, much simpler representation: just `g.ptrTy`, the same opaque
+`ptr` every pointer type already uses (`llvmType`, types.go) - no length
+field, since it exists purely to match C's own `char*` at the ABI level.
+Only reachable via `genStringToCString`/`genCStringToString` (runtime.go),
+`genConversion`'s (expr.go) lowering for the two explicit `cstring(s)`/
+`string(cs)` conversions - never a first-class value with its own operators.
+
 ## The arena allocator (`src/codegen/runtime.go`'s `setupArena`)
 
 Every codegen-level heap allocation goes through one centralized bump
@@ -1859,10 +1867,115 @@ own linker instead, just moved to run time because this project's execution
 model is JIT, not link-then-run.
 
 Mirrors what its type-restriction diagnostic (`checkExternType`) already
-stops before this: a `string`/struct-by-value/dynamic-array/function-typed
-parameter or return type is a sema-layer error, not a codegen-layer one -
-codegen never has to consider any of those four unsupported shapes reaching
-an `ExternFuncDecl`'s `llvmType` translation.
+stops before this: a `string`/dynamic-array/function-typed parameter or
+return type (or a struct containing one) is a sema-layer error, not a
+codegen-layer one - codegen never has to consider any of those unsupported
+shapes reaching an `ExternFuncDecl`'s `llvmType` translation. `cstring` (see
+LANGUAGE.md's "The `cstring` type" section) needed no codegen change of its
+own here either - `llvmType(TypeCString)` is just `g.ptrTy`, so a `cstring`
+parameter/return lowers exactly like a pointer one already did.
+
+**Struct-by-value FFI (`src/codegen/ffi.go`): a real Windows x64 ABI
+coercion, not just `g.llvmType`.** A struct sema now accepts on an extern
+signature (`isFFISafeType`) can't just be declared/called with its own raw
+LLVM struct type the way `declareFuncSignature`'s intra-language path
+already does - verified empirically, not assumed: LLVM's default aggregate-
+argument lowering flattens a direct (uncoerced) struct parameter into one
+independent register/stack slot *per field*, silently corrupting a real
+C callee's second field onward, since the real ABI (Windows x64) instead
+requires either "coerce the whole struct to a same-size integer" (exactly
+1, 2, 4, or 8 bytes) or "pass by reference" (every other size) - see
+DECISIONS.md's dated entry for the exact failure and citation. `abiSizeAlign`
+computes a struct's real byte size directly from its field types (not via
+LLVM's own `TargetData`, which doesn't exist yet at codegen time - the
+module's `DataLayout` is only pinned afterward, in
+`compiler.finishPipeline`); `externParamType`/`externReturnType` use that to
+pick the real declared LLVM type per position (a coerced integer, or `ptr`
+with an `sret` attribute for an indirect return); `genFuncCall`'s
+`coerceExternArg`/`bitcastThroughMemory` then adapt each natural struct
+value to/from that declared shape at every call site, via a temp alloca (LLVM
+has no direct struct↔integer bitcast in SSA form). This is genFuncCall-only:
+an intra-language struct-by-value call never diverges (same backend, same
+internally-consistent flattening on both call and callee sides), and a bare
+reference to a struct-by-value extern func called *indirectly* (through
+`genFuncThunk`/`genIndirectCallValue`) isn't covered - out of scope for this
+round, since LANGUAGE.md's only documented extern-func calling form is
+direct.
+
+**`strlenExtern` (runtime.go): one shared, lazily resolved "strlen"
+declaration.** Both the cstring->string conversion (`genCStringToString`)
+and the `args()` builtin's own argv marshaling (`buildArgsInitFn`, args.go)
+need a real libc `strlen` call. Neither declares its own local `llvm.
+AddFunction(g.mod, "strlen", ...)` - a user's own `extern func strlen(...)`
+declaring the identical symbol name first would otherwise collide, and LLVM
+silently renames the second same-named declaration (e.g. to `strlen.1`)
+rather than erroring, which the JIT/linker can never actually resolve.
+`strlenExtern` looks up `g.mod.NamedFunction("strlen")` first, reusing
+whatever it finds (the user's own extern, or an earlier call to this same
+method), and only calls `AddFunction` if genuinely nothing named "strlen"
+exists yet in this module - caching the result in `Generator.strlenFn` so
+this lookup happens at most once per module regardless of how many call
+sites need it.
+
+## `cfunc`: a bare pointer, no fat-pointer/thunk machinery at all
+
+See `LANGUAGE.md`'s "External functions (FFI)" section's own `cfunc`
+subsection for the language-level feature; this is its lowering.
+
+**`sema.TypeCFunc` is a distinct `TypeKind`, sharing `TypeFunc`'s own
+`Params`/`Return` fields** (`sema/types.go`) - deliberately not `TypeFunc`
+plus a flag: every switch that already branches on `Kind` (`Equal`,
+`String`, `llvmType`, `isFFISafeType`, `funcSigForCall`, `genCallExpr`'s own
+dispatch) gets its own explicit `TypeCFunc` case rather than a conditional
+buried inside the `TypeFunc` one.
+
+**`llvmType(TypeCFunc)` is `g.ptrTy`** (`src/codegen/types.go`) - not
+`g.funcValTy` (the `{ptr, ptr}` fat pointer `TypeFunc` uses) - there is no
+`ctxPtr` slot to make room for at all, matching a real C function pointer's
+own single-word representation exactly.
+
+**The func-to-cfunc conversion (`checkFuncToCFuncConversion`,
+`sema/typecheck.go`) is a sema-layer decision; codegen just reads its
+result off `info.Types`.** Once sema retypes a direct top-level
+`FuncDecl`/`ExternFuncDecl` reference's own node to `TypeCFunc`,
+`genExpr`'s `Ident`/`SymFunc` case (`src/codegen/expr.go`) checks that
+retyped `info.Types` entry and returns `g.funcs[sym].fn` - the function's
+own real, already-declared address - directly, skipping
+`genFuncValue`/`genFuncThunk` entirely: no `.thunk` adapter is ever
+synthesized for a `cfunc` conversion, since there's no `ctxPtr` parameter a
+thunk would need to insert/strip in the first place.
+
+**Calling a `cfunc` value (`isCFuncCall`/`genCFuncCall`, `expr.go`) mirrors
+`genFuncCall`'s own extern-func ABI coercion, not `genIndirectCall`'s
+fat-pointer extraction.** `genCallExpr`'s dispatch checks `isCFuncCall`
+(the callee's `info.Types` `Kind == TypeCFunc`) right after
+`isDirectFuncCall` - a `cfunc`-typed callee is always a value (a variable,
+parameter, struct field, or converted argument), so `genCFuncCall`
+evaluates it as an ordinary expression (already the bare pointer, per
+`llvmType` above) and calls straight through it, with no `ctxPtr` argument
+prepended at all. Parameter/return types go through the identical
+`externParamType`/`externReturnType`/`coerceExternArg`/
+`bitcastThroughMemory` helpers (`ffi.go`) a direct extern-func call already
+uses, applied fresh at the call site rather than read off a memoized
+`funcEntry` (there is no `funcEntry` for an arbitrary `cfunc`-typed
+*value* - only a real declared symbol has one) - a struct-by-value
+parameter/return crossing a `cfunc` call gets the exact same Windows x64
+coercion `genFuncCall` already applies to a direct extern call.
+
+**Why an ordinary (non-extern) `FuncDecl` with a struct-by-value
+parameter/return can't convert to `cfunc`
+(`checkFuncToCFuncConversion`'s own guard, sema/typecheck.go).** An extern
+func's own real LLVM signature is *already* built with `ffi.go`'s ABI
+coercion (`declareExternFuncSignature`), so it agrees with `genCFuncCall`'s
+identical coercion at the call site automatically. An ordinary `FuncDecl`'s
+real signature (`declareFuncSignature`) instead uses this compiler's own
+internal, uncoerced struct-passing convention (LLVM's default aggregate
+flattening, consistent between an intra-language caller and callee, per
+this file's own struct-by-value FFI section above) - calling *that* real
+function through a `cfunc`-shaped, ABI-coerced call site would silently
+disagree with its actual parameter/return representation. Sema rejects the
+conversion outright rather than have codegen paper over a real ABI
+mismatch.
 
 ## The `args()` builtin, concretely
 
@@ -2120,6 +2233,10 @@ duplicating those same three calls; it now just reuses
 LLVM's native-target infrastructure initialized first
 (`llvm.InitializeNativeTarget`/`llvm.InitializeNativeAsmPrinter`) -
 `src/compiler` now does this itself too, guarded by its own `sync.Once`.
+Immediately after building the TM, `finishPipeline` also pins the module's
+data layout and target triple from it - required for correct C ABI
+aggregate lowering on extern boundaries (see the FFI struct-by-value
+section and `DECISIONS.md`).
 
 **Disposal ownership** - a `TargetMachine` must be disposed exactly once,
 after every consumer that might still need it is done with it. Concretely,
@@ -2288,6 +2405,7 @@ never changes program behavior/results, only speed/code shape.
 
 ```powershell
 .\llvmc.exe -o myprogram.exe path\to\program.llx
+.\llvmc.exe -o myprogram.exe -L C:\libs -l foo path\to\program.llx
 .\myprogram.exe    # a real, standalone .exe - no llvmc, no Go, no LLVM
                     # toolchain present at all, anywhere in the loop
 ```
@@ -2308,16 +2426,17 @@ produces a real `.exe` at the given path instead.
 2. **Write the resulting object bytes to a temporary `.o` file** via a
    plain `os.CreateTemp`/`os.Remove` - not this project's own `afero.Fs`
    convention (a narrow, deliberate exception - see `DECISIONS.md`).
-3. **Link it into a real `.exe`** by shelling out to `gcc <temp.o> -o
-   <output>`, reusing the exact same mingw64 toolchain this project
-   already requires on `PATH` for cgo/dev work. `gcc` already resolves
-   ordinary libc symbols and any user-declared `extern func` binding to a
-   real Win32 API export automatically via mingw64's standard import
-   libraries - no special linking flags needed for either case, confirmed
-   concretely: `TestBinary_AOT_ExternFuncScopeTimer` AOT-compiles
-   `examples/scope_timer` (binding `QueryPerformanceCounter`/
-   `QueryPerformanceFrequency` from `kernel32.dll`) and runs the resulting
-   standalone `.exe` directly.
+3. **Link it into a real `.exe`** by shelling out to
+   `gcc <temp.o> -o <output> [-Ldir...] [-llib...]`, reusing the exact same
+   mingw64 toolchain this project already requires on `PATH` for cgo/dev
+   work. `gcc` already resolves ordinary libc symbols and any
+   user-declared `extern func` binding to a real Win32 API export
+   automatically via mingw64's standard import libraries - confirmed by
+   `TestBinary_AOT_ExternFuncScopeTimer`. Third-party libs that are not on
+   that default set need explicit repeatable `-L`/`-l` flags (dirs before
+   libs on the gcc argv). Using either without `-o` is a usage error -
+   JIT/`-emit-llvm` never invoke the linker. Confirmed by
+   `TestBinary_AOT_LinkLib` and the struct/`cfunc` AOT link tests.
 
 **`main`'s own LLVM signature needed no change at all** - `main` still
 lowers to the exact same parameterless `i32 @main()` this project has
@@ -2347,10 +2466,11 @@ doesn't accidentally pull its siblings into the same package.
 ## Exit codes
 
 - **2** - a usage error: no path argument, an unrecognized flag, both `-o`
-  and `-emit-llvm` given together, the path couldn't be resolved to a real
-  file/directory, its resolved directory has zero `.llx` files in it, an
-  imported package directory couldn't be found, or a real import cycle was
-  detected. A short message goes to stderr; nothing is compiled.
+  and `-emit-llvm` given together, `-l`/`-L` without `-o`, the path couldn't
+  be resolved to a real file/directory, its resolved directory has zero
+  `.llx` files in it, an imported package directory couldn't be found, or a
+  real import cycle was detected. A short message goes to stderr; nothing is
+  compiled.
 - **1** - a compile-time diagnostic from the lexer, parser stage, or from
   `src/compiler`'s `finishPipeline`: `sema.ResolveProgram` (or
   `ResolvePackage`, for an import-less package), `sema.CheckProgram`, or

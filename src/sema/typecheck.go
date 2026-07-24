@@ -714,45 +714,126 @@ func (c *checker) buildSigFromParamListAndReturnType(paramList, returnTypeNode a
 
 // checkExternType reports a diagnostic at n when t isn't one of the types
 // this round's FFI mechanism allows crossing an extern func's signature (see
-// isValidExternType) - what names the position for the diagnostic's own
-// wording ("parameter" or "return"). A TypeInvalid t is skipped silently -
-// already reported by whatever produced it (an undefined type name, e.g.),
-// so this would only add a redundant follow-on error, not a new root cause.
+// isFFISafeType) - what names the position for the diagnostic's own wording
+// ("parameter" or "return"). A TypeInvalid t is skipped silently - already
+// reported by whatever produced it (an undefined type name, e.g.), so this
+// would only add a redundant follow-on error, not a new root cause.
 func (c *checker) checkExternType(n ast.NodeIndex, t Type, what string) {
 	if t.IsInvalid() {
 		return
 	}
-	if !isValidExternType(t) {
-		c.errorAt(n, "extern func %s type %s is not supported - only numeric types, bool, and pointer types can cross an extern function signature", what, t)
+	if !c.isFFISafeType(t) {
+		c.errorAt(n, "extern func %s type %s is not supported - only numeric types, bool, cstring, pointer types, and structs made entirely of FFI-safe fields can cross an extern function signature", what, t)
 	}
 }
 
-// isValidExternType reports whether t is a type this round's FFI mechanism
-// can pass across a real C ABI boundary (see LANGUAGE.md's "External
-// functions (FFI)" section): a numeric type of any width (i8/i16/i32/i64/f32/
-// f64), bool, or a pointer type. A pointer is valid unconditionally, whatever
-// its own pointee type is (even one otherwise disallowed here, like *string
-// or a pointer to a struct) - a pointer is always just a raw address at the
-// ABI level regardless of what it points to, so there's nothing to recurse
-// into; TypePointer alone already covers `**T` and deeper exactly the same
-// way, since each nesting level is still just TypePointer at its own Kind.
-// Explicitly excluded: string (a {ptr,i32} fat struct, not a real C ABI
-// shape), a struct type by value, a function type (a fat closure pointer),
-// and any array type - both a dynamic array (`[]T`, itself a fat struct) and
-// a fixed-size array (`[N]T`, which has no well-defined by-value C ABI shape
-// in this compiler either: unlike a scalar, passing one by value would need
-// this round to pick an actual aggregate-by-value lowering, which it simply
-// doesn't implement yet) fall through the same `default: false` case below,
-// with no dedicated case of their own. None of these have a well-defined
-// "just pass this to a real C function" representation in this compiler
-// yet, and solving that is explicitly out of scope this round.
-func isValidExternType(t Type) bool {
+// isFFISafeType reports whether t may cross an extern func signature at top
+// level - a parameter or the return type (see LANGUAGE.md's "External
+// functions (FFI)" section). A numeric type, bool, cstring, and a pointer
+// are always safe (isFFISafeScalar); a struct is safe iff every one of its
+// fields is (isFFISafeStructField, structIsFFISafe); a cfunc type is safe
+// iff every one of its own parameter/return types is, recursively
+// (cfuncIsFFISafe) - a bare function pointer is just as much a raw address
+// at the ABI level as a pointer is. A bare array is deliberately rejected
+// here even though the identical element type is fine as a struct field
+// (see isFFISafeStructField) - a C array parameter decays to a pointer, a
+// conversion this compiler doesn't model implicitly, so there's no legal
+// way to pass one directly.
+func (c *checker) isFFISafeType(t Type) bool {
 	switch t.Kind {
-	case TypeI8, TypeI16, TypeI32, TypeI64, TypeF32, TypeF64, TypeBool, TypePointer:
+	case TypeStruct:
+		return t.Struct != nil && c.structIsFFISafe(t.Struct, nil)
+	case TypeCFunc:
+		return c.cfuncIsFFISafe(t)
+	default:
+		return isFFISafeScalar(t)
+	}
+}
+
+// cfuncIsFFISafe reports whether every one of t's (Kind == TypeCFunc)
+// parameter/return types is itself FFI-safe - the cfunc counterpart to
+// structIsFFISafe, checked eagerly at every cfunc type's own construction
+// site (cfuncTypeFromNode) as well as here; this second check only matters
+// when a cfunc type nested inside something else (e.g. a struct field) was
+// never itself walked by cfuncTypeFromNode's own per-occurrence diagnostic.
+func (c *checker) cfuncIsFFISafe(t Type) bool {
+	for _, p := range t.Params {
+		if !c.isFFISafeType(p) {
+			return false
+		}
+	}
+	return t.Return == nil || t.Return.Kind == TypeVoid || c.isFFISafeType(*t.Return)
+}
+
+// isFFISafeScalar reports whether t is FFI-safe on its own, with no
+// recursion needed: a numeric type of any width (i8/i16/i32/i64/f32/f64),
+// bool, cstring, or a pointer type. A pointer is safe unconditionally,
+// whatever its own pointee type is (even one otherwise disallowed here, like
+// *string) - a pointer is always just a raw address at the ABI level
+// regardless of what it points to. cstring is likewise just a raw pointer
+// (see TypeCString's own doc comment). Explicitly excluded: string (a
+// {ptr,i32} fat struct), a function type (a fat closure pointer), a map, and
+// an enum - none has a well-defined "just pass this to a real C function"
+// representation in this compiler.
+func isFFISafeScalar(t Type) bool {
+	switch t.Kind {
+	case TypeI8, TypeI16, TypeI32, TypeI64, TypeF32, TypeF64, TypeBool, TypeCString, TypePointer:
 		return true
 	default:
 		return false
 	}
+}
+
+// isFFISafeStructField reports whether t is legal as a field of an FFI-safe
+// struct - like isFFISafeType, but a fixed-size array of an FFI-safe element
+// type is additionally allowed: a real C struct may embed an array field, so
+// `[N]T` (T itself FFI-safe) is safe here even though a *bare* array
+// parameter/return is rejected by isFFISafeType. TypeCFunc is handled here
+// (not in isFFISafeScalar) because it needs the same recursive param/return
+// walk cfuncIsFFISafe already does for bare cfunc params - a bare function
+// pointer is just as legal as a C struct field as it is as an extern param.
+// A dynamic array (`[]T`, a fat struct) still falls through to
+// isFFISafeScalar's `default: false`.
+func (c *checker) isFFISafeStructField(t Type, seen map[*StructInfo]bool) bool {
+	switch t.Kind {
+	case TypeStruct:
+		return t.Struct != nil && c.structIsFFISafe(t.Struct, seen)
+	case TypeArray:
+		return !t.Dynamic && c.isFFISafeStructField(*t.Elem, seen)
+	case TypeCFunc:
+		return c.cfuncIsFFISafe(t)
+	default:
+		return isFFISafeScalar(t)
+	}
+}
+
+// structIsFFISafe reports whether every field of info's struct is itself
+// FFI-safe (isFFISafeStructField), recursively. seen guards against a
+// genuinely cyclic struct definition the same way structCopyable's own
+// computingCopyable does - simply breaks the recursion by treating it as
+// safe, since a cyclic by-value struct is either unconstructable or a
+// distinct problem elsewhere, not one this check needs to diagnose. Unlike
+// StructInfo.Copyable, this isn't memoized on info - checkExternType only
+// ever runs once per declared extern signature, so there's no repeated-call
+// cost worth caching.
+func (c *checker) structIsFFISafe(info *StructInfo, seen map[*StructInfo]bool) bool {
+	if seen == nil {
+		seen = make(map[*StructInfo]bool)
+	}
+	if seen[info] {
+		return true
+	}
+	seen[info] = true
+
+	restore := c.pushTree(info.Symbol.Tree)
+	defer restore()
+	for _, field := range c.tree.StructFields(info.Symbol.Decl) {
+		fieldType := c.typeFromNode(c.tree.Child(field, 1))
+		if !c.isFFISafeStructField(fieldType, seen) {
+			return false
+		}
+	}
+	return true
 }
 
 // checkFuncLit type-checks a function-literal expression (`func(params)
@@ -1149,6 +1230,11 @@ func (c *checker) retypeUntyped(n ast.NodeIndex, target Type) {
 // width or float width is fine, but untyped-float -> an integer want is
 // rejected (same as Go rejects `var a int = 5.5`) - at is retyped in place
 // (retypeUntyped) to want on success, since nothing else will revisit it.
+//
+// A got of TypeFunc converting to a want of TypeCFunc with a structurally
+// matching signature (sameFuncShape) is the one other implicit conversion
+// this function allows, subject to checkFuncToCFuncConversion's own
+// narrower rules (see LANGUAGE.md's "External functions (FFI)" section).
 func (c *checker) checkAssignable(at ast.NodeIndex, want, got Type, context string) bool {
 	if want.IsInvalid() || got.IsInvalid() {
 		return true
@@ -1179,10 +1265,103 @@ func (c *checker) checkAssignable(at ast.NodeIndex, want, got Type, context stri
 		c.retypeUntyped(at, want)
 		return true
 	}
+	if want.Kind == TypeCFunc && got.Kind == TypeFunc && sameFuncShape(want, got) {
+		return c.checkFuncToCFuncConversion(at, want)
+	}
 	if !want.Equal(got) {
 		c.errorAt(at, "cannot use %s as %s in %s", got, want, context)
 		return false
 	}
+	return true
+}
+
+// sameFuncShape reports whether a and b - one TypeFunc, one TypeCFunc -
+// declare the identical parameter/return shape: the structural comparison
+// checkAssignable's own func-to-cfunc conversion needs, since Type.Equal
+// itself always requires an identical Kind first and TypeFunc/TypeCFunc are
+// deliberately never Equal to one another.
+func sameFuncShape(a, b Type) bool {
+	if len(a.Params) != len(b.Params) {
+		return false
+	}
+	for i := range a.Params {
+		if !a.Params[i].Equal(b.Params[i]) {
+			return false
+		}
+	}
+	return a.Return.Equal(*b.Return)
+}
+
+// cfuncSourceSymbol reports whether n is a bare Ident referencing a real,
+// already-declared top-level FuncDecl or ExternFuncDecl - the only shape
+// checkFuncToCFuncConversion accepts. A function literal, a variable/
+// parameter/field already holding a function value, or any other
+// expression that merely type-checks as TypeFunc are all rejected: a cfunc
+// value is a bare function pointer with no capture context at all, so only
+// a function whose real address never changes at runtime can ever become
+// one (see DECISIONS.md's dated entry - no trampoline this round).
+func (c *checker) cfuncSourceSymbol(n ast.NodeIndex) (*Symbol, bool) {
+	if c.tree.Nodes[n].Kind != enums.NodeKinds.Ident {
+		return nil, false
+	}
+	sym, ok := c.info.Refs[n]
+	if !ok || sym.Kind != SymFunc || sym.Decl == ast.InvalidNode {
+		return nil, false
+	}
+	return sym, true
+}
+
+// cfuncHasStructShape reports whether t (a TypeCFunc) declares a
+// struct-by-value parameter or return - checkFuncToCFuncConversion's own
+// guard against the one real ABI hazard a func-to-cfunc conversion can hit:
+// see that function's own doc comment.
+func cfuncHasStructShape(t Type) bool {
+	for _, p := range t.Params {
+		if p.Kind == TypeStruct {
+			return true
+		}
+	}
+	return t.Return != nil && t.Return.Kind == TypeStruct
+}
+
+// checkFuncToCFuncConversion validates and completes checkAssignable's own
+// func-to-cfunc special case: at must be a bare reference to a real
+// top-level FuncDecl/ExternFuncDecl (cfuncSourceSymbol) - anything else (a
+// closure, a stored function value) is a compile error, not a silent
+// fallback. want's signature is already known to structurally match at's
+// own TypeFunc (checkAssignable's sameFuncShape check, before this is ever
+// called).
+//
+// A struct-by-value parameter/return is additionally rejected when the
+// source is an ordinary FuncDecl, not an ExternFuncDecl: an extern func's
+// own real LLVM signature is already built with the C-ABI struct coercion
+// (externParamType/externReturnType, src/codegen/ffi.go) a cfunc call site
+// applies too, so the two agree automatically - but an ordinary FuncDecl's
+// real signature uses this compiler's own internal (uncoerced) struct-
+// passing convention, which would silently disagree with a cfunc call
+// site's C-ABI coercion. Teaching ordinary-FuncDecl codegen to carry a
+// second, ABI-coerced signature just for this case is separate, non-trivial
+// scope, not taken on speculatively this round.
+//
+// On success, at's own info.Types entry is overwritten to want (TypeCFunc)
+// - the same in-place retyping convention retypeUntyped already uses, so a
+// later pass (codegen) sees the context that finally pinned this
+// expression to a concrete type: checkIdentExpr itself always types a bare
+// function reference as TypeFunc regardless of where it flows.
+func (c *checker) checkFuncToCFuncConversion(at ast.NodeIndex, want Type) bool {
+	sym, ok := c.cfuncSourceSymbol(at)
+	if !ok {
+		c.errorAt(at, "cannot convert this function value to %s: only a direct reference to a top-level func or extern func is allowed (no closures)", want)
+		return false
+	}
+	restore := c.pushTree(sym.Tree)
+	isExtern := c.tree.Nodes[sym.Decl].Kind == enums.NodeKinds.ExternFuncDecl
+	restore()
+	if !isExtern && cfuncHasStructShape(want) {
+		c.errorAt(at, "cannot convert func %s to %s: a struct-by-value parameter/return requires the source to be an extern func", sym.Name, want)
+		return false
+	}
+	c.info.Types[at] = want
 	return true
 }
 
@@ -1485,6 +1664,8 @@ func (c *checker) computeTypeFromNode(n ast.NodeIndex) Type {
 		return c.pointerTypeFromNode(n)
 	case enums.NodeKinds.FuncType:
 		return c.funcTypeFromNode(n)
+	case enums.NodeKinds.CFuncType:
+		return c.cfuncTypeFromNode(n)
 	case enums.NodeKinds.MultiReturnType:
 		return c.multiReturnTypeFromNode(n)
 	case enums.NodeKinds.YieldReturnType:
@@ -1567,6 +1748,8 @@ func (c *checker) typeFromSymbol(sym *Symbol) Type {
 			return f64Type
 		case "string":
 			return stringType
+		case "cstring":
+			return cstringType
 		case "bool":
 			return boolType
 		case "coroutine":
@@ -1633,6 +1816,51 @@ func (c *checker) funcTypeFromNode(n ast.NodeIndex) Type {
 		Kind:   TypeFunc,
 		Params: params,
 		Return: &ret,
+	}
+}
+
+// cfuncTypeFromNode converts a CFuncType type-position node (`cfunc(T1, T2)
+// R` - see LANGUAGE.md's "External functions (FFI)" section) into a Type -
+// funcTypeFromNode's bare-C-function-pointer counterpart, identical shape
+// (ParamTypeList child, optional return-type child). Unlike an ordinary
+// FuncType, every parameter and the return type (when declared) must
+// itself be FFI-safe (isFFISafeType) - enforced unconditionally here,
+// regardless of where the cfunc type appears (an extern signature, an
+// ordinary var/param/field, ...), since a cfunc value always lowers to a
+// bare function pointer called with real C-ABI marshaling (see CODEGEN.md).
+func (c *checker) cfuncTypeFromNode(n ast.NodeIndex) Type {
+	paramListNode := c.tree.Child(n, 0)
+	returnNode := c.tree.Child(n, 1)
+
+	paramNodes := c.tree.Children(paramListNode)
+	params := make([]Type, len(paramNodes))
+	for i, p := range paramNodes {
+		t := c.typeFromNode(p)
+		params[i] = t
+		c.checkCFuncElemType(p, t, "parameter")
+	}
+
+	ret := voidType
+	if returnNode != ast.InvalidNode {
+		ret = c.typeFromNode(returnNode)
+		c.checkCFuncElemType(returnNode, ret, "return")
+	}
+	return Type{
+		Kind:   TypeCFunc,
+		Params: params,
+		Return: &ret,
+	}
+}
+
+// checkCFuncElemType reports a diagnostic at n when t isn't FFI-safe
+// (isFFISafeType) - checkExternType's identical check, worded for a bare
+// cfunc type's own parameter/return position instead of an extern func's.
+func (c *checker) checkCFuncElemType(n ast.NodeIndex, t Type, what string) {
+	if t.IsInvalid() {
+		return
+	}
+	if !c.isFFISafeType(t) {
+		c.errorAt(n, "cfunc %s type %s is not supported - only numeric types, bool, cstring, pointer types, cfunc types, and structs made entirely of FFI-safe fields are allowed", what, t)
 	}
 }
 
@@ -1748,10 +1976,10 @@ func (c *checker) mapTypeFromNode(n ast.NodeIndex) Type {
 // string, a pointer, or a struct/fixed-size array whose own fields/elements
 // are themselves all comparable, recursively (mirroring structCopyable's own
 // recursive-field-walk shape, just checking comparability instead of
-// copyability) - a dynamic array (`[]T`), a function type, or another map are
-// all explicitly rejected, anywhere they appear, even nested arbitrarily deep
-// inside a struct field or fixed-array element: none of them are
-// meaningfully hashable/comparable the way this language currently
+// copyability) - a dynamic array (`[]T`), a function type, another map, or
+// cstring are all explicitly rejected, anywhere they appear, even nested
+// arbitrarily deep inside a struct field or fixed-array element: none of
+// them are meaningfully hashable/comparable the way this language currently
 // represents them (see AGENTS.md's Operators section - `==`/`!=` themselves
 // already reject a bare dynamic array outright, and never define anything
 // for a bare function or map type at all).
@@ -1768,7 +1996,7 @@ func (c *checker) typeIsComparable(t Type) bool {
 			return false
 		}
 		return t.Elem == nil || c.typeIsComparable(*t.Elem)
-	case TypeFunc, TypeMap:
+	case TypeFunc, TypeCFunc, TypeMap, TypeCString:
 		return false
 	case TypeStruct:
 		if t.Struct == nil {
@@ -1836,15 +2064,15 @@ func (c *checker) enumAssociatedTypesAll(info *EnumInfo, pred func(Type) bool) b
 // dynamic array (`[]T`) IS printable (genPrintArrayValue already renders one
 // correctly today, an existing working feature this must not regress) even
 // though it is never comparable (see typeIsComparable's own doc comment). A
-// function type or a map type are rejected either way - codegen has no
-// rendering for either and never will, the same as typeIsComparable's own
-// rejection of them, just for a different reason (nothing to hash/compare
-// vs. nothing to print).
+// function type, a map type, or cstring are rejected either way - codegen
+// has no rendering for any of them and never will, the same as
+// typeIsComparable's own rejection of them, just for a different reason
+// (nothing to hash/compare vs. nothing to print).
 func (c *checker) typeIsPrintable(t Type) bool {
 	switch t.Kind {
 	case TypeArray:
 		return t.Elem == nil || c.typeIsPrintable(*t.Elem)
-	case TypeFunc, TypeMap:
+	case TypeFunc, TypeCFunc, TypeMap, TypeCString:
 		return false
 	case TypeStruct:
 		if t.Struct == nil {
@@ -4424,12 +4652,14 @@ func (c *checker) checkEnumVariantCall(n, callee ast.NodeIndex, args []ast.NodeI
 // no parser changes were needed for this feature (see parser/expr.go's
 // parseCallExpr).
 //
-// Scoped to numeric-to-numeric conversions only (see AGENTS.md's "Explicit
-// conversions" section) - string/struct/array/bool conversions aren't
-// meaningfully "conversions" here and remain unsupported, reported as such
-// rather than falling through to funcSigForCall's "not callable" wording
-// (which would be a confusing message for `Point(x)` - the real problem is
-// that Point isn't a numeric conversion target, not that it isn't callable).
+// Scoped to numeric-to-numeric conversions, plus two dedicated FFI
+// crossings - `cstring(s)` and `string(cs)` (see LANGUAGE.md's "External
+// functions (FFI)" section) - checked as their own special case below
+// before the numeric fallback. Every other struct/array/bool conversion
+// remains unsupported, reported as such rather than falling through to
+// funcSigForCall's "not callable" wording (which would be a confusing
+// message for `Point(x)` - the real problem is that Point isn't a numeric
+// conversion target, not that it isn't callable).
 //
 // Returns ok=false only for a plain function/method call (an ordinary
 // SymFunc callee, or a MemberExpr) - checkCallExpr falls through to its
@@ -4463,6 +4693,17 @@ func (c *checker) checkConversionCall(n, callee ast.NodeIndex, args []ast.NodeIn
 		c.info.Types[n] = invalidType
 		return invalidType, true
 	}
+
+	// cstring<->string: the two dedicated FFI marshaling conversions (see
+	// LANGUAGE.md's "External functions (FFI)" section) - deliberately not
+	// numeric, so checked ahead of the numeric-only fallback below.
+	isCStringCrossing := (target.Kind == TypeCString && argType.Kind == TypeString) ||
+		(target.Kind == TypeString && argType.Kind == TypeCString)
+	if isCStringCrossing {
+		c.info.Types[n] = target
+		return target, true
+	}
+
 	if !target.IsNumeric() || !argType.IsNumeric() {
 		c.errorAt(n, "cannot convert %s to %s", argType, target)
 		c.info.Types[n] = invalidType
@@ -4568,7 +4809,11 @@ func (c *checker) checkNewExpr(n ast.NodeIndex) Type {
 //     *indirect* call: callee is checked as an ordinary value expression (so
 //     it does get a real info.Types entry - codegen needs it to actually
 //     evaluate the function value before calling through it) and its Type
-//     must be TypeFunc.
+//     must be TypeFunc or TypeCFunc - the latter calls through a bare
+//     function pointer with no ctxPtr at all (see LANGUAGE.md's "External
+//     functions (FFI)" section; codegen's isCFuncCall/genCFuncCall mirror
+//     this exact distinction the same way isDirectFuncCall/genIndirectCall
+//     already do for TypeFunc).
 func (c *checker) funcSigForCall(callee ast.NodeIndex) (funcSignature, bool) {
 	switch c.tree.Nodes[callee].Kind {
 	case enums.NodeKinds.MemberExpr:
@@ -4600,7 +4845,7 @@ func (c *checker) funcSigForCall(callee ast.NodeIndex) (funcSignature, bool) {
 	if t.IsInvalid() {
 		return funcSignature{}, false
 	}
-	if t.Kind != TypeFunc {
+	if t.Kind != TypeFunc && t.Kind != TypeCFunc {
 		switch c.tree.Nodes[callee].Kind {
 		case enums.NodeKinds.Ident, enums.NodeKinds.MemberExpr:
 			c.errorAt(callee, "cannot call %s (%s is not a function)", c.tree.Text(callee), t)

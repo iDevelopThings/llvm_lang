@@ -21,6 +21,7 @@ const (
 	KeywordContinue    Keyword = "Continue"
 	KeywordReturn      Keyword = "Return"
 	KeywordFunc        Keyword = "Func"
+	KeywordCFunc       Keyword = "CFunc"
 	KeywordTrue        Keyword = "True"
 	KeywordFalse       Keyword = "False"
 	KeywordStruct      Keyword = "Struct"
@@ -49,6 +50,7 @@ type KeywordContainer struct {
 	Continue    Keyword
 	Return      Keyword
 	Func        Keyword
+	CFunc       Keyword
 	True        Keyword
 	False       Keyword
 	Struct      Keyword
@@ -78,6 +80,7 @@ var Keywords = KeywordContainer{
 	Continue:    KeywordContinue,
 	Return:      KeywordReturn,
 	Func:        KeywordFunc,
+	CFunc:       KeywordCFunc,
 	True:        KeywordTrue,
 	False:       KeywordFalse,
 	Struct:      KeywordStruct,
@@ -144,6 +147,11 @@ var keywordInfos = map[Keyword]KeywordInfo{
 		Keyword: KeywordFunc,
 		Name:    "Func",
 		String:  "func",
+	},
+	KeywordCFunc: {
+		Keyword: KeywordCFunc,
+		Name:    "CFunc",
+		String:  "cfunc",
 	},
 	KeywordTrue: {
 		Keyword: KeywordTrue,
@@ -241,6 +249,7 @@ var keywordValues = []Keyword{
 	KeywordContinue,
 	KeywordReturn,
 	KeywordFunc,
+	KeywordCFunc,
 	KeywordTrue,
 	KeywordFalse,
 	KeywordStruct,
@@ -269,6 +278,7 @@ var keywordByName = map[string]Keyword{
 	"continue":    KeywordContinue,
 	"return":      KeywordReturn,
 	"func":        KeywordFunc,
+	"cfunc":       KeywordCFunc,
 	"true":        KeywordTrue,
 	"false":       KeywordFalse,
 	"struct":      KeywordStruct,

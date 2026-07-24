@@ -1258,7 +1258,7 @@ func (r *resolver) resolveType(scope *Scope, n ast.NodeIndex) {
 		// type reference (ArrayType's own element type just above).
 		r.resolveType(scope, r.tree.Child(n, 0))
 		r.resolveType(scope, r.tree.Child(n, 1))
-	case enums.NodeKinds.FuncType:
+	case enums.NodeKinds.FuncType, enums.NodeKinds.CFuncType:
 		paramList := r.tree.Child(n, 0)
 		for _, param := range r.tree.Children(paramList) {
 			r.resolveType(scope, param)

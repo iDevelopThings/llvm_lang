@@ -98,6 +98,28 @@ import (
 // folded into IsUntyped/IsNumeric (which every other numeric-untyped code
 // path here assumes means "numeric") - it's handled by its own small set of
 // call sites instead (checkAssignable, checkEqualityOperands, defaultIfUntyped).
+//
+// TypeCString is a raw C string (`char*`) for FFI (see LANGUAGE.md's
+// "External functions (FFI)" section) - unlike TypeString's own {ptr, i32}
+// fat struct, it's a single pointer with no length, so it can legally cross
+// an extern func signature (isFFISafeType). Only reachable via an
+// explicit conversion (`cstring(s)`/`string(cs)`, checkConversionCall) -
+// there is no cstring literal syntax. Deliberately excluded from
+// typeIsComparable/typeIsPrintable: neither `==` nor `print` has a defined
+// lowering for it.
+//
+// TypeCFunc is a bare C function pointer type (`cfunc(T1, T2) R` - see
+// LANGUAGE.md's "External functions (FFI)" section) - deliberately its own
+// TypeKind, never folded into TypeFunc with a flag: unlike TypeFunc's fat
+// `{fnPtr, ctxPtr}` closure value (codegen's funcValTy), a cfunc value is a
+// single, bare function pointer with no capture context at all, callable
+// with real C-ABI marshaling and no leading ctxPtr. Shares TypeFunc's own
+// Params/Return representation exactly (see Type's own doc comment) - only
+// the calling convention/lowering differs, not the shape. Only a direct
+// reference to a top-level FuncDecl/ExternFuncDecl may ever become one
+// (checkAssignable's own func-to-cfunc conversion, typecheck.go) - a
+// function literal or any other function value with real captures is a
+// compile error, since there is no trampoline to synthesize one this round.
 type TypeKind int
 
 const (
@@ -113,10 +135,12 @@ const (
 	TypeF64
 
 	TypeString
+	TypeCString
 	TypeBool
 	TypeStruct
 	TypeArray
 	TypeFunc
+	TypeCFunc
 	TypePointer
 	TypeMap
 	TypeEnum
@@ -187,13 +211,14 @@ type Type struct {
 	// or a pointer a map has two independent type parameters, not one.
 	Key *Type
 
-	// Params and Return are set when Kind == TypeFunc: a function value's
-	// parameter types and return type (TypeVoid for a function type that
-	// declares none, e.g. `func(int)` - see LANGUAGE.md's "First-class
-	// functions" section). Params is a plain []Type - a slice header is
-	// already an indirection, so no self-containment problem there, unlike
-	// Return - a function type may itself return another function type, so
-	// Return needs the same *Type indirection Elem uses above.
+	// Params and Return are set when Kind == TypeFunc or TypeCFunc: a
+	// function value's parameter types and return type (TypeVoid for a
+	// function type that declares none, e.g. `func(int)` - see LANGUAGE.md's
+	// "First-class functions" and "External functions (FFI)" sections).
+	// Params is a plain []Type - a slice header is already an indirection,
+	// so no self-containment problem there, unlike Return - a function type
+	// may itself return another function type, so Return needs the same
+	// *Type indirection Elem uses above.
 	Params []Type
 	Return *Type
 }
@@ -210,8 +235,9 @@ var (
 	f32Type = Type{Kind: TypeF32}
 	f64Type = Type{Kind: TypeF64}
 
-	stringType = Type{Kind: TypeString}
-	boolType   = Type{Kind: TypeBool}
+	stringType  = Type{Kind: TypeString}
+	cstringType = Type{Kind: TypeCString}
+	boolType    = Type{Kind: TypeBool}
 
 	untypedIntType   = Type{Kind: TypeUntypedInt}
 	untypedFloatType = Type{Kind: TypeUntypedFloat}
@@ -326,7 +352,7 @@ func (t Type) Equal(u Type) bool {
 		return t.Elem.Equal(*u.Elem)
 	case TypeMap:
 		return t.Key.Equal(*u.Key) && t.Elem.Equal(*u.Elem)
-	case TypeFunc:
+	case TypeFunc, TypeCFunc:
 		if len(t.Params) != len(u.Params) {
 			return false
 		}
@@ -381,6 +407,8 @@ func (t Type) String() string {
 		return "f64"
 	case TypeString:
 		return "string"
+	case TypeCString:
+		return "cstring"
 	case TypeBool:
 		return "bool"
 	case TypeStruct:
@@ -403,15 +431,9 @@ func (t Type) String() string {
 	case TypeMap:
 		return "map[" + t.Key.String() + "]" + t.Elem.String()
 	case TypeFunc:
-		parts := make([]string, len(t.Params))
-		for i, p := range t.Params {
-			parts[i] = p.String()
-		}
-		s := "func(" + strings.Join(parts, ", ") + ")"
-		if t.Return != nil && t.Return.Kind != TypeVoid {
-			s += " " + t.Return.String()
-		}
-		return s
+		return funcTypeString("func", t)
+	case TypeCFunc:
+		return funcTypeString("cfunc", t)
 	case TypeUntypedInt:
 		return "untyped int"
 	case TypeUntypedFloat:
@@ -434,4 +456,19 @@ func (t Type) String() string {
 	default:
 		return "<unknown type>"
 	}
+}
+
+// funcTypeString renders a TypeFunc/TypeCFunc's shared "keyword(params)
+// [return]" shape - the two kinds' own String cases differ only in which
+// keyword introduces the signature.
+func funcTypeString(keyword string, t Type) string {
+	parts := make([]string, len(t.Params))
+	for i, p := range t.Params {
+		parts[i] = p.String()
+	}
+	s := keyword + "(" + strings.Join(parts, ", ") + ")"
+	if t.Return != nil && t.Return.Kind != TypeVoid {
+		s += " " + t.Return.String()
+	}
+	return s
 }
