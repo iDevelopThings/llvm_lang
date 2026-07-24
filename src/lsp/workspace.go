@@ -73,7 +73,7 @@ func (w *Workspace) OpenOrChange(path, text string) (map[string]*FileAnalysis, e
 		return nil, err
 	}
 
-	prog, err := loader.LoadProgram(w.fs, filepath.Dir(path))
+	prog, err := safeLoadProgram(w.fs, filepath.Dir(path))
 	if err != nil {
 		return nil, err
 	}
@@ -116,6 +116,22 @@ func safeAnalyzeProgram(prog *loader.Program, generation int) (result map[string
 		}
 	}()
 	return analyzeProgram(prog, generation), nil
+}
+
+// safeLoadProgram is safeAnalyzeProgram's own counterpart around
+// loader.LoadProgram - the same live-mid-edit-buffer panic risk applies here
+// too (a malformed parse can leave the loader dereferencing invalid parser
+// output), and unlike analyzeProgram this call sits outside any other
+// recover, so a panic here would otherwise take down the whole server rather
+// than just this one request.
+func safeLoadProgram(fs afero.Fs, dir string) (prog *loader.Program, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			prog = nil
+			err = fmt.Errorf("lsp: load panicked (likely a parser/loader bug against in-progress source): %v", r)
+		}
+	}()
+	return loader.LoadProgram(fs, dir)
 }
 
 // Analysis returns the most recently computed FileAnalysis for path, if any
