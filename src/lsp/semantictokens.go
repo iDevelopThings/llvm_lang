@@ -83,23 +83,12 @@ type rawToken struct {
 // delta format (deltaLine, deltaStartChar, length, tokenType, tokenModifiers
 // per token, sorted by position). nil when path has no analysis yet.
 //
-// Three passes feed the token list: a first pass over the already-parsed
-// Tree collecting every SymVar/SymParam/SymReceiver that's ever the target
-// of a plain assignment/inc-dec anywhere (see collectReassignedSymbols) -
-// needed before classification, not during it, since a variable can be
-// reassigned anywhere in the file, not only at or after the point being
-// classified; a second pass over the same Tree that actually classifies
-// every node's own "main" token (keywords, identifiers - refined via
-// Info.Refs when resolved, using the reassigned set to decide the readonly
-// modifier for a variable/parameter - operators, literals - see
-// collectNodeTokens); and a fresh, throwaway re-lex of the same source
-// purely for comment trivia (see collectCommentTokens - comments aren't
-// represented as ast.Nodes at all, see ast.Node's own doc comment, so they
-// can't be reached by walking the tree). Re-lexing is cheap relative to the
-// rest of this request (same order of cost as the original parse - see
-// BENCHMARKS.md) and deliberately uses its own fresh *lexer.File rather than
-// the Tree's own File, so it can't perturb that File's already-built trivia
-// arena/line table.
+// Three passes build the token list: collectReassignedSymbols finds every
+// variable/parameter ever reassigned anywhere in the file (needed up front,
+// since a reassignment can appear after the point being classified);
+// collectNodeTokens walks the parsed Tree, classifying each node's own main
+// token; collectLexicalExtras re-lexes the raw source for what the tree walk
+// alone can't reach - see its own doc comment.
 func (w *Workspace) SemanticTokens(path string) *protocol.SemanticTokens {
 	fa, ok := w.Analysis(path)
 	if !ok || fa.Tree == nil {
@@ -111,9 +100,10 @@ func (w *Workspace) SemanticTokens(path string) *protocol.SemanticTokens {
 		collectReassignedSymbols(fa.Tree, fa.Info, fa.Tree.Root, reassigned)
 	}
 
+	covered := make(map[lexer.Pos]bool)
 	var raw []rawToken
-	collectNodeTokens(fa.Tree, fa.Info, fa.Tree.Root, reassigned, &raw)
-	collectCommentTokens(fa.Tree.File.Name, fa.Tree.File.Src, &raw)
+	collectNodeTokens(fa.Tree, fa.Info, fa.Tree.Root, reassigned, covered, &raw)
+	collectLexicalExtras(fa.Tree.File.Name, fa.Tree.File.Src, covered, &raw)
 
 	sort.Slice(raw, func(i, j int) bool {
 		if raw[i].line != raw[j].line {
@@ -195,19 +185,21 @@ func markReassignedTarget(tree *ast.Tree, info *sema.Info, target ast.NodeIndex,
 // collectNodeTokens walks tree from n, classifying every node's own "main"
 // token (see ast.Node's doc comment - most kinds carry one; Block/CallExpr/
 // ParenExpr/... deliberately don't, and are skipped via the Start==End zero
-// -Token check) into out.
-func collectNodeTokens(tree *ast.Tree, info *sema.Info, n ast.NodeIndex, reassigned map[*sema.Symbol]bool, out *[]rawToken) {
+// -Token check) into out, and recording each emitted token's own start
+// offset into covered - see collectLexicalExtras' own doc comment for why.
+func collectNodeTokens(tree *ast.Tree, info *sema.Info, n ast.NodeIndex, reassigned map[*sema.Symbol]bool, covered map[lexer.Pos]bool, out *[]rawToken) {
 	if n == ast.InvalidNode {
 		return
 	}
 	node := &tree.Nodes[n]
 	if node.Tok.Start != node.Tok.End {
 		if typeIdx, modifiers, ok := classifyNodeToken(node.Tok, info, n, reassigned); ok {
+			covered[node.Tok.Start] = true
 			appendSpanToken(tree.File, node.Tok.Start, node.Tok.End, typeIdx, modifiers, out)
 		}
 	}
 	for _, c := range tree.Children(n) {
-		collectNodeTokens(tree, info, c, reassigned, out)
+		collectNodeTokens(tree, info, c, reassigned, covered, out)
 	}
 }
 
@@ -220,10 +212,12 @@ func collectNodeTokens(tree *ast.Tree, info *sema.Info, n ast.NodeIndex, reassig
 // bucket for a different reason: it isn't reachable at all via this
 // function, since MatchArm's own Tok is unused (see ast.Node's doc comment)
 // - no node anywhere carries `=>` as its main token, unlike a BinaryExpr/
-// UnaryExpr operator. Highlighting it would need a third token-collection
-// pass (re-lexing for punctuation generally, mirroring
-// collectCommentTokens), not just adding it to the operator case below -
-// not worth the complexity for one punctuation token this round.
+// UnaryExpr operator. collectLexicalExtras' own re-lex pass would catch it
+// structurally the same way it catches an uncaptured keyword, but doesn't:
+// it only classifies a re-lexed token when tok.Keyword != "", and `=>` is
+// an operator, not a keyword - extending that check to operators generally
+// is a reasonable future addition if punctuation highlighting is ever
+// wanted, not something this round needed.
 func classifyNodeToken(tok lexer.Token, info *sema.Info, n ast.NodeIndex, reassigned map[*sema.Symbol]bool) (typeIdx, modifiers int, ok bool) {
 	if tok.Keyword != "" {
 		return semTokKeyword, 0, true
@@ -319,11 +313,17 @@ func variableModifiers(sym *sema.Symbol, reassigned map[*sema.Symbol]bool) int {
 	return modReadonly
 }
 
-// collectCommentTokens re-lexes src (see SemanticTokens' own doc comment for
-// why this is a fresh, throwaway File/Lexer rather than reusing the Tree's
-// own File) purely to reach comment trivia - never represented as ast.Nodes
-// (see ast.Node's own doc comment) - classifying each into out.
-func collectCommentTokens(name, src string, out *[]rawToken) {
+// collectLexicalExtras re-lexes src (see SemanticTokens' own doc comment for
+// why this is a fresh, throwaway File/Lexer) to reach comment trivia (never
+// represented as ast.Nodes - see ast.Node's own doc comment) and any keyword
+// whose own token isn't captured as any node's Tok (e.g. "else"/"import"/
+// the "map" in map[K]V - see the SemanticTokens doc comment for the full
+// list and why). covered is every start offset collectNodeTokens already
+// emitted a token for, checked here so a keyword captured both ways isn't
+// emitted twice - a coverage check against what was actually emitted, not a
+// name-based allowlist, so it doesn't silently stop covering some other
+// keyword-shaped gap that appears later.
+func collectLexicalExtras(name, src string, covered map[lexer.Pos]bool, out *[]rawToken) {
 	file := lexer.NewFile(name, src)
 	lx := lexer.New(file)
 	for tok := range lx.All() {
@@ -332,6 +332,9 @@ func collectCommentTokens(name, src string, out *[]rawToken) {
 				continue
 			}
 			appendSpanToken(file, tr.Start, tr.End, semTokComment, 0, out)
+		}
+		if tok.Keyword != "" && !covered[tok.Start] {
+			appendSpanToken(file, tok.Start, tok.End, semTokKeyword, 0, out)
 		}
 		if tok.Lexeme == enums.Lexemes.EOF {
 			break
