@@ -2574,6 +2574,14 @@ grows across reloads in v1. Tick should pace itself (e.g. vsync inside
 Frame); the driver loops as fast as Tick returns. Stdout is set unbuffered
 so `print` is visible while the process stays up.
 
+`runWatch` calls `runtime.LockOSThread()` first thing, so Init and every
+Tick run on one fixed OS thread for the process's life - required by any
+linked library that binds state to its creating thread (e.g. an OpenGL
+context via GLFW). Because Init reruns on every reload, Init itself must be
+idempotent for anything with that kind of one-time-only OS-level side
+effect (e.g. guard a window-creation call with the library's own
+"already initialized" check) - `-watch` re-running it is not a bug.
+
 Confirmed by `TestBinary_Watch_TickExit`, `TestBinary_Watch_Reload`, and
 `TestBinary_Watch_LastGoodOnError`.
 

@@ -629,6 +629,10 @@ var (
 // separately), a single jit.Dispose() tears down the module and context
 // together, in the correct order - no separate mod.Ctx.Dispose() call needed
 // at all once jit exists.
+// No runtime.LockOSThread here unlike runWatch's own equivalent: this is a
+// single straight-line call into JIT'd code with no separate calls to
+// re-enter later, so there's no tick boundary a goroutine migration could
+// happen across - that invariant breaks if this ever grows a loop.
 func jitRunMain(mod *codegen.Module, linkLibs, linkDirs []string) (int, error) {
 	initJIT()
 

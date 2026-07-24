@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -42,7 +43,12 @@ type fileStamp struct {
 // change it recompiles and swaps the tracker (reset-on-reload: Init runs
 // again). Sema/parse failures after a successful load keep the last-good
 // module. main is unused under -watch.
+//
+// LockOSThread pins this goroutine to one OS thread: GLFW/OpenGL bind their
+// context to whichever thread created it, so without this a scheduler
+// migration between ticks leaves later calls on a threadless context.
 func runWatch(cfg watchConfig, stderr io.Writer) int {
+	runtime.LockOSThread()
 	setStdoutUnbuffered()
 	initJIT()
 
