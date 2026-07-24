@@ -1,0 +1,66 @@
+{
+  "name": "llvmc-lsp-client",
+  "displayName": "llvm_lang Language Server (dev client)",
+  "description": "Minimal VS Code client for llvmc-lsp - a second LSP client to cross-check server behavior against, alongside LSP4IJ (see ../lsp4ij-template). Not published; for local development/testing only.",
+  "version": "0.0.1",
+  "private": true,
+  "publisher": "llvm_lang-dev",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:llx"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "llx",
+        "aliases": [
+          "llvm_lang",
+          "llx"
+        ],
+        "extensions": [
+          ".llx"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "llvmc-lsp",
+      "properties": {
+        "llvmcLsp.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the llvmc-lsp executable. Defaults to <workspace root>/llvmc-lsp.exe when unset."
+        },
+        "llvmcLsp.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "verbose",
+          "description": "Traces the communication between VS Code and llvmc-lsp - open via 'Output' panel, 'llvmc-lsp' channel."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -w -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}
