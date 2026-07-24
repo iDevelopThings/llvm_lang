@@ -578,6 +578,94 @@ func TestBinary_NoOptAsyncIsCleanError(t *testing.T) {
 	}
 }
 
+// TestBinary_NoOptCoroutineTypeWithNoAsyncFuncIsCleanError covers the other
+// checkNoOptAsyncRestriction trigger: a `coroutine`-typed declaration with
+// NO async func anywhere in the program still needs setupCoroutines' own
+// intrinsics (see codegen.programUsesCoroutines) - -no-opt against one must
+// be a clean diagnostic here too, not the same fatal
+// "LLVM ERROR: Cannot select: intrinsic %llvm.coro.destroy" abort confirmed
+// directly before this specific trigger was added to the restriction.
+func TestBinary_NoOptCoroutineTypeWithNoAsyncFuncIsCleanError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "main.llx")
+	src := `func main() int {
+	var h coroutine
+	return 0
+}
+`
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(llvmcPath, "-no-opt", path)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+
+	ee, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected llvmc to exit non-zero with an *exec.ExitError, got: %v", err)
+	}
+	if ee.ExitCode() != exitCompile {
+		t.Errorf("exit code = %d, want %d", ee.ExitCode(), exitCompile)
+	}
+
+	got := stderr.String()
+	if strings.Contains(got, "panic:") || strings.Contains(got, "LLVM ERROR") {
+		t.Errorf("stderr contains a crash, want a clean diagnostic:\n%s", got)
+	}
+	if !strings.Contains(got, "-no-opt") {
+		t.Errorf("stderr = %q, want it to mention -no-opt", got)
+	}
+}
+
+// schedulerDemoExampleWant is examples/scheduler_demo/scheduler_demo.llx's
+// own expected stdout (see that file's inline comments): the countdown
+// itself (3, 2, 1), driven entirely by std/scheduler's Schedule/Tick, then
+// the number of 0.5s ticks it took to finish.
+const schedulerDemoExampleWant = "3\n2\n1\n4"
+
+// TestBinary_SchedulerDemoExample runs examples/scheduler_demo through the
+// real llvmc binary (JIT) - std/scheduler's own Unity-`StartCoroutine`-style
+// API (see LANGUAGE.md's "Standard library" section) on top of the
+// `coroutine` type keyword, imported via a genuine `import` path (unlike
+// examples/coroutines, which has no imports at all).
+func TestBinary_SchedulerDemoExample(t *testing.T) {
+	cmd := exec.Command(llvmcPath, "../../examples/scheduler_demo/scheduler_demo.llx")
+	out, err := cmd.Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			t.Fatalf("running llvmc: %v, stderr:\n%s", err, ee.Stderr)
+		}
+		t.Fatalf("running llvmc: %v", err)
+	}
+
+	normalized := strings.ReplaceAll(string(out), "\r\n", "\n")
+	normalized = strings.TrimRight(normalized, "\n")
+	if normalized != schedulerDemoExampleWant {
+		t.Errorf("stdout = %q, want %q", normalized, schedulerDemoExampleWant)
+	}
+}
+
+// TestBinary_AOT_SchedulerDemo AOT-compiles examples/scheduler_demo and
+// confirms identical output to the JIT variant above.
+func TestBinary_AOT_SchedulerDemo(t *testing.T) {
+	exePath := aotCompile(t, "../../examples/scheduler_demo/scheduler_demo.llx")
+
+	out, err := exec.Command(exePath).Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			t.Fatalf("%s exited %v, stderr:\n%s", exePath, err, ee.Stderr)
+		}
+		t.Fatalf("running %s: %v", exePath, err)
+	}
+
+	normalized := strings.ReplaceAll(string(out), "\r\n", "\n")
+	normalized = strings.TrimRight(normalized, "\n")
+	if normalized != schedulerDemoExampleWant {
+		t.Errorf("stdout = %q, want %q", normalized, schedulerDemoExampleWant)
+	}
+}
+
 // TestBinary_Failure covers the failure path through the real binary:
 // examples/error/error.llx must exit non-zero and print a diagnostic to stderr,
 // never a Go panic/stack trace.

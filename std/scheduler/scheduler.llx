@@ -1,0 +1,124 @@
+// scheduler.llx - std/scheduler: a Unity-`StartCoroutine`-style timer
+// scheduler built entirely on top of the `coroutine` primitive (see
+// LANGUAGE.md's "Coroutines" section) - ordinary .llx code, no compiler
+// changes needed beyond the `coroutine` type keyword itself.
+//
+// The naive shape - a `Schedule(h coroutine, delay f64)` method that builds
+// an Entry and moves the incoming handle into its own field - does NOT
+// compile: this language has no move semantics (see LANGUAGE.md's
+// "Destructors" section), so once `h` is bound as an ordinary parameter, it
+// is an *existing* value from checkNoIllegalCopy's point of view, not a
+// fresh construction - `e.Handle = h` inside such a method is rejected
+// exactly like `g := f` is for any other non-copyable type. The only sound
+// way to fill a `coroutine`-typed field is fresh construction directly at
+// the assignment site (`e.Handle = SomeAsyncFunc()`), so that step has to
+// happen in the CALLER's own code, not inside a generic Schedule - see
+// DECISIONS.md's dated entry for this. Schedule instead takes ownership of
+// an already-built *Entry (a pointer - always copyable, regardless of what
+// its pointee holds), matching the "resource behind a pointer" idiom
+// LANGUAGE.md's FileHandle example already establishes. Since the calling
+// package builds Entry itself, its own Handle/NextWait fields must be
+// exported (see LANGUAGE.md's "Imports" section) - unlike resumeAt, which
+// stays unexported, being purely Schedule/Tick's own internal bookkeeping.
+//
+// Usage:
+//
+//   import "../../std/scheduler"
+//
+//   async func Countdown(nextWait *f64) {
+//       print(3)
+//       *nextWait = 1.0
+//       await
+//       print(2)
+//       *nextWait = 1.0
+//       await
+//       print(1)
+//   }
+//
+//   func main() int {
+//       var sched scheduler.Scheduler
+//       e := new scheduler.Entry{}
+//       e.Handle = Countdown(&e.NextWait)   // fresh call, straight into the field
+//       sched.Schedule(e, 3.0)
+//       for sched.HasPending() {
+//           sched.Tick(0.5)
+//       }
+//       return 0
+//   }
+
+// Entry owns exactly one coroutine handle plus its own next-resume timing -
+// always behind a pointer (`new`'d, held only as `*Entry` in Scheduler.pending
+// below), never stored by value in a growable collection: a dynamic array of
+// Entry-by-value would be rejected outright (a coroutine field makes Entry
+// non-copyable - see LANGUAGE.md's "Destructors" section, "dynamic array
+// whose element type is non-copyable"), and `[]*Entry` sidesteps that
+// entirely since a pointer is always copyable regardless of its pointee.
+struct Entry {
+    Handle coroutine
+
+    // NextWait is written by the coroutine's own body (via a pointer into
+    // this field, handed to it at construction time) right before its own
+    // `await`, telling Tick how long this entry's NEXT wait should be.
+    NextWait f64
+
+    resumeAt f64
+
+    destructor() {
+        delete this.Handle
+    }
+}
+
+struct Scheduler {
+    pending []*Entry
+    clock f64
+}
+
+// Schedule registers e - already holding a live handle, constructed by the
+// caller (see this file's own top-of-file usage example) - initialDelay is
+// how long from now e's first resume should fire, since the underlying
+// async call already ran eagerly up to its own first `await` before
+// Schedule ever sees it.
+func (Scheduler) Schedule(e *Entry, initialDelay f64) {
+    e.resumeAt = this.clock + initialDelay
+    this.pending = append(this.pending, e)
+}
+
+// HasPending reports whether any entry is still live - the usual
+// `for sched.HasPending() { sched.Tick(dt) }` driving loop condition.
+func (Scheduler) HasPending() bool {
+    return len(this.pending) > 0
+}
+
+// Tick advances the scheduler's own clock by dt and resumes every entry
+// whose resumeAt has arrived, at most once each - a resumed entry that
+// reports more work (resume returned true) is rescheduled using whatever it
+// just wrote into its own NextWait field, relative to the NEW clock (not
+// its original due time, avoiding compounding drift under an irregular dt);
+// one that just finished (resume returned false) is removed and `delete`d,
+// running Entry's own destructor. Compacts this.pending in place (a single
+// write-index pass, then a truncating reslice) - the only removal idiom
+// available here, since this language has no dedicated slice-remove
+// builtin (see LANGUAGE.md's "Dynamic arrays" section).
+func (Scheduler) Tick(dt f64) {
+    this.clock = this.clock + dt
+
+    write := 0
+    i := 0
+    for i < len(this.pending) {
+        e := this.pending[i]
+        if e.resumeAt <= this.clock {
+            if resume(e.Handle) {
+                e.resumeAt = this.clock + e.NextWait
+                this.pending[write] = e
+                write = write + 1
+            } else {
+                delete e
+            }
+        } else {
+            this.pending[write] = e
+            write = write + 1
+        }
+        i = i + 1
+    }
+    this.pending = this.pending[:write]
+}

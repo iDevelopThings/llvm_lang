@@ -1671,3 +1671,65 @@ Test coverage spans `src/parser`/`src/sema`/`src/codegen`/`cmd/llvmc`'s own
 is `src/codegen`'s own, JIT-executed against the real optimized pipeline
 since coroutine intrinsics are only lowered there) plus a worked example
 (`examples/coroutines/coroutines.llx`) run JIT and AOT alike.
+
+## 2026-07-24 - `coroutine` type keyword, and `std/scheduler`'s pointer-behind-Entry design
+
+**Why a real `coroutine` type keyword now:** Round 1 only ever produced a
+`TypeCoroutine` value via `:=` inference from an async call - there was no
+way to spell it in a struct field, array element, or parameter's declared
+type, blocking anything that needs to hold a handle longer-term (a
+scheduler's own pending-entry list, chief among them). `typeFromSymbol`
+resolves it exactly like `int`/`f64`/etc. - no `Elem`/parameterization,
+since this language has no generics and coroutine return values stay out of
+scope (see `LANGUAGE.md`'s "Coroutines" section). All of `IsNonCopyable`,
+the dynamic-array-of-non-copyable rejection, and the fresh-construction
+exception already keyed off `Type.Kind` alone, so making the type spellable
+needed no relaxation of any of them - confirmed by tests asserting the
+identical rejections still fire for a `coroutine`-typed field/param, not
+just a `:=`-inferred local.
+
+One real gap the new spelling exposed: codegen's own `programHasAsyncFunc`
+gate (see `CODEGEN.md`'s new "Coroutines" subsection) assumed a coroutine
+handle could only ever exist in a program that also declares an `async
+func` - no longer true once `coroutine` is a real type name on its own.
+Fixed by widening the gate to also scan for a `TypeCoroutine` anywhere in
+`sema.Info.Types`, not by relaxing any sema-level check. A second,
+independent review pass found the identical stale assumption in
+`checkNoOptAsyncRestriction` (`src/compiler`) - a `coroutine`-typed
+declaration with no `async func` anywhere still crashed LLVM's own
+instruction selection under `-no-opt` instead of getting a clean
+diagnostic, confirmed directly before the fix. Widened the same way.
+
+**Why `std/scheduler.Schedule` takes `*Entry`, not `h coroutine`, despite
+the sketch it started from:** this language has no move semantics - once a
+value is bound to an ordinary parameter, it's an *existing* value from
+`checkNoIllegalCopy`'s point of view, not a fresh construction, so
+`e.Handle = h` inside such a method is rejected exactly like `g := f` is for
+any other non-copyable type. There's no way to write a generic
+"take ownership of a handle and store it" method at all under this
+language's current non-copyable rules - only fresh construction directly at
+the assignment site ever satisfies the illegal-copy check. So the calling
+package must build `Entry` itself (`e := new Entry{}; e.Handle =
+SomeAsyncFunc(...)`), and `Schedule` only ever takes the already-built
+`*Entry` - a pointer, always copyable regardless of what it points to. This
+also settles why `Entry.Handle`/`Entry.NextWait` are exported fields
+(the calling package must write them directly) while `resumeAt` stays
+unexported (purely `Schedule`/`Tick`'s own bookkeeping).
+
+**Why `[]*Entry`, not `[]Entry`:** a `coroutine` field makes `Entry`
+non-copyable, and this language already rejects a dynamic array of a
+non-copyable element type outright (see `LANGUAGE.md`'s "Destructors"
+section) - `[]*Entry` sidesteps that entirely, since a pointer is always
+copyable regardless of its pointee, matching the `FileHandle`
+resource-behind-a-pointer idiom `LANGUAGE.md` already establishes.
+
+**Status:** shipped. `coroutine` tested in `src/sema/coroutine_test.go`
+(valid var/field/param usage, and the same non-copyable/dynamic-array
+rejections against a real `coroutine`-typed slot rather than only an
+inferred one). `std/scheduler.Tick`'s own resume/reschedule/removal matrix
+is `src/codegen/scheduler_test.go`, JIT-executed against the optimized
+pipeline (`compileAndJITOptimized`, coroutine intrinsics only lower there)
+- covering zero/one/multiple pending entries, multi-`await` reschedule with
+a changing `NextWait`, simultaneous due entries, and removal not disturbing
+neighboring entries. Worked example: `examples/scheduler_demo/
+scheduler_demo.llx`, run JIT and AOT alike.

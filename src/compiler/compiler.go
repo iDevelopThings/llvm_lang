@@ -207,15 +207,37 @@ func CompileProgram(prog *loader.Program, optimize bool) *Result {
 // entirely, so today's pre-optimization behavior is restored byte-for-byte,
 // useful for isolating whether a bug lives in codegen itself or was
 // introduced by an optimization pass.
-// checkNoOptAsyncRestriction rejects any `async func` when optimize is
-// false (see finishPipeline's own caller, cmd/llvmc's `-no-opt` flag) -
-// llvm.coro.* intrinsics are only ever lowered into real code by the
-// optimization pipeline's own coroutine-splitting passes (see CODEGEN.md's
-// "Coroutines" section), so skipping RunPasses entirely (exactly what
-// optimize=false does) would otherwise leave every coroutine call unlowered:
-// not a clean crash, but silently wrong/garbage behavior at runtime, a far
-// worse failure mode than refusing to compile at all.
-func checkNoOptAsyncRestriction(trees []*ast.Tree) map[*ast.Tree]*diag.Bag {
+// checkNoOptAsyncRestriction rejects any use of coroutine codegen machinery
+// when optimize is false (see finishPipeline's own caller, cmd/llvmc's
+// `-no-opt` flag) - llvm.coro.* intrinsics are only ever lowered into real
+// code by the optimization pipeline's own coroutine-splitting passes (see
+// CODEGEN.md's "Coroutines" section), so skipping RunPasses entirely
+// (exactly what optimize=false does) crashes LLVM's own instruction
+// selection outright rather than silently miscompiling. Two independent
+// triggers, mirroring codegen.programUsesCoroutines exactly (see its own
+// doc comment): declaring an `async func`, and the `coroutine` type keyword
+// appearing in any var/field/param declaration - a coroutine-typed
+// declaration with no async func anywhere still reaches setupCoroutines at
+// codegen time regardless.
+// firstCoroutineTypedNode returns the lowest-indexed node in info.Types
+// whose type is TypeCoroutine, for a deterministic (not map-iteration-order-
+// dependent) diagnostic span - which specific node wins doesn't matter
+// semantically (see checkNoOptAsyncRestriction's own doc comment), only that
+// repeated compiles of the same source report the same span.
+func firstCoroutineTypedNode(info *sema.Info) (ast.NodeIndex, bool) {
+	best := ast.InvalidNode
+	for n, t := range info.Types {
+		if t.Kind != sema.TypeCoroutine {
+			continue
+		}
+		if best == ast.InvalidNode || n < best {
+			best = n
+		}
+	}
+	return best, best != ast.InvalidNode
+}
+
+func checkNoOptAsyncRestriction(trees []*ast.Tree, infos map[*ast.Tree]*sema.Info) map[*ast.Tree]*diag.Bag {
 	stageDiags := make(map[*ast.Tree]*diag.Bag, len(trees))
 	for _, tree := range trees {
 		bag := diag.NewBag()
@@ -226,6 +248,17 @@ func checkNoOptAsyncRestriction(trees []*ast.Tree) map[*ast.Tree]*diag.Bag {
 			span := tree.SpanOf(decl)
 			bag.ErrorfSpan(span.Start, span.End, "async functions require the optimization pipeline (llvm.coro.* intrinsics are only lowered by it) - cannot compile with -no-opt")
 		}
+		if n, ok := firstCoroutineTypedNode(infos[tree]); ok {
+			// One diagnostic per tree, not one per matching node - a `var h
+			// coroutine` declaration records TypeCoroutine against BOTH its
+			// own VarDecl node and its type-annotation Ident (for LSP hover
+			// on the type name), and enumerating every declaration-site node
+			// kind here to dedupe would be fragile; a single "this program
+			// uses coroutine typing somewhere" signal is all -no-opt's own
+			// caller needs to fix their build flags.
+			span := tree.SpanOf(n)
+			bag.ErrorfSpan(span.Start, span.End, "a coroutine-typed declaration requires the optimization pipeline (llvm.coro.* intrinsics are only lowered by it) - cannot compile with -no-opt")
+		}
 		stageDiags[tree] = bag
 	}
 	return stageDiags
@@ -233,7 +266,7 @@ func checkNoOptAsyncRestriction(trees []*ast.Tree) map[*ast.Tree]*diag.Bag {
 
 func finishPipeline(trees []*ast.Tree, diags map[*ast.Tree]*diag.Bag, infos map[*ast.Tree]*sema.Info, moduleName string, optimize bool) *Result {
 	if !optimize {
-		if hasErrors := frontend.MergeStage(diags, trees, checkNoOptAsyncRestriction(trees)); hasErrors {
+		if hasErrors := frontend.MergeStage(diags, trees, checkNoOptAsyncRestriction(trees, infos)); hasErrors {
 			return &Result{
 				Trees: trees,
 				Diags: diags,

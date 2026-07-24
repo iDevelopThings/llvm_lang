@@ -1569,6 +1569,13 @@ func (c *checker) typeFromSymbol(sym *Symbol) Type {
 			return stringType
 		case "bool":
 			return boolType
+		case "coroutine":
+			// Elem always points at voidType here - async funcs declare no
+			// return type this round (see LANGUAGE.md's "Coroutines"
+			// section), and Equal/String both assume a non-nil Elem for
+			// TypeCoroutine (see the call-expr construction site below).
+			ret := voidType
+			return Type{Kind: TypeCoroutine, Elem: &ret}
 		default:
 			return invalidType
 		}
