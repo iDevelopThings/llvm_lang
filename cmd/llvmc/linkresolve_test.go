@@ -53,6 +53,24 @@ func TestResolveLibraryArtifactRejectsImportLibOnly(t *testing.T) {
 	}
 }
 
+// TestResolveLibraryArtifactRejectsBareImportLibFilename is the bare-
+// filename counterpart to TestResolveLibraryArtifactRejectsImportLibOnly:
+// naming the import lib's own exact filename (no directory separator) must
+// give the same clear "found import lib" error, not fall through to a
+// generic "not found" built from garbage derived candidates.
+func TestResolveLibraryArtifactRejectsBareImportLibFilename(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteEmpty(t, filepath.Join(dir, "libfoo.dll.a"))
+
+	_, err := resolveLibraryArtifact("libfoo.dll.a", []string{dir})
+	if err == nil {
+		t.Fatal("expected error for a bare import-lib filename")
+	}
+	if !strings.Contains(err.Error(), "import lib") {
+		t.Fatalf("err = %v, want it to mention import lib", err)
+	}
+}
+
 func TestResolveLibraryArtifactLiteralPath(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "custom.dll")

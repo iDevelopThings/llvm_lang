@@ -72,6 +72,27 @@ func resolveLibraryArtifact(name string, dirs []string) (libraryArtifact, error)
 		return libraryArtifact{}, fmt.Errorf("library %q: not found under -L dirs [%s]", name, searched)
 	}
 
+	// A bare name that's exactly an import-lib filename (e.g. "libfoo.dll.a",
+	// no directory separator) falls through classifyLibraryPath's own "not
+	// ok" for *.dll.a (by design, so the literal-path branch above gives the
+	// clear rejection when there IS a separator) - without this check it
+	// would fall all the way to the generic stem-expansion below instead,
+	// producing a confusing "not found" error built from garbage derived
+	// candidates (e.g. "libfoo.dll.a.a") instead of the same clear message
+	// the literal-path and stem-expansion branches already give.
+	if isImportLibFilename(name) {
+		base := filepath.Base(name)
+		for _, dir := range dirs {
+			p := filepath.Join(dir, base)
+			if fileExists(p) {
+				return libraryArtifact{}, fmt.Errorf(
+					"library %q: found import lib %s but no real .dll or static .a/.lib - provide the DLL (or a true static archive), not a mingw *.dll.a import lib",
+					name, p,
+				)
+			}
+		}
+	}
+
 	sharedNames := []string{name + ".dll", "lib" + name + ".dll"}
 	staticNames := []string{"lib" + name + ".a", name + ".a", name + ".lib", "lib" + name + ".lib"}
 	importNames := []string{"lib" + name + ".dll.a", name + ".dll.a"}
@@ -120,6 +141,14 @@ func resolveLibraryArtifact(name string, dirs []string) (libraryArtifact, error)
 // literal - they still resolve via -L.
 func isLiteralLibraryPath(name string) bool {
 	return strings.ContainsAny(name, `/\`) || filepath.IsAbs(name)
+}
+
+// isImportLibFilename reports whether name's own basename is exactly a
+// mingw import-lib filename ("libfoo.dll.a"/"foo.dll.a") - the one
+// classifyLibraryPath deliberately rejects, so callers can give the clear
+// "found import lib" error instead of a generic "unsupported"/"not found".
+func isImportLibFilename(name string) bool {
+	return strings.HasSuffix(strings.ToLower(filepath.Base(name)), ".dll.a")
 }
 
 func classifyLibraryPath(path string) (libraryKind, bool) {
