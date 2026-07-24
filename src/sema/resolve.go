@@ -924,6 +924,8 @@ func (r *resolver) resolveStmt(scope *Scope, n ast.NodeIndex) {
 		r.resolveIfStmt(scope, n)
 	case enums.NodeKinds.ForStmt:
 		r.resolveForStmt(scope, n)
+	case enums.NodeKinds.RangeForStmt:
+		r.resolveRangeForStmt(scope, n)
 	case enums.NodeKinds.MatchStmt:
 		r.resolveMatchStmt(scope, n)
 	case enums.NodeKinds.YieldStmt:
@@ -976,6 +978,31 @@ func (r *resolver) resolveForStmt(parent *Scope, n ast.NodeIndex) {
 		r.resolveStmt(scope, post)
 	}
 	r.resolveBlock(scope, r.tree.Child(n, 3))
+}
+
+// resolveRangeForStmt wraps the whole statement in one Scope, the same
+// resolveForStmt convention above - see LANGUAGE.md's "Range loops" section.
+// The subject is an ordinary value expression, resolved before either
+// binding is declared (mirroring resolveBlock's "resolve before declaring"
+// rule); key/value are then declared directly against their own Ident node
+// (no single declaring node holds their type annotation, the same
+// MultiShortVarDecl reasoning resolveStmt's own case above documents - see
+// typecheck.go's checkRangeForStmt for where each one's Type actually gets
+// computed and cached).
+func (r *resolver) resolveRangeForStmt(parent *Scope, n ast.NodeIndex) {
+	scope := newScope(ScopeBlock, parent, ast.InvalidNode)
+	r.info.Scopes[n] = scope
+
+	r.resolveExpr(scope, r.tree.RangeForSubject(n))
+
+	if key := r.tree.RangeForKey(n); key != ast.InvalidNode {
+		r.declareLocal(scope, key, key, SymVar)
+	}
+	if value := r.tree.RangeForValue(n); value != ast.InvalidNode {
+		r.declareLocal(scope, value, value, SymVar)
+	}
+
+	r.resolveBlock(scope, r.tree.RangeForBody(n))
 }
 
 // resolveMatchStmt resolves a `match subject { pattern => body, ... }`
@@ -1368,6 +1395,15 @@ func (r *resolver) resolveExpr(scope *Scope, n ast.NodeIndex) {
 		// form - same subject/arm/binding logic, no expression-specific
 		// handling needed.
 		r.resolveMatchStmt(scope, n)
+	case enums.NodeKinds.RangeExpr:
+		// Reachable outside a for-loop header too (e.g. a bare `x := range
+		// m` statement) - resolving the subject here means that case still
+		// gets a real "undefined" diagnostic instead of a cascading one, even
+		// though checkExpr will separately reject the RangeExpr itself as
+		// only valid directly in a for-loop header. A range-for's own
+		// RangeExpr (parser/stmt.go's finishRangeForStmt) never reaches this
+		// case at all - resolveRangeForStmt resolves its subject directly.
+		r.resolveExpr(scope, r.tree.Child(n, 0))
 	}
 }
 

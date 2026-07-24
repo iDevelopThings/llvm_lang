@@ -100,6 +100,10 @@ for {
 }
 ```
 
+`for ... range ...` - iterating a map or array directly, rather than driving
+an index by hand - is a fourth, distinct `for` form; see "Range loops" below
+(after "Maps"), once both Arrays and Maps have been introduced.
+
 ## Arrays
 
 Go-style prefix type syntax: `[N]T` (fixed-size) and `[]T` (dynamic/slice).
@@ -384,14 +388,11 @@ struct Box {
 var nested map[string]map[string]int
 ```
 
+**Map iteration** (`for k, v := range m`) is now supported - see "Range
+loops" below. There are still no `keys(m)`/`values(m)` helper builtins.
+
 **Explicitly out of scope this round:**
 
-- **Map iteration** (`for k, v := range m`) - this language has **no
-  `range`-style for-loop grammar at all yet**, for anything (only the three
-  plain C-style `for` forms exist - see "Loops" above); inventing `range`
-  just for maps, when nothing else in the language has it either, is a
-  separate, much bigger feature. There are likewise no `keys(m)`/`values(m)`
-  helper builtins this round.
 - **A map composite-literal syntax** (`map[string]int{"a": 1, "b": 2}`) -
   Go has this, but it's a real, separate grammar extension on top of this
   language's existing `CompositeLit` machinery (built around struct/array
@@ -399,6 +400,83 @@ var nested map[string]map[string]int
   insertions covers everything this round needs. Writing `map[...]...{...}`
   as an expression today is a plain parse error (`map` has nowhere legal to
   start an expression, since there's no literal form for it), not a panic.
+
+## Range loops
+
+A fourth `for` form, alongside the three plain C-style ones (see "Loops"
+above): iterating a map or a fixed/dynamic array directly, rather than
+driving an index by hand. Scoped narrowly and deliberately - see "Explicitly
+out of scope" below - and hardcoded for performance rather than built
+through any general/user-definable iterator mechanism (a later, separate
+feature - see `DECISIONS.md`'s dated entry for this round).
+
+Three binding shapes, matching Go's own real grammar exactly:
+
+```go
+for k, v := range m {     // map: k is K-typed, v is V-typed
+    ...
+}
+
+for i, v := range arr {   // array (fixed or dynamic): i is int, v is the element type
+    ...
+}
+
+for v := range arr {      // one binding - see the wrinkle below
+    ...
+}
+
+for range m {              // zero bindings - iterate for side effects only
+    ...
+}
+```
+
+**The one-binding form's own wrinkle - easy to get backwards.** Go's real
+rule differs by the subject's own kind, and this language follows it
+exactly:
+
+- **map, one binding**: the single name binds the **key**, not the value -
+  there is no way to get "just the value" from a one-binding map range
+  without a wildcard for the key.
+- **array, one binding**: the single name binds the **index** (always
+  `int`), not the element.
+
+```go
+m := make(map[string]int)
+m["a"] = 1
+for k := range m {
+    print(k)   // "a" - the KEY, never 1 (the value)
+}
+
+a := [3]int{10, 20, 30}
+for i := range a {
+    print(i)   // 0, 1, 2 - the INDEX, never 10/20/30 (the elements)
+}
+```
+
+The two-binding form is `(K, V)` for a map, `(int, elem)` for an array - the
+first name is always the key/index, the second (when present) always the
+value/element.
+
+The zero-binding form (`for range subject {}`) still evaluates `subject`
+exactly once (so a call expression producing the map/array still runs its
+own side effects once), just declares no fresh bindings at all - useful for
+counting iterations or running a side-effecting body without needing either
+name.
+
+**Explicitly out of scope:**
+
+- **Ranging over a string** (rune iteration, Go's own `for i, r := range s`)
+  - this language has no Unicode-aware string handling anywhere yet (see
+    `std/strings`'s own "Deliberately deferred" note below).
+- **Ranging over a bare integer** (Go 1.22's `for i := range n`) - not
+  supported; a range subject must be a real map or array value.
+- **Ranging over a struct, pointer, or any other type** - rejected with a
+  clean diagnostic ("range requires a map or array value, got %s"), never a
+  panic.
+- **The `=`-reuse form** (`for k, v = range m {}`, rebinding
+  already-declared variables instead of declaring fresh ones) - not
+  supported; every binding is always freshly declared, the same as every
+  other `for` form's own `:=`-only header.
 
 ## Structs
 

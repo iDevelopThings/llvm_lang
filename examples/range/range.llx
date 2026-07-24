@@ -1,0 +1,98 @@
+// range.llx - demonstrates `for [key[, value]] := range subject { ... }`
+// over maps and arrays (see LANGUAGE.md's "Range loops" section): the
+// two-binding, one-binding, and zero-binding forms, the map-binds-key /
+// array-binds-index one-binding wrinkle (proved with concrete values, not
+// just "it compiles"), and break/continue loop control inside a range-for.
+//
+// Map iteration order is unspecified (bucket order, not insertion order -
+// see LANGUAGE.md's "Maps" section), so every map example below is written
+// to produce a deterministic result regardless of visitation order (a
+// running sum, or a single-entry map) rather than printing per-key output
+// in a fixed sequence.
+//
+// Run with:
+//   .\llvmc.exe examples\range\range.llx
+//   echo $LASTEXITCODE   # (PowerShell) -> 684
+
+func main() int {
+    // --- map: two-binding form ---
+    m := make(map[string]int)
+    m["a"] = 1
+    m["b"] = 2
+    m["c"] = 3
+    mapSum := 0
+    for k, v := range m {
+        mapSum = mapSum + v
+    }
+    print(mapSum)   // 6 (1 + 2 + 3)
+
+    // --- map: one-binding form binds the KEY, not the value ---
+    // A single-entry map makes this unambiguous: if this bound the value
+    // instead, keyOnly would end up 100, not 5.
+    single := make(map[int]int)
+    single[5] = 100
+    keyOnly := 0
+    for k := range single {
+        keyOnly = k   // k is the KEY (5), never the value (100)
+    }
+    print(keyOnly)   // 5
+
+    // --- map: zero-binding form - iteration for side effects only ---
+    mapCount := 0
+    for range m {
+        mapCount = mapCount + 1
+    }
+    print(mapCount)   // 3
+
+    // --- array: two-binding form, fixed [N]T ---
+    fixed := [3]int{10, 20, 30}
+    fixedSum := 0
+    for i, v := range fixed {
+        fixedSum = fixedSum + i + v
+    }
+    print(fixedSum)   // (0+1+2) + (10+20+30) = 63
+
+    // --- array: two-binding form, dynamic []T ---
+    dyn := make([]int, 3)
+    dyn[0] = 100
+    dyn[1] = 200
+    dyn[2] = 300
+    dynSum := 0
+    for i, v := range dyn {
+        dynSum = dynSum + i + v
+    }
+    print(dynSum)   // (0+1+2) + (100+200+300) = 603
+
+    // --- array: one-binding form binds the INDEX, not the element ---
+    // A single-element array holding 99 makes this unambiguous: if this
+    // bound the element instead, indexOnly would end up 99, not 0.
+    solo := [1]int{99}
+    indexOnly := -1
+    for i := range solo {
+        indexOnly = i   // i is the INDEX (0), never the element (99)
+    }
+    print(indexOnly)   // 0
+
+    // --- break/continue inside a range-for ---
+    //   v=0 even -> continue
+    //   v=1 odd  -> skipSum += 1 = 1
+    //   v=2 even -> continue
+    //   v=3 odd  -> skipSum += 3 = 4
+    //   v=4 even -> continue
+    //   v=5      -> break
+    seq := [6]int{0, 1, 2, 3, 4, 5}
+    skipSum := 0
+    for _, v := range seq {
+        if v == 5 {
+            break
+        }
+        if v % 2 == 0 {
+            continue
+        }
+        skipSum = skipSum + v
+    }
+    print(skipSum)   // 4
+
+    return mapSum + keyOnly + mapCount + fixedSum + dynSum + indexOnly + skipSum
+    // 6 + 5 + 3 + 63 + 603 + 0 + 4 = 684
+}

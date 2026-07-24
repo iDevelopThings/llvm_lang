@@ -290,6 +290,102 @@ func (g *Generator) genMapGetOrInsertAddr(mapType sema.Type, mapVal, keyVal llvm
 	return valAddrPhi
 }
 
+// genRangeForMap lowers a range-for whose subject is a map (see
+// LANGUAGE.md's "Range loops" section) to a linear walk over the map's own
+// bucket array, skipping any slot that isn't mapTagOccupied: key binds K,
+// value binds V - per Go's own real one-binding rule (see
+// sema.checkRangeForStmt), the one-binding form binds the KEY, never the
+// value. subject is evaluated exactly once, before the loop starts. A nil
+// (never-made) map iterates zero times, matching Go's own "ranging over a
+// nil map" rule - modeled as bucketCount == 0 via a phi, rather than a
+// separate zero-trip-count code path, so the loop itself needs no nil-aware
+// branching of its own.
+func (g *Generator) genRangeForMap(keyNode, valueNode, subjectNode, bodyNode ast.NodeIndex, subjType sema.Type) bool {
+	keyType := *subjType.Key
+	valType := *subjType.Elem
+	bucketTy := g.mapBucketType(keyType, valType)
+
+	mapVal := g.genExpr(subjectNode)
+	isNil := g.builder.CreateICmp(llvm.IntEQ, mapVal, llvm.ConstNull(g.ptrTy), "")
+
+	nilBB := g.ctx.AddBasicBlock(g.curFn, "range.map.nil")
+	liveBB := g.ctx.AddBasicBlock(g.curFn, "range.map.live")
+	setupBB := g.ctx.AddBasicBlock(g.curFn, "range.map.setup")
+	g.builder.CreateCondBr(isNil, nilBB, liveBB)
+
+	g.builder.SetInsertPointAtEnd(nilBB)
+	g.builder.CreateBr(setupBB)
+
+	g.builder.SetInsertPointAtEnd(liveBB)
+	bucketsPtrLive := g.builder.CreateLoad(g.ptrTy, g.builder.CreateStructGEP(g.mapCtrlTy, mapVal, 0, ""), "")
+	bucketCountLive := g.builder.CreateLoad(g.i32Ty, g.builder.CreateStructGEP(g.mapCtrlTy, mapVal, 2, ""), "")
+	liveEndBB := g.builder.GetInsertBlock()
+	g.builder.CreateBr(setupBB)
+
+	g.builder.SetInsertPointAtEnd(setupBB)
+	bucketsPtr := g.builder.CreatePHI(g.ptrTy, "")
+	bucketsPtr.AddIncoming([]llvm.Value{llvm.ConstNull(g.ptrTy), bucketsPtrLive}, []llvm.BasicBlock{nilBB, liveEndBB})
+	bucketCount := g.builder.CreatePHI(g.i32Ty, "")
+	bucketCount.AddIncoming([]llvm.Value{llvm.ConstInt(g.i32Ty, 0, false), bucketCountLive}, []llvm.BasicBlock{nilBB, liveEndBB})
+
+	idxAddr := g.createEntryAlloca(g.i32Ty, "range.map.idx")
+	g.builder.CreateStore(llvm.ConstInt(g.i32Ty, 0, false), idxAddr)
+
+	condBB := g.ctx.AddBasicBlock(g.curFn, "range.map.cond")
+	checkBB := g.ctx.AddBasicBlock(g.curFn, "range.map.check")
+	bodyBB := g.ctx.AddBasicBlock(g.curFn, "range.map.body")
+	postBB := g.ctx.AddBasicBlock(g.curFn, "range.map.post")
+	endBB := g.ctx.AddBasicBlock(g.curFn, "range.map.end")
+	g.builder.CreateBr(condBB)
+
+	g.builder.SetInsertPointAtEnd(condBB)
+	idx := g.builder.CreateLoad(g.i32Ty, idxAddr, "")
+	g.builder.CreateCondBr(g.builder.CreateICmp(llvm.IntSLT, idx, bucketCount, ""), checkBB, endBB)
+
+	// A slot that isn't mapTagOccupied (empty or a tombstone) is skipped
+	// straight to postBB, never entering bodyBB at all - no binding, no user
+	// body, just the next index.
+	g.builder.SetInsertPointAtEnd(checkBB)
+	checkIdx := g.builder.CreateLoad(g.i32Ty, idxAddr, "")
+	bucketAddr := g.builder.CreateInBoundsGEP(bucketTy, bucketsPtr, []llvm.Value{checkIdx}, "")
+	tag := g.builder.CreateLoad(g.i8Ty, g.builder.CreateStructGEP(bucketTy, bucketAddr, 0, ""), "")
+	isOccupied := g.builder.CreateICmp(llvm.IntEQ, tag, llvm.ConstInt(g.i8Ty, mapTagOccupied, false), "")
+	g.builder.CreateCondBr(isOccupied, bodyBB, postBB)
+
+	g.builder.SetInsertPointAtEnd(bodyBB)
+	bodyIdx := g.builder.CreateLoad(g.i32Ty, idxAddr, "")
+	bodyBucketAddr := g.builder.CreateInBoundsGEP(bucketTy, bucketsPtr, []llvm.Value{bodyIdx}, "")
+	preBindBase := len(g.destructors)
+	if keyNode != ast.InvalidNode {
+		keyVal := g.builder.CreateLoad(g.llvmType(keyType), g.builder.CreateStructGEP(bucketTy, bodyBucketAddr, 1, ""), "")
+		g.bindRangeVar(keyNode, keyVal)
+	}
+	if valueNode != ast.InvalidNode {
+		valVal := g.builder.CreateLoad(g.llvmType(valType), g.builder.CreateStructGEP(bucketTy, bodyBucketAddr, 2, ""), "")
+		g.bindRangeVar(valueNode, valVal)
+	}
+
+	g.loopStack = append(g.loopStack, loopCtx{
+		breakTarget:    endBB,
+		continueTarget: postBB,
+		destructorBase: preBindBase,
+	})
+	bodyTerm := g.genBlock(bodyNode)
+	g.loopStack = g.loopStack[:len(g.loopStack)-1]
+	if !bodyTerm {
+		g.unwindDestructorsTo(preBindBase)
+		g.builder.CreateBr(postBB)
+	}
+
+	g.builder.SetInsertPointAtEnd(postBB)
+	nextIdx := g.builder.CreateAdd(g.builder.CreateLoad(g.i32Ty, idxAddr, ""), llvm.ConstInt(g.i32Ty, 1, false), "")
+	g.builder.CreateStore(nextIdx, idxAddr)
+	g.builder.CreateBr(condBB)
+
+	g.builder.SetInsertPointAtEnd(endBB)
+	return false
+}
+
 // genMapTrapIfNil prints an informative diagnostic and traps (the same
 // printf-then-llvm.trap+unreachable mechanism every other runtime safety
 // check in this package uses - genBoundsCheck/genSliceRangeCheck (expr.go),

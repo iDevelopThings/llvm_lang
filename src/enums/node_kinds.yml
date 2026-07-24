@@ -61,3 +61,5 @@ values:
   - name: MatchStmt
   - name: MatchArm
   - name: YieldStmt
+  - name: RangeExpr
+  - name: RangeForStmt

@@ -357,6 +357,25 @@ type Span struct {
 //     At least two targets (a single-target `x = f()` is the existing,
 //     completely unchanged AssignStmt). Use MultiAssignStmtTargets/
 //     MultiAssignStmtValue, same reasoning as MultiShortVarDecl above.
+//   - RangeExpr: [subject] - fixed arity, `range subject` in EXPRESSION
+//     position (see LANGUAGE.md's "Range loops" section) - grammatically
+//     legal anywhere an expression is (mirroring match/new - see
+//     parser/expr.go's parseIdentExpr), though only ever meaningful as a
+//     for-loop header's `:=` value; anywhere else sema rejects it with a
+//     clean diagnostic (checkExpr's own RangeExpr case).
+//   - RangeForStmt: [key, value, subject, body] - fixed arity, `for [key[,
+//     value]] := range subject { body }` (see LANGUAGE.md's "Range loops"
+//     section) - key/value are each InvalidNode when that binding is
+//     omitted (the zero-binding `for range subject {}` form has both
+//     InvalidNode; the one-binding form has only key set - binding the map
+//     key or the array index, never the value, per Go's own real rule - see
+//     LANGUAGE.md). A dedicated node, deliberately not squeezed into
+//     ForStmt's own [init, cond, post, body] shape - a genuinely different
+//     construct (see parser/stmt.go's parseForStmt). Built by unwrapping the
+//     ExprStmt/ShortVarDecl/MultiShortVarDecl grammar parseSimpleStmt already
+//     produces once its value is a RangeExpr - key/value are simply that
+//     statement's own already-parsed name node(s), never a fresh grammar
+//     rule of their own.
 //   - a fixed-arity kind may reserve a positional slot as InvalidNode for an
 //     omitted optional child (e.g. VarDecl's type annotation); a
 //     variable-arity kind (Block's statements, CallExpr's arguments) is

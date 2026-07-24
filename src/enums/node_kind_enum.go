@@ -66,6 +66,8 @@ const (
 	NodeKindMatchStmt         NodeKind = 50
 	NodeKindMatchArm          NodeKind = 51
 	NodeKindYieldStmt         NodeKind = 52
+	NodeKindRangeExpr         NodeKind = 53
+	NodeKindRangeForStmt      NodeKind = 54
 )
 
 type NodeKindContainer struct {
@@ -122,6 +124,8 @@ type NodeKindContainer struct {
 	MatchStmt         NodeKind
 	MatchArm          NodeKind
 	YieldStmt         NodeKind
+	RangeExpr         NodeKind
+	RangeForStmt      NodeKind
 }
 
 // NodeKinds is the entry point for the NodeKind enum.
@@ -179,6 +183,8 @@ var NodeKinds = NodeKindContainer{
 	MatchStmt:         NodeKindMatchStmt,
 	MatchArm:          NodeKindMatchArm,
 	YieldStmt:         NodeKindYieldStmt,
+	RangeExpr:         NodeKindRangeExpr,
+	RangeForStmt:      NodeKindRangeForStmt,
 }
 
 // NodeKindInfo is the static metadata attached to a NodeKind.
@@ -400,6 +406,14 @@ var nodeKindInfos = map[NodeKind]NodeKindInfo{
 		NodeKind: NodeKindYieldStmt,
 		Name:     "YieldStmt",
 	},
+	NodeKindRangeExpr: {
+		NodeKind: NodeKindRangeExpr,
+		Name:     "RangeExpr",
+	},
+	NodeKindRangeForStmt: {
+		NodeKind: NodeKindRangeForStmt,
+		Name:     "RangeForStmt",
+	},
 }
 
 var nodeKindValues = []NodeKind{
@@ -456,6 +470,8 @@ var nodeKindValues = []NodeKind{
 	NodeKindMatchStmt,
 	NodeKindMatchArm,
 	NodeKindYieldStmt,
+	NodeKindRangeExpr,
+	NodeKindRangeForStmt,
 }
 
 var nodeKindByName = map[string]NodeKind{
@@ -512,6 +528,8 @@ var nodeKindByName = map[string]NodeKind{
 	"matchstmt":         NodeKindMatchStmt,
 	"matcharm":          NodeKindMatchArm,
 	"yieldstmt":         NodeKindYieldStmt,
+	"rangeexpr":         NodeKindRangeExpr,
+	"rangeforstmt":      NodeKindRangeForStmt,
 }
 
 // Values returns every declared value in declaration order.
