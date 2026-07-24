@@ -4,16 +4,15 @@
 // changes needed beyond the `coroutine` type keyword itself.
 //
 // The naive shape - a `Schedule(h coroutine, delay f64)` method that builds
-// an Entry and moves the incoming handle into its own field - does NOT
-// compile: this language has no move semantics (see LANGUAGE.md's
-// "Destructors" section), so once `h` is bound as an ordinary parameter, it
-// is an *existing* value from checkNoIllegalCopy's point of view, not a
-// fresh construction - `e.Handle = h` inside such a method is rejected
-// exactly like `g := f` is for any other non-copyable type. The only sound
-// way to fill a `coroutine`-typed field is fresh construction directly at
-// the assignment site (`e.Handle = SomeAsyncFunc()`), so that step has to
-// happen in the CALLER's own code, not inside a generic Schedule - see
-// DECISIONS.md's dated entry for this. Schedule instead takes ownership of
+// an Entry and moves the incoming handle into its own field - was rejected
+// when this file was first written: `move` (see LANGUAGE.md's "Destructors"
+// section) didn't exist yet, so `h`, once bound as an ordinary parameter,
+// was an *existing* value from checkNoIllegalCopy's point of view, not a
+// fresh construction - `e.Handle = h` was rejected exactly like `g := f` is
+// for any other non-copyable type. `move` now makes that naive shape legal
+// (`e.Handle = move h`), but this file still takes the pointer-indirection
+// route below rather than being migrated - see DECISIONS.md's dated entry.
+// Schedule instead takes ownership of
 // an already-built *Entry (a pointer - always copyable, regardless of what
 // its pointee holds), matching the "resource behind a pointer" idiom
 // LANGUAGE.md's FileHandle example already establishes. Since the calling

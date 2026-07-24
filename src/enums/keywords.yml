@@ -60,3 +60,5 @@ values:
     string: "async"
   - name: Await
     string: "await"
+  - name: Move
+    string: "move"

@@ -8,9 +8,9 @@
 // nextWait pointer parameter (see std/scheduler/scheduler.llx's own
 // top-of-file usage example) - Entry.Handle/Entry.NextWait must be
 // constructed directly by THIS file, not by Scheduler.Schedule itself (see
-// that file's own doc comment for why: no move semantics means a
-// coroutine handle can only ever be assigned into a field via fresh
-// construction, at the exact call site).
+// that file's own doc comment for why: Schedule still takes a pre-built
+// *Entry rather than a bare handle, so this file is where the handle
+// actually gets bound into the struct).
 //
 // Run with:
 //   .\llvmc.exe examples\scheduler_demo\scheduler_demo.llx

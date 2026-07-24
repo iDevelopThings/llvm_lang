@@ -40,13 +40,13 @@ import (
 //     block is unreachable from here on anyway (the terminator's own basic
 //     block has already been closed).
 func (g *Generator) genBlock(block ast.NodeIndex) bool {
-	base := len(g.destructors)
+	base := g.snapshotDestructorScope()
 	for _, stmt := range g.tree.Children(block) {
 		if g.genStmt(stmt) {
 			return true
 		}
 	}
-	g.unwindDestructorsTo(base)
+	g.unwindDestructorsToScope(base)
 	return false
 }
 
@@ -65,6 +65,46 @@ func (g *Generator) unwindDestructorsTo(target int) {
 		g.genDestructorCall(g.locals[e.sym], e.fn, e.fnTy)
 	}
 	g.destructors = g.destructors[:target]
+}
+
+// destructorScope identifies a point in Generator.destructors' own history
+// by WHICH symbols were present, not by a raw index - unwindDestructorsToScope
+// is what actually turns that back into a real index, recomputed against the
+// CURRENT stack every time it's used. See its own doc comment for why a
+// plain int (this package's own approach before `move` existed) is unsound:
+// `move`'s own removeDestructorEntry (func.go) can remove an entry from
+// anywhere in the stack, not just the top, silently invalidating every
+// later-captured length (see DECISIONS.md's dated entry).
+type destructorScope map[*sema.Symbol]bool
+
+// snapshotDestructorScope captures which symbols are currently on
+// Generator.destructors - the identity-based counterpart to a plain `base :=
+// len(g.destructors)` snapshot, taken at every real scope-entry point this
+// package tracks (a block's own start, a loop's own body, a match
+// expression's own arms).
+func (g *Generator) snapshotDestructorScope() destructorScope {
+	scope := make(destructorScope, len(g.destructors))
+	for _, e := range g.destructors {
+		scope[e.sym] = true
+	}
+	return scope
+}
+
+// unwindDestructorsToScope is unwindDestructorsTo, but computing its own
+// integer target from scope against the CURRENT stack instead of trusting a
+// stale saved length. Sound because pushDestructorEntry only ever appends
+// and removeDestructorEntry only ever deletes in place (preserving the
+// relative order of everything else) - so the current stack is always
+// exactly "whichever of scope's own symbols survived, in their original
+// relative order" followed by every entry pushed since scope was taken:
+// scanning from the start and stopping at the first symbol NOT in scope
+// always finds that exact boundary.
+func (g *Generator) unwindDestructorsToScope(scope destructorScope) {
+	i := 0
+	for i < len(g.destructors) && scope[g.destructors[i].sym] {
+		i++
+	}
+	g.unwindDestructorsTo(i)
 }
 
 // genDestructorCall calls the destructor function fn/fnTy (a struct's or an
@@ -100,6 +140,93 @@ func (g *Generator) snapshotDestructors() []destructorEntry {
 // backing array" reason snapshotDestructors' own doc comment gives.
 func (g *Generator) restoreDestructors(snapshot []destructorEntry) {
 	g.destructors = append([]destructorEntry(nil), snapshot...)
+}
+
+// branchDestructorResult is one mutually-exclusive branch's own final
+// Generator.destructors snapshot (captured right after that branch finished
+// generating, before restoreDestructors resets the shared slice for the
+// next branch) - see mergeBranchDestructors.
+type branchDestructorResult struct {
+	final      []destructorEntry
+	terminated bool
+}
+
+// mergeBranchDestructors reconciles a shared base snapshot (pre) against
+// every mutually-exclusive branch generated from it (genIfStmt's then/else,
+// genMatchStmt's own switch arms, genValueMatchStmt's own comparison-chain
+// arms) - the replacement for a blind final restoreDestructors(pre) call,
+// which every one of those used to make unconditionally once every branch
+// had generated.
+//
+// That blind restore is unsound now that `move` exists: `move` inside EVERY
+// reachable branch (sema rejects the case where only some branches move a
+// given symbol - see DECISIONS.md's dated entry) can remove an entry already
+// present in pre (declared in an outer scope), and restoring straight back
+// to pre would resurrect it - handing whatever follows this construct a
+// destructor entry for a value that was actually, permanently moved away,
+// which then fires a second, spurious destructor call later.
+//
+// A pre entry therefore survives into the merged result if it's still
+// present in AT LEAST ONE non-terminating branch's own final snapshot -
+// deliberately a union, not an intersection: `delete` (unlike `move`) has no
+// "must be consistent across every branch" sema restriction at all, and
+// deleting a coroutine handle inside just one branch (see
+// TestCoroDeleteInsideIfThenScopeExitIsSafe) is a real, already-tested,
+// legal shape whose safety net is exactly this resurrection - the still-
+// suspended coroutine's own automatic scope-exit cleanup on the OTHER,
+// untaken branch needs that entry to still be there, and the branch that
+// DID delete it already nulled its own slot, making a second (resurrected)
+// destructor call against it a safe, guarded no-op (coroDestroyLocalFn) -
+// see CODEGEN.md's own "Coroutines" section for that guard's own reasoning.
+// A terminating branch (return/break/continue) never reaches whatever
+// follows this construct at all, so it doesn't get a vote either way.
+func (g *Generator) mergeBranchDestructors(pre []destructorEntry, branches []branchDestructorResult) []destructorEntry {
+	merged := make([]destructorEntry, 0, len(pre))
+	for _, e := range pre {
+		survives := false
+		for _, b := range branches {
+			if b.terminated {
+				continue
+			}
+			if destructorEntriesHaveSym(b.final, e.sym) {
+				survives = true
+				break
+			}
+		}
+		if survives {
+			merged = append(merged, e)
+		}
+	}
+	return merged
+}
+
+// destructorEntriesHaveSym reports whether entries contains one for sym -
+// mergeBranchDestructors' own membership test.
+func destructorEntriesHaveSym(entries []destructorEntry, sym *sema.Symbol) bool {
+	for _, e := range entries {
+		if e.sym == sym {
+			return true
+		}
+	}
+	return false
+}
+
+// armReachesMatchMerge reports whether a just-generated match arm's own body
+// (genMatchStmt/genValueMatchStmt, enum.go) actually reaches the match's own
+// mergeBB - genMatchArm/genBlock's own `terminated` bool alone can't tell
+// this apart from a genuine return/break/continue: inside an EXPRESSION-mode
+// match (frame != nil), a `yield` also reports terminated=true (see
+// genYieldStmt), but unlike return/break/continue it branches straight into
+// this exact mergeBB, appending to frame.incomingVals/incomingBlocks as it
+// does - so an arm whose own incomingVals grew while it was generating
+// reached the merge after all, whatever genMatchArm itself reported.
+// beforeIncoming is len(frame.incomingVals) captured right before that arm
+// started generating.
+func armReachesMatchMerge(frame *matchExprCodegenCtx, beforeIncoming int, terminated bool) bool {
+	if !terminated {
+		return true
+	}
+	return frame != nil && len(frame.incomingVals) > beforeIncoming
 }
 
 // genStmt lowers one statement, reporting whether it terminated the current
@@ -300,6 +427,40 @@ func (g *Generator) storeValueInto(addr llvm.Value, valueNode ast.NodeIndex) {
 	g.builder.CreateStore(g.genExpr(valueNode), addr)
 }
 
+// genAssignInto is storeValueInto for an AssignStmt's own target address -
+// unlike a var-decl/composite-literal-field/argument destination (always
+// zeroed or uninitialized storage), addr already holds a live value here,
+// so if targetType owns a destructor, that value must be destructed before
+// being overwritten (destructOldValueIfOwned) or it silently leaks - the
+// reassignment-leak fix (see CODEGEN.md's "Destructors" section).
+//
+// A composite-literal valueNode is destructed-then-filled directly into addr
+// (genCompositeLitInto never reads through its own destination), but any
+// other valueNode is evaluated FIRST, before destructing - it may itself
+// read through addr's old contents (`f = Res(f.id + 1)`), which destructing
+// first could corrupt if the old value's own destructor mutates its fields.
+func (g *Generator) genAssignInto(addr llvm.Value, targetType sema.Type, valueNode ast.NodeIndex) {
+	if g.tree.Nodes[valueNode].Kind == enums.NodeKinds.CompositeLit {
+		g.destructOldValueIfOwned(addr, targetType)
+		g.genCompositeLitInto(addr, valueNode)
+		return
+	}
+	newVal := g.genExpr(valueNode)
+	g.destructOldValueIfOwned(addr, targetType)
+	g.builder.CreateStore(newVal, addr)
+}
+
+// destructOldValueIfOwned emits a destructor call (genDestructorCall)
+// against addr's CURRENT contents if targetType owns one (destructorFuncFor,
+// func.go - covers a struct/enum's own destructor and a coroutine handle's
+// shared one uniformly) - genAssignInto's own shared "destruct the old
+// value" step.
+func (g *Generator) destructOldValueIfOwned(addr llvm.Value, targetType sema.Type) {
+	if entry, ok := g.destructorFuncFor(targetType); ok {
+		g.genDestructorCall(addr, entry.fn, entry.fnType)
+	}
+}
+
 // genDeleteStmt lowers `delete p` (see LANGUAGE.md's "Pointers" section): a
 // direct call to libc's `free` against p's own pointer value - the real,
 // separate heap `new` mallocs from (runtime.go's setupRuntime), never the
@@ -413,7 +574,7 @@ func (g *Generator) genAssignStmt(n ast.NodeIndex) {
 
 	addr := g.genAddr(targetNode)
 	if op == "=" {
-		g.storeValueInto(addr, valueNode)
+		g.genAssignInto(addr, g.info.Types[targetNode], valueNode)
 		return
 	}
 
@@ -596,7 +757,7 @@ func (g *Generator) genBreakStmt(n ast.NodeIndex) bool {
 		panic("codegen: break outside a loop - sema.Check should have rejected this")
 	}
 	top := g.loopStack[len(g.loopStack)-1]
-	g.unwindDestructorsTo(top.destructorBase)
+	g.unwindDestructorsToScope(top.destructorBase)
 	if top.returnFromCallback {
 		g.builder.CreateRet(llvm.ConstInt(g.boolTy, 0, false))
 	} else {
@@ -610,7 +771,7 @@ func (g *Generator) genContinueStmt(n ast.NodeIndex) bool {
 		panic("codegen: continue outside a loop - sema.Check should have rejected this")
 	}
 	top := g.loopStack[len(g.loopStack)-1]
-	g.unwindDestructorsTo(top.destructorBase)
+	g.unwindDestructorsToScope(top.destructorBase)
 	if top.returnFromCallback {
 		g.builder.CreateRet(llvm.ConstInt(g.boolTy, 1, false))
 	} else {
@@ -658,7 +819,7 @@ func (g *Generator) genYieldStmt(n ast.NodeIndex) bool {
 	if len(g.matchExprStack) > 0 {
 		top := g.matchExprStack[len(g.matchExprStack)-1]
 		v := g.genExpr(valueNode)
-		g.unwindDestructorsTo(top.destructorBase)
+		g.unwindDestructorsToScope(top.destructorBase)
 
 		top.incomingVals = append(top.incomingVals, v)
 		top.incomingBlocks = append(top.incomingBlocks, g.builder.GetInsertBlock())
@@ -799,7 +960,7 @@ func (g *Generator) genRangeForArray(keyNode, valueNode, subjectNode, bodyNode a
 
 	g.builder.SetInsertPointAtEnd(bodyBB)
 	bodyIdx := g.builder.CreateLoad(g.i32Ty, idxAddr, "")
-	preBindBase := len(g.destructors)
+	preBindBase := g.snapshotDestructorScope()
 	if keyNode != ast.InvalidNode {
 		g.bindRangeVar(keyNode, bodyIdx)
 	}
@@ -822,7 +983,7 @@ func (g *Generator) genRangeForArray(keyNode, valueNode, subjectNode, bodyNode a
 	bodyTerm := g.genBlock(bodyNode)
 	g.loopStack = g.loopStack[:len(g.loopStack)-1]
 	if !bodyTerm {
-		g.unwindDestructorsTo(preBindBase)
+		g.unwindDestructorsToScope(preBindBase)
 		g.builder.CreateBr(postBB)
 	}
 
@@ -914,7 +1075,7 @@ func (g *Generator) genRangeGeneratorCallbackFunc(keyNode, bodyNode ast.NodeInde
 		g.bindRangeVar(keyNode, fn.Param(1))
 	}
 
-	base := len(g.destructors)
+	base := g.snapshotDestructorScope()
 	g.loopStack = append(g.loopStack, loopCtx{
 		returnFromCallback: true,
 		destructorBase:     base,
@@ -922,7 +1083,7 @@ func (g *Generator) genRangeGeneratorCallbackFunc(keyNode, bodyNode ast.NodeInde
 	bodyTerm := g.genBlock(bodyNode)
 	g.loopStack = g.loopStack[:len(g.loopStack)-1]
 	if !bodyTerm {
-		g.unwindDestructorsTo(base)
+		g.unwindDestructorsToScope(base)
 		g.builder.CreateRet(llvm.ConstInt(g.boolTy, 1, false))
 	}
 
@@ -950,11 +1111,16 @@ func (g *Generator) genRangeGeneratorCallbackFunc(keyNode, bodyNode ast.NodeInde
 // sibling branch never actually saw removed at runtime (only one branch
 // ever really executes), and, unlike a Block's own genBlock call, there's no
 // enclosing "restore to my own base" logic for either branch on its own -
-// genIfStmt is what has to do it explicitly, once per branch, via the
-// shared snapshotDestructors/restoreDestructors pair (see their own doc
-// comments for the full reasoning - genMatchStmt's own switch arms and
-// genValueMatchStmt's own comparison-chain arms, enum.go, apply the
-// identical discipline one construct over).
+// genIfStmt is what has to do it explicitly, once per branch, via
+// snapshotDestructors/restoreDestructors (see their own doc comments -
+// genMatchStmt's own switch arms and genValueMatchStmt's own comparison-
+// chain arms, enum.go, apply the identical discipline one construct over).
+//
+// The FINAL state (what follows the if actually sees) is NOT simply preIf
+// again, though - mergeBranchDestructors (its own doc comment has the full
+// reasoning) reconciles preIf against each branch's own final snapshot,
+// since `move` inside one branch may have permanently removed a pre-if
+// entry; blindly restoring to preIf one more time would resurrect it.
 func (g *Generator) genIfStmt(n ast.NodeIndex) bool {
 	condNode := g.tree.Child(n, 0)
 	thenNode := g.tree.Child(n, 1)
@@ -978,17 +1144,24 @@ func (g *Generator) genIfStmt(n ast.NodeIndex) bool {
 	if !thenTerm {
 		g.builder.CreateBr(mergeBB)
 	}
+	thenResult := branchDestructorResult{final: g.snapshotDestructors(), terminated: thenTerm}
 	g.restoreDestructors(preIf)
 
+	// No else: the implicit "condition was false" path never moves
+	// anything away and never diverts - exactly preIf, unchanged.
 	elseTerm := false
+	elseResult := branchDestructorResult{final: preIf, terminated: false}
 	if hasElse {
 		g.builder.SetInsertPointAtEnd(elseBB)
 		elseTerm = g.genStmt(elseNode)
 		if !elseTerm {
 			g.builder.CreateBr(mergeBB)
 		}
+		elseResult = branchDestructorResult{final: g.snapshotDestructors(), terminated: elseTerm}
 		g.restoreDestructors(preIf)
 	}
+
+	g.destructors = g.mergeBranchDestructors(preIf, []branchDestructorResult{thenResult, elseResult})
 
 	g.builder.SetInsertPointAtEnd(mergeBB)
 	terminates := hasElse && thenTerm && elseTerm
@@ -1104,7 +1277,7 @@ func (g *Generator) genForStmt(n ast.NodeIndex) bool {
 	postNode := g.tree.Child(n, 2)
 	bodyNode := g.tree.Child(n, 3)
 
-	preInitBase := len(g.destructors)
+	preInitBase := g.snapshotDestructorScope()
 
 	var (
 		loopVarSym      *sema.Symbol
@@ -1154,7 +1327,7 @@ func (g *Generator) genForStmt(n ast.NodeIndex) bool {
 	g.loopStack = append(g.loopStack, loopCtx{
 		breakTarget:    endBB,
 		continueTarget: postBB,
-		destructorBase: len(g.destructors),
+		destructorBase: g.snapshotDestructorScope(),
 	})
 	bodyTerm := g.genBlock(bodyNode)
 	g.loopStack = g.loopStack[:len(g.loopStack)-1]
@@ -1174,6 +1347,6 @@ func (g *Generator) genForStmt(n ast.NodeIndex) bool {
 	g.builder.CreateBr(condBB)
 
 	g.builder.SetInsertPointAtEnd(endBB)
-	g.unwindDestructorsTo(preInitBase)
+	g.unwindDestructorsToScope(preInitBase)
 	return false
 }

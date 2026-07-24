@@ -1347,6 +1347,81 @@ field of `this`, or itself `delete`-ing a further pointer it owns) needs the
 pointee's memory to still be valid when it runs. A pointee type with no
 destructor is entirely unaffected.
 
+### `move x`
+
+See `LANGUAGE.md`'s "move" subsection for the language-level feature - sema
+(`checkMoveExpr`, `typecheck.go`) does all the real *legality* work (use-
+after-move tracking, the if/else/match convergence rule, the loop
+restriction). `genMoveExpr` (`expr.go`) itself is trivial: an ordinary load
+of the operand's current value, plus `removeDestructorEntry` (coroutine.go)
+against its own symbol - exactly what an explicit `delete` already does for
+a coroutine handle. Whatever consumes the value pushes its own destructor
+entry the same way any other freshly-owned value already does; `move` never
+needs its own push.
+
+What `move` is NOT sound-for-free with, though, is `removeDestructorEntry`
+removing an entry from *anywhere* in the stack rather than just the top -
+every scope-boundary bookkeeping mechanism this package already had assumed
+that never happened (only `delete` could remove an entry pre-`move`, and
+only ever the operand's own, usually-recently-declared local). Two real,
+independently-confirmed bugs came out of this, both fixed as part of this
+same round (see DECISIONS.md's dated entries):
+
+- **`genBlock`/a loop's own break-continue base/a match expression's own
+  yield base** used a plain `base := len(g.destructors)` integer snapshot.
+  Removing an entry from *below* that snapshot (e.g. `move`-ing a local
+  declared in an enclosing scope, from inside a nested `if`-branch) shifts
+  every later index down by one, silently invalidating it - `unwindDestructorsTo`
+  would then unwind too few (or the wrong) entries. Fixed by replacing every
+  such integer with a `destructorScope` (a set of symbols, not an index) -
+  `unwindDestructorsToScope` recomputes the correct integer target against
+  the *current* stack every time, exploiting the invariant that pushes only
+  ever append and removals only ever delete in place, so survivors always
+  form a prefix.
+- **`genIfStmt`/`genMatchStmt`/`genValueMatchStmt`'s own
+  `snapshotDestructors`/`restoreDestructors(pre)` pair** blindly restored to
+  the pre-construct snapshot once every branch/arm had generated - which
+  `move` (unlike `delete`) makes actively unsound: if every reachable branch
+  moved away a pre-level entry (sema-legal, since move requires exactly
+  this consistency), the blind restore resurrected it anyway, letting it
+  fire a second, spurious destructor call later. `mergeBranchDestructors`
+  replaces that blind restore: a pre-level entry survives into the merged
+  result only if it's still present in *at least one* reachable (non-
+  diverging) branch's own final snapshot - a union, not an intersection.
+  This is deliberately still permissive enough to preserve `delete`'s own
+  existing, already-tested "conditional delete inside just one `if`-branch"
+  shape (`TestCoroDeleteInsideIfThenScopeExitIsSafe`): `delete` has no
+  "must be consistent across every branch" restriction the way `move` does,
+  and relies on exactly this resurrection (protected by `coroDestroyLocalFn`'s
+  own nil-guard) to stay safe when only one branch actually deleted the
+  handle.
+  A related subtlety inside this same fix: inside an EXPRESSION-mode match,
+  a `yield` also reports "terminated" from `genMatchArm`/`genBlock`'s own
+  point of view (same as return/break/continue), but unlike those it
+  branches into this exact construct's own `mergeBB`, not away from it -
+  `armReachesMatchMerge` (stmt.go) checks whether `frame.incomingVals` grew
+  during that arm's own generation to tell the two apart, since treating a
+  yielding arm as "never reaches what follows" incorrectly excluded it from
+  the merge's own vote.
+
+### The reassignment-leak fix
+
+`genAssignStmt`'s plain `"="` case used to call `storeValueInto` directly
+against the target's own existing address, with no destructor call for
+whatever it previously held - a real leak for any non-copyable-typed target
+(a struct/enum with its own destructor, or a coroutine handle), independent
+of `move` itself: `f := Res(1); f = Res(2)` never destructed `Res(1)`.
+`genAssignInto` (`stmt.go`) is the fix, replacing that call: it destructs
+the target's current value (`destructOldValueIfOwned`, reusing
+`destructorFuncFor`/`genDestructorCall` exactly like `pushDestructorEntry`/
+`genDeleteStmt` already do) before the new value overwrites it. Ordering
+matters - a composite-literal value is destructed-then-filled directly into
+the destination address (`genCompositeLitInto` never reads through its own
+destination first, so this is safe), but any other value is evaluated
+*before* destructing the old one, since it may itself read through the
+target's own old contents (`f = Res(f.id + 1)`) - destructing first could
+let the old value's own destructor body corrupt that read.
+
 ## Enums
 
 See `LANGUAGE.md`'s "Enums" and "match" sections for the language-level

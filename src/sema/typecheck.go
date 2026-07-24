@@ -71,6 +71,33 @@ type enclosingFunc struct {
 	isAsync bool
 }
 
+// moveState is one function/constructor/destructor/lambda body's own `move`
+// flow-tracking state (see LANGUAGE.md's "Destructors" section's "move"
+// subsection) - reset per body exactly like enclosingFunc itself (see
+// checker.enterFuncBody).
+//
+// moved is the set of symbols moved-from on the path reached so far; absence
+// means "definitely not moved yet". There is no third "maybe moved" state
+// held here - checkIfStmt/checkMatchDispatch instead reject outright the
+// moment two converging paths disagree (see their own doc comments), so by
+// construction moved never needs to represent an ambiguous symbol at all.
+//
+// declLoopDepth records, for a symbol declared inside at least one loop
+// body, the checker.loopDepth in effect at its own declaration - missing
+// means "declared outside every loop" (loopDepth 0), which is also the
+// correct answer for every symbol never recorded here (a function parameter,
+// or any local declared outside a loop), so only an in-loop declaration ever
+// needs an actual entry. checkMoveExpr rejects moving a symbol whose
+// declLoopDepth is less than the CURRENT loopDepth: declared outside (or in
+// a shallower enclosing loop than) the loop the move itself is inside, which
+// could run the move more than once, moving-from an already-moved value on a
+// later iteration (see DECISIONS.md's dated entry for why this is rejected
+// outright rather than reconciled via a per-iteration fixed point).
+type moveState struct {
+	moved         map[*Symbol]bool
+	declLoopDepth map[*Symbol]int
+}
+
 // matchExprCheckCtx is one live expression-mode match's own running result
 // type - see checker.matchExprStack's own doc comment for why this needs a
 // real stack rather than a bare counter. resultTypeSet distinguishes "no
@@ -156,6 +183,11 @@ type checker struct {
 	funcSigs map[nodeRef]funcSignature
 
 	curFunc *enclosingFunc
+
+	// move is the current function/constructor/destructor/lambda body's own
+	// move-tracking state (see moveState's own doc comment) - reset alongside
+	// curFunc at every one of its same save/restore sites (enterFuncBody).
+	move *moveState
 
 	// loopDepth counts how many enclosing ForStmt bodies checkStmt is
 	// currently inside - incremented/decremented around checkForStmt's own
@@ -448,6 +480,49 @@ func (c *checker) checkEnumDecl(decl ast.NodeIndex) {
 	}
 }
 
+// enterFuncBody resets move-tracking state (moveState) for a new function/
+// constructor/destructor/lambda body, returning a closure that restores the
+// enclosing body's own state - the move-tracking counterpart to each of
+// these call sites' own inline curFunc save/restore, called alongside it.
+func (c *checker) enterFuncBody() (restore func()) {
+	prev := c.move
+	c.move = &moveState{
+		moved:         make(map[*Symbol]bool),
+		declLoopDepth: make(map[*Symbol]int),
+	}
+	return func() { c.move = prev }
+}
+
+// recordLocalDeclLoopDepth notes nameNode's own symbol as declared at the
+// current loopDepth, if it's declared inside at least one loop body (see
+// moveState.declLoopDepth's own doc comment - a no-op outside any loop,
+// where the zero-value default is already the right answer). Called by
+// every ordinary local-declaring construct (var/short-var-decl, a
+// multi-short-var-decl name, a match pattern binding); see
+// recordLoopBindingDeclLoopDepth for the one binding shape (a range-for's
+// own key/value) that needs a different depth.
+func (c *checker) recordLocalDeclLoopDepth(nameNode ast.NodeIndex) {
+	if c.loopDepth == 0 {
+		return
+	}
+	if sym, ok := c.info.Refs[nameNode]; ok {
+		c.move.declLoopDepth[sym] = c.loopDepth
+	}
+}
+
+// recordLoopBindingDeclLoopDepth is recordLocalDeclLoopDepth's counterpart
+// for a range-for's own key/value binding (seedRangeBinding): checkRangeForStmt
+// seeds these before incrementing loopDepth for the body, but the binding
+// itself is exactly as loop-scoped (fresh every iteration) as an ordinary
+// local declared directly inside the body would be - so this always records
+// loopDepth+1 (the depth the body is about to run at), unconditionally,
+// rather than skipping at loopDepth 0 the way recordLocalDeclLoopDepth does.
+func (c *checker) recordLoopBindingDeclLoopDepth(nameNode ast.NodeIndex) {
+	if sym, ok := c.info.Refs[nameNode]; ok {
+		c.move.declLoopDepth[sym] = c.loopDepth + 1
+	}
+}
+
 // checkEnumDestructorDecl type-checks one enum `destructor() {...}` block -
 // mirroring checkDestructorDecl exactly, one type kind over.
 func (c *checker) checkEnumDestructorDecl(dtor ast.NodeIndex) {
@@ -464,7 +539,9 @@ func (c *checker) checkEnumDestructorDecl(dtor ast.NodeIndex) {
 
 	prevFunc := c.curFunc
 	c.curFunc = &enclosingFunc{hasReturn: false}
+	restoreMove := c.enterFuncBody()
 	c.checkBlock(body)
+	restoreMove()
 	c.curFunc = prevFunc
 }
 
@@ -488,7 +565,9 @@ func (c *checker) checkConstructorDecl(ctor ast.NodeIndex) {
 
 	prevFunc := c.curFunc
 	c.curFunc = &enclosingFunc{hasReturn: false}
+	restoreMove := c.enterFuncBody()
 	c.checkBlock(body)
+	restoreMove()
 	c.curFunc = prevFunc
 }
 
@@ -546,7 +625,9 @@ func (c *checker) checkDestructorDecl(dtor ast.NodeIndex) {
 
 	prevFunc := c.curFunc
 	c.curFunc = &enclosingFunc{hasReturn: false}
+	restoreMove := c.enterFuncBody()
 	c.checkBlock(body)
+	restoreMove()
 	c.curFunc = prevFunc
 }
 
@@ -586,7 +667,9 @@ func (c *checker) checkFuncDecl(decl ast.NodeIndex) {
 	if isGenerator {
 		c.curFunc.yieldElem = *sig.Return.Elem
 	}
+	restoreMove := c.enterFuncBody()
 	c.checkBlock(body)
+	restoreMove()
 	if c.curFunc.hasReturn && !isTerminatingStmt(c.tree, c.info, body) {
 		c.errorAt(decl, "missing return")
 	}
@@ -876,7 +959,9 @@ func (c *checker) checkFuncLit(n ast.NodeIndex) Type {
 		hasReturn: returnTypeNode != ast.InvalidNode,
 		ret:       ret,
 	}
+	restoreMove := c.enterFuncBody()
 	c.checkBlock(body)
+	restoreMove()
 	if c.curFunc.hasReturn && !isTerminatingStmt(c.tree, c.info, body) {
 		c.errorAt(n, "missing return")
 	}
@@ -934,6 +1019,7 @@ func (c *checker) computeDeclType(decl ast.NodeIndex) Type {
 // grammar level (see ast.Node's VarDecl doc comment), so it's this pass's
 // job to reject the case where both are missing.
 func (c *checker) checkVarDeclNode(decl ast.NodeIndex) Type {
+	c.recordLocalDeclLoopDepth(c.tree.Child(decl, 0))
 	typeNode := c.tree.Child(decl, 1)
 	initNode := c.tree.Child(decl, 2)
 
@@ -962,6 +1048,7 @@ func (c *checker) checkVarDeclNode(decl ast.NodeIndex) Type {
 }
 
 func (c *checker) checkShortVarDeclNode(decl ast.NodeIndex) Type {
+	c.recordLocalDeclLoopDepth(c.tree.Child(decl, 0))
 	// `:=` never has a declared type (see the grammar) - same untyped
 	// defaulting rule as a type-less `var`, above.
 	initNode := c.tree.Child(decl, 1)
@@ -993,6 +1080,7 @@ func (c *checker) checkMultiShortVarDeclNode(decl ast.NodeIndex) Type {
 		t := types[i]
 		c.declTypes[nodeRef{c.tree, nameNode}] = t
 		c.info.Types[nameNode] = t
+		c.recordLocalDeclLoopDepth(nameNode)
 		c.checkNoIllegalCopy(value, t, true, "short variable declaration")
 	}
 	return Type{
@@ -1024,7 +1112,11 @@ func (c *checker) checkMultiAssignStmt(n ast.NodeIndex) {
 	}
 	for i, target := range targets {
 		if c.checkAssignable(target, targetTypes[i], types[i], fmt.Sprintf("assignment target %d", i+1)) {
-			c.checkNoIllegalCopy(target, targetTypes[i], true, fmt.Sprintf("assignment target %d", i+1))
+			// value, not target: target is always an existing lvalue (never
+			// a fresh construction), so freshness has to be checked against
+			// the destructured source - see checkMultiShortVarDeclNode's own
+			// identical call, its `:=` counterpart.
+			c.checkNoIllegalCopy(value, targetTypes[i], true, fmt.Sprintf("assignment target %d", i+1))
 		}
 	}
 }
@@ -1560,7 +1652,26 @@ func (c *checker) isFreshConstruction(n ast.NodeIndex) bool {
 		// Calling an async func (see LANGUAGE.md's "Coroutines" section) is
 		// exactly as fresh too - every call mints a brand-new heap-allocated
 		// coroutine frame, never an existing one.
-		return c.calleeIsAsyncFunc(callee)
+		if c.calleeIsAsyncFunc(callee) {
+			return true
+		}
+		// Calling ANY function (free or method) whose own declared return
+		// type is itself non-copyable is just as fresh: that function could
+		// only have type-checked at all if every one of its own return
+		// statements already satisfied this same fresh-or-move rule (see
+		// checkNoIllegalCopy), so every call to it transitively hands back
+		// sole ownership - no per-function annotation or escape analysis
+		// needed beyond what its own successful compilation already proves.
+		//
+		// A multi-return call (TypeMultiReturn - see checkMultiValueReturn)
+		// is unconditionally fresh by the same reasoning: it could only
+		// type-check via a literal `return a, b, ...`, whose own values are
+		// already individually fresh-or-move checked at the return site, so
+		// every destructuring call site inherits that guarantee too.
+		if sig, ok := c.funcSigForCall(callee); ok && (sig.Return.Kind == TypeMultiReturn || c.typeIsNonCopyable(sig.Return)) {
+			return true
+		}
+		return false
 	case enums.NodeKinds.MemberExpr:
 		// A bare unit-variant reference (`Shape.Point`) - the enum-kind
 		// counterpart to the two cases above, for the one variant kind with
@@ -1575,6 +1686,19 @@ func (c *checker) isFreshConstruction(n ast.NodeIndex) bool {
 	}
 }
 
+// isMoveExpr reports whether n (unwrapped of any enclosing ParenExpr, same
+// as isFreshConstruction) is a `move x` expression - checkMoveExpr has
+// already fully checked it (including the "already moved"/loop/capture
+// rules) by the time checkNoIllegalCopy ever sees it, since every call site
+// below always calls checkValueExpr(at) before this - so this is purely a
+// shape test, not a re-check.
+func (c *checker) isMoveExpr(n ast.NodeIndex) bool {
+	for c.tree.Nodes[n].Kind == enums.NodeKinds.ParenExpr {
+		n = c.tree.Child(n, 0)
+	}
+	return c.tree.Nodes[n].Kind == enums.NodeKinds.MoveExpr
+}
+
 // checkNoIllegalCopy enforces LANGUAGE.md's "Destructors" non-copyable rule
 // at one of its four call sites (a var/short-var-decl initializer or a plain
 // assignment's value, a struct/array composite-literal element, a function
@@ -1585,33 +1709,25 @@ func (c *checker) isFreshConstruction(n ast.NodeIndex) bool {
 // never also raises a second, unrelated "illegal copy" diagnostic about the
 // same expression).
 //
-// allowFresh distinguishes the two shapes this rule takes:
-//   - a var decl, assignment, composite-literal element, or function
-//     argument all allow the one deliberate exception - constructing a
-//     fresh value in place (isFreshConstruction) is never "a copy". A fresh
-//     argument is just as sound as a fresh var-decl initializer: the
-//     callee's own parameter (an ordinary local, as far as this feature's
-//     firing rule is concerned - see pushDestructorEntry, codegen/func.go)
-//     becomes that value's one and only owner, destructing it at its own
-//     scope exit, with no other reference to it anywhere else.
-//   - a return statement's value allows no exception at all, fresh
-//     construction included (see LANGUAGE.md: "this is the one that forces
-//     resource-owning types only exist behind a pointer"). This is
-//     genuinely different from argument-passing, not an arbitrary
-//     asymmetry: soundly allowing a fresh *return* would require knowing,
-//     at every call site consuming the result, that "whatever this call
-//     returns is always freshly owned" - a real (if narrow) escape-analysis
-//     question this round deliberately doesn't take on (see DECISIONS.md) -
-//     whereas a fresh *argument*'s soundness is entirely local to the one
-//     call expression itself, nothing further to infer.
+// allowFresh names the one real asymmetry left after `move` (see
+// LANGUAGE.md's "move" subsection): every one of the four call sites now
+// accepts a fresh construction (isFreshConstruction) OR `move x`
+// (isMoveExpr) as the non-copy exception - including a return statement,
+// which used to allow no exception at all (see DECISIONS.md's dated entry
+// for how `move` resolved the escape-analysis concern that used to justify
+// that asymmetry). allowFresh=false is left only for a call site where
+// there's no *named* existing value to legally move from at all - an
+// element read straight out of a map/array during a range binding
+// (seedRangeBindingChecked) is a genuine copy-out of container internals,
+// not a reference to some other bare identifier `move` could apply to.
 func (c *checker) checkNoIllegalCopy(at ast.NodeIndex, want Type, allowFresh bool, context string) bool {
 	if !c.typeIsNonCopyable(want) {
 		return true
 	}
-	if allowFresh && c.isFreshConstruction(at) {
+	if allowFresh && (c.isFreshConstruction(at) || c.isMoveExpr(at)) {
 		return true
 	}
-	c.errorAt(at, "cannot copy %s in %s: it (or a field of it) has a destructor, so it cannot be copied - only constructed fresh or referenced through a pointer", want, context)
+	c.errorAt(at, "cannot copy %s in %s: it (or a field of it) has a destructor, so it cannot be copied - only constructed fresh, moved (move x), or referenced through a pointer", want, context)
 	return false
 }
 
@@ -2234,6 +2350,10 @@ func (c *checker) checkAssignStmt(n ast.NodeIndex) {
 	target := c.tree.Child(n, 0)
 	value := c.tree.Child(n, 1)
 
+	if c.isSelfMove(target, value) {
+		c.errorAt(value, "cannot move %s into itself", c.tree.Text(target))
+	}
+
 	tt, ok := c.checkLValue(target)
 	vt := c.checkValueExpr(value)
 	if !ok {
@@ -2252,6 +2372,31 @@ func (c *checker) checkAssignStmt(n ast.NodeIndex) {
 		return
 	}
 	c.checkCompoundOp(value, op, tt, vt)
+}
+
+// isSelfMove reports whether value is `move x` where x resolves to the same
+// symbol target (an Ident lvalue) does - checkAssignStmt's own guard against
+// `f = move f`, a degenerate self-reference this language's linear ownership
+// tracking has no sound meaning for (see genAssignStmt's own reassignment-
+// leak fix, CODEGEN.md: the two would race over which of "destruct f's old
+// value" and "load f's current value for the move" runs first).
+func (c *checker) isSelfMove(target, value ast.NodeIndex) bool {
+	if c.tree.Nodes[target].Kind != enums.NodeKinds.Ident {
+		return false
+	}
+	for c.tree.Nodes[value].Kind == enums.NodeKinds.ParenExpr {
+		value = c.tree.Child(value, 0)
+	}
+	if c.tree.Nodes[value].Kind != enums.NodeKinds.MoveExpr {
+		return false
+	}
+	operand := c.tree.Child(value, 0)
+	if c.tree.Nodes[operand].Kind != enums.NodeKinds.Ident {
+		return false
+	}
+	targetSym, ok1 := c.info.Refs[target]
+	operandSym, ok2 := c.info.Refs[operand]
+	return ok1 && ok2 && targetSym == operandSym
 }
 
 // isMapIndexTarget reports whether n is a map index expression (`m[k]`) -
@@ -2400,11 +2545,10 @@ func (c *checker) checkReturnStmt(n ast.NodeIndex) {
 		return
 	}
 	if c.checkAssignable(value, fn.ret, vt, "return statement") {
-		// allowFresh=false: returning a non-copyable type by value is always
-		// rejected, even when the returned expression is itself a fresh
-		// construction - see checkNoIllegalCopy's own doc comment for why
-		// this one context allows no exception at all.
-		c.checkNoIllegalCopy(value, fn.ret, false, "return statement")
+		// A fresh construction or `move x` is now a legal return value too -
+		// see checkNoIllegalCopy's own doc comment and DECISIONS.md's dated
+		// entry for why this no longer needs its own escape-analysis carve-out.
+		c.checkNoIllegalCopy(value, fn.ret, true, "return statement")
 	}
 }
 
@@ -2447,20 +2591,108 @@ func (c *checker) checkMultiValueReturn(listNode ast.NodeIndex, fn *enclosingFun
 		vt := c.checkValueExpr(v)
 		context := fmt.Sprintf("return value %d", i+1)
 		if c.checkAssignable(v, want[i], vt, context) {
-			// allowFresh=false, same reasoning as checkReturnStmt's own
-			// single-value tail: a multi-value return allows no fresh-
-			// construction exception either.
-			c.checkNoIllegalCopy(v, want[i], false, context)
+			// Same fresh-or-move exception as checkReturnStmt's own
+			// single-value tail.
+			c.checkNoIllegalCopy(v, want[i], true, context)
 		}
 	}
 }
 
+// cloneMoved returns a real copy of m - moveState.moved is a reference type,
+// so checkIfStmt/checkMatchDispatch's own then/else/arm branches each need
+// their own independent copy to mutate, the move-tracking counterpart to
+// codegen's identical snapshotDestructors/restoreDestructors need (see
+// CODEGEN.md's "Destructors" section).
+func cloneMoved(m map[*Symbol]bool) map[*Symbol]bool {
+	clone := make(map[*Symbol]bool, len(m))
+	for sym := range m {
+		clone[sym] = true
+	}
+	return clone
+}
+
+// armMoveResult is checkMatchDispatch's own per-arm move-tracking result -
+// the moved-set its body ended up with, and whether it diverts (see
+// branchDivertsControl) - collected once per arm and merged together
+// afterward (mergeMovedAcrossPaths).
+type armMoveResult struct {
+	moved   map[*Symbol]bool
+	diverts bool
+}
+
+// mergeMovedAcrossPaths is checkIfStmt/checkMatchDispatch's own shared
+// join-or-reject core: paths is every reachable (non-diverting) path's own
+// resulting moved-set out of some branching construct, base the moved-set
+// before it. A symbol moved on only SOME of paths is rejected right here
+// ("may already have been moved") rather than reconciled - see
+// DECISIONS.md's dated entry for why this is a deliberate trade-off, not a
+// missing feature: it's what lets codegen reuse removeDestructorEntry/
+// pushDestructorEntry completely unchanged, with no runtime "moved" flag
+// ever needed on any type's own representation.
+func (c *checker) mergeMovedAcrossPaths(at ast.NodeIndex, base map[*Symbol]bool, paths []map[*Symbol]bool) map[*Symbol]bool {
+	if len(paths) == 0 {
+		return base
+	}
+	seen := make(map[*Symbol]bool)
+	for _, p := range paths {
+		for sym := range p {
+			seen[sym] = true
+		}
+	}
+	merged := cloneMoved(base)
+	for sym := range seen {
+		if base[sym] {
+			continue
+		}
+		allMoved := true
+		for _, p := range paths {
+			if !p[sym] {
+				allMoved = false
+				break
+			}
+		}
+		if !allMoved {
+			// Reported once, right here - deliberately NOT marked moved in
+			// the merged result, so a later read doesn't also cascade its
+			// own separate "use of moved value" diagnostic for the same
+			// root ambiguity.
+			c.errorAt(at, "%s may already have been moved: moved on only some of this construct's reachable paths", sym.Name)
+			continue
+		}
+		merged[sym] = true
+	}
+	return merged
+}
+
 func (c *checker) checkIfStmt(n ast.NodeIndex) {
 	c.checkCondition(c.tree.Child(n, 0))
-	c.checkStmt(c.tree.Child(n, 1))
-	if elseBranch := c.tree.Child(n, 2); elseBranch != ast.InvalidNode {
-		c.checkStmt(elseBranch)
+
+	thenBranch := c.tree.Child(n, 1)
+	elseBranch := c.tree.Child(n, 2)
+
+	preMoved := c.move.moved
+	c.move.moved = cloneMoved(preMoved)
+	c.checkStmt(thenBranch)
+	thenMoved := c.move.moved
+	thenDiverts := branchDivertsControl(c.tree, c.info, thenBranch)
+
+	var paths []map[*Symbol]bool
+	if !thenDiverts {
+		paths = append(paths, thenMoved)
 	}
+	if elseBranch == ast.InvalidNode {
+		// No else: the implicit "condition was false" path never moves
+		// anything new, and never diverts - always a reachable path.
+		paths = append(paths, preMoved)
+	} else {
+		c.move.moved = cloneMoved(preMoved)
+		c.checkStmt(elseBranch)
+		if !branchDivertsControl(c.tree, c.info, elseBranch) {
+			paths = append(paths, c.move.moved)
+		}
+	}
+
+	c.move.moved = c.mergeMovedAcrossPaths(n, preMoved, paths)
 }
 
 func (c *checker) checkForStmt(n ast.NodeIndex) {
@@ -2574,6 +2806,7 @@ func (c *checker) seedRangeBinding(nameNode ast.NodeIndex, t Type) {
 	}
 	c.declTypes[nodeRef{c.tree, nameNode}] = t
 	c.info.Types[nameNode] = t
+	c.recordLoopBindingDeclLoopDepth(nameNode)
 }
 
 // seedRangeBindingChecked is seedRangeBinding plus checkNoIllegalCopy - see
@@ -2678,6 +2911,38 @@ func (c *checker) checkMatchExprArmBody(body ast.NodeIndex) {
 func (c *checker) checkMatchDispatch(n ast.NodeIndex, checkArm func(body ast.NodeIndex)) {
 	subjectNode := c.tree.MatchSubject(n)
 	subjType := c.checkValueExpr(subjectNode)
+
+	// Wrap checkArm so every arm this dispatch ends up calling it against
+	// (whichever of checkEnumMatchStmt/checkValueMatchStmt/
+	// checkMatchArmFallback below actually runs) checks its own body against
+	// an independent moved-set copy, then records that result - the
+	// move-tracking counterpart to genMatchStmt/genValueMatchStmt's own
+	// snapshotDestructors around each arm (CODEGEN.md's "Destructors"
+	// section). The merge itself runs in a defer, so it applies uniformly
+	// regardless of which of this function's several return points fires.
+	preMoved := c.move.moved
+	var armResults []armMoveResult
+	origCheckArm := checkArm
+	checkArm = func(body ast.NodeIndex) {
+		c.move.moved = cloneMoved(preMoved)
+		origCheckArm(body)
+		armResults = append(armResults, armMoveResult{
+			moved:   c.move.moved,
+			diverts: branchDivertsControl(c.tree, c.info, body),
+		})
+	}
+	defer func() {
+		var paths []map[*Symbol]bool
+		if !matchIsExhaustive(c.tree, c.info, n) {
+			paths = append(paths, preMoved)
+		}
+		for _, r := range armResults {
+			if !r.diverts {
+				paths = append(paths, r.moved)
+			}
+		}
+		c.move.moved = c.mergeMovedAcrossPaths(n, preMoved, paths)
+	}()
 
 	enumType := subjType
 	if enumType.Kind == TypePointer && enumType.Elem != nil {
@@ -3069,6 +3334,7 @@ func (c *checker) checkedPatternVariant(memberNode ast.NodeIndex, info *EnumInfo
 func (c *checker) seedPatternBinding(n ast.NodeIndex, t Type) {
 	c.declTypes[nodeRef{c.tree, n}] = t
 	c.info.Types[n] = t
+	c.recordLocalDeclLoopDepth(n)
 }
 
 // checkPatternBindingFallback seeds n with invalidType when it's at least a
@@ -3192,6 +3458,8 @@ func (c *checker) inferExpr(n ast.NodeIndex) Type {
 		return c.checkFuncLit(n)
 	case enums.NodeKinds.NewExpr:
 		return c.checkNewExpr(n)
+	case enums.NodeKinds.MoveExpr:
+		return c.checkMoveExpr(n)
 	case enums.NodeKinds.MatchStmt:
 		// Always expression-position here - statement-position match is
 		// dispatched by checkStmt directly, never through checkExpr.
@@ -3271,6 +3539,12 @@ func (c *checker) checkIdentExpr(n ast.NodeIndex) Type {
 	sym, ok := c.info.Refs[n]
 	if !ok {
 		return invalidType // undefined name; already reported by Resolve
+	}
+	if c.move != nil {
+		if _, moved := c.move.moved[sym]; moved {
+			c.errorAt(n, "use of moved value %s: it was moved earlier and no longer has a value", sym.Name)
+			return invalidType
+		}
 	}
 	return c.typeOfSymbolValue(n, sym)
 }
@@ -3369,6 +3643,52 @@ func (c *checker) checkThisExpr(n ast.NodeIndex) Type {
 		}
 	}
 	return invalidType
+}
+
+// checkMoveExpr type-checks `move x` (see LANGUAGE.md's "Destructors"
+// section's "move" subsection). The parser already guarantees operand is a
+// bare Ident (parseMoveExpr) - the non-Ident branch here only handles a
+// malformed tree reaching this some other way, without re-reporting.
+//
+// Moving a COPYABLE-typed x is accepted as a harmless plain read - no
+// ownership to track (see DECISIONS.md's dated entry). For a non-copyable
+// x, this is the one place moveState.moved is actually populated: x must
+// name a local variable/parameter (checkIdentExpr, called via
+// checkValueExpr below, already rejects x if it was moved on some earlier,
+// unconditional path), never one captured by a lambda (Symbol.Captured - a
+// captured variable's lifetime already outlives straight-line tracking,
+// out of scope this round), and must not have been declared outside the
+// current innermost loop (declLoopDepth - see moveState's own doc comment:
+// a later iteration of that loop could then move an already-moved value).
+func (c *checker) checkMoveExpr(n ast.NodeIndex) Type {
+	operand := c.tree.Child(n, 0)
+	if c.tree.Nodes[operand].Kind != enums.NodeKinds.Ident {
+		c.checkValueExpr(operand)
+		return invalidType // already reported by the parser
+	}
+
+	t := c.checkValueExpr(operand)
+	sym, ok := c.info.Refs[operand]
+	if !ok || t.IsInvalid() {
+		return invalidType // already reported by Resolve/checkIdentExpr
+	}
+	if sym.Kind != SymVar && sym.Kind != SymParam {
+		c.errorAt(operand, "move requires a local variable or parameter, got %s", sym.Kind)
+		return invalidType
+	}
+	if !c.typeIsNonCopyable(t) {
+		return t
+	}
+	if sym.Captured {
+		c.errorAt(operand, "cannot move %s: it is captured by a lambda", sym.Name)
+		return t
+	}
+	if c.move.declLoopDepth[sym] < c.loopDepth {
+		c.errorAt(operand, "cannot move %s inside a loop: it was declared outside this loop, and a later iteration could move an already-moved value", sym.Name)
+		return t
+	}
+	c.move.moved[sym] = true
+	return t
 }
 
 // checkUnaryExpr types `-`/`!`/`&`/`*`. Unary `-` works on any numeric type
@@ -4160,7 +4480,7 @@ func firstUnexportedField(tree *ast.Tree, info *StructInfo, fields []ast.NodeInd
 
 // checkCallExpr type-checks a call: builtin print (special-cased - see
 // isPrintCall), an explicit numeric conversion `T(x)` (checkConversionCall),
-// a free function, a method call (`p.move()`), or an indirect call through
+// a free function, a method call (`p.translate()`), or an indirect call through
 // a function-typed value (`fn(1, 2)` where fn is a variable/parameter, or
 // any other expression whose value is itself a function - see
 // funcSigForCall). Argument count and each argument's type are checked
@@ -4858,7 +5178,7 @@ func (c *checker) funcSigForCall(callee ast.NodeIndex) (funcSignature, bool) {
 }
 
 // methodSigForCallee resolves a call's callee when it's a MemberExpr - an
-// ordinary method call (`p.move()`), a package-qualified function call
+// ordinary method call (`p.translate()`), a package-qualified function call
 // (`mathutils.Add()`, see resolve.go's resolvePackageMemberExpr), or an
 // ordinary struct field (isField=true) - all three go through resolveMember,
 // which already tells them apart internally.
@@ -4871,7 +5191,7 @@ func (c *checker) funcSigForCall(callee ast.NodeIndex) (funcSignature, bool) {
 // reports a real diagnostic only for the definitively-terminal case (a
 // package member that isn't a function at all); a plain struct field just
 // reports isField=true and leaves the "is it actually callable" verdict to
-// the caller. This intentionally never touches method values (`p.move`
+// the caller. This intentionally never touches method values (`p.translate`
 // referenced uncalled) - that's a different node shape entirely
 // (checkMemberExpr's own value-position check, which still rejects it
 // exactly as before) and is out of scope here.
@@ -5384,6 +5704,60 @@ func mustYieldEveryPath(tree *ast.Tree, info *Info, n ast.NodeIndex) bool {
 	default:
 		return false
 	}
+}
+
+// branchDivertsControl reports whether every reachable path through n (a
+// single statement, possibly a Block) ends in a return/break/continue - i.e.
+// never falls through to whatever follows it. checkIfStmt/checkMatchDispatch's
+// own move-tracking merge test: a branch that diverts never reaches the join
+// point at all, so its own moved-from symbols can never actually race
+// whatever the other, non-diverting branch(es) left there.
+//
+// Same recursive shape as isTerminatingStmt/mustYieldEveryPath, one node
+// kind over - unlike isTerminatingStmt (scoped to "does the function always
+// return", where break/continue don't count since they don't return from
+// it), break/continue very much do count here.
+func branchDivertsControl(tree *ast.Tree, info *Info, n ast.NodeIndex) bool {
+	if n == ast.InvalidNode {
+		return false
+	}
+	switch tree.Nodes[n].Kind {
+	case enums.NodeKinds.ReturnStmt, enums.NodeKinds.BreakStmt, enums.NodeKinds.ContinueStmt:
+		return true
+	case enums.NodeKinds.ForStmt:
+		cond := tree.Child(n, 1)
+		body := tree.Child(n, 3)
+		return cond == ast.InvalidNode && !forHasOwnBreak(tree, body)
+	case enums.NodeKinds.RangeForStmt:
+		return false
+	case enums.NodeKinds.IfStmt:
+		elseBranch := tree.Child(n, 2)
+		if elseBranch == ast.InvalidNode {
+			return false
+		}
+		return branchDivertsControl(tree, info, tree.Child(n, 1)) && branchDivertsControl(tree, info, elseBranch)
+	case enums.NodeKinds.MatchStmt:
+		return matchArmsAllTerminate(tree, info, n, func(body ast.NodeIndex) bool {
+			return branchDivertsControl(tree, info, body)
+		})
+	case enums.NodeKinds.Block:
+		stmts := tree.Children(n)
+		if len(stmts) == 0 {
+			return false
+		}
+		return branchDivertsControl(tree, info, stmts[len(stmts)-1])
+	default:
+		return false
+	}
+}
+
+// matchIsExhaustive reports whether n (a MatchStmt) covers every possible
+// subject value - a wildcard arm, or (for an enum subject) every variant
+// covered - reusing matchArmsAllTerminate's own exhaustiveness computation
+// with an armTerminates that's trivially always true, so the result reduces
+// to exactly the exhaustiveness half of that check.
+func matchIsExhaustive(tree *ast.Tree, info *Info, n ast.NodeIndex) bool {
+	return matchArmsAllTerminate(tree, info, n, func(ast.NodeIndex) bool { return true })
 }
 
 // patternVariantSym returns the Symbol a match arm's own pattern resolved to

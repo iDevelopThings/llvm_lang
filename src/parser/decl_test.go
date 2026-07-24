@@ -57,11 +57,11 @@ func TestDeclShape(t *testing.T) {
 		},
 		{
 			name: "method with receiver, using this",
-			src:  "func (Point) move(dx int, dy int) { this.x = this.x + dx }",
+			src:  "func (Point) translate(dx int, dy int) { this.x = this.x + dx }",
 			want: "" +
 				"FuncDecl \"func\"\n" +
 				"  Ident \"Point\"\n" +
-				"  Ident \"move\"\n" +
+				"  Ident \"translate\"\n" +
 				"  ParamList\n" +
 				"    Param\n" +
 				"      Ident \"dx\"\n" +
@@ -470,7 +470,7 @@ func TestParseFileEndToEnd(t *testing.T) {
 	y int
 }
 
-func (Point) move(dx int, dy int) {
+func (Point) translate(dx int, dy int) {
 	this.x = this.x + dx
 	this.y = this.y + dy
 }

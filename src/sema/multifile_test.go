@@ -73,8 +73,8 @@ func TestMultiFile_StructAcrossFiles(t *testing.T) {
 // from yet another file.
 func TestMultiFile_MethodAcrossFiles(t *testing.T) {
 	checkPackageSrcs(t, [][2]string{
-		{"caller.llx", "func use() int {\n\tp := Point{1, 2}\n\tp.move(3, 4)\n\treturn p.x\n}\n"},
-		{"methods.llx", "func (Point) move(dx int, dy int) {\n\tthis.x = this.x + dx\n\tthis.y = this.y + dy\n}\n"},
+		{"caller.llx", "func use() int {\n\tp := Point{1, 2}\n\tp.translate(3, 4)\n\treturn p.x\n}\n"},
+		{"methods.llx", "func (Point) translate(dx int, dy int) {\n\tthis.x = this.x + dx\n\tthis.y = this.y + dy\n}\n"},
 		{"point.llx", "struct Point {\n\tx int\n\ty int\n}\n"},
 	})
 }

@@ -174,7 +174,7 @@ func f() int {
 }
 
 // TestAutoDerefMethodCallMutatesThroughPointer covers a method call through
-// a pointer receiver (`p.move(...)` where p is `*Point`) actually mutating
+// a pointer receiver (`p.translate(...)` where p is `*Point`) actually mutating
 // the shared heap allocation - proof the receiver address passed to the
 // method is the real pointee address, not a copy.
 func TestAutoDerefMethodCallMutatesThroughPointer(t *testing.T) {
@@ -189,14 +189,14 @@ struct Point {
 	}
 }
 
-func (Point) move(dx int, dy int) {
+func (Point) translate(dx int, dy int) {
 	this.x = this.x + dx
 	this.y = this.y + dy
 }
 
 func f() int {
 	p := new Point(1, 2)
-	p.move(10, 20)
+	p.translate(10, 20)
 	return p.x + p.y
 }
 `)

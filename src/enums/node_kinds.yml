@@ -66,3 +66,4 @@ values:
   - name: YieldReturnType
   - name: AwaitStmt
   - name: CFuncType
+  - name: MoveExpr

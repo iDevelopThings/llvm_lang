@@ -1427,7 +1427,7 @@ func TestCompileAndRunPackage_MultipleFiles(t *testing.T) {
 		{Name: "main.llx", Src: `
 func main() int {
 	p := Point{1, 2}
-	p.move(10, 20)
+	p.translate(10, 20)
 	return double(p.x) + p.y
 }
 `},
@@ -1437,7 +1437,7 @@ struct Point {
 	y int
 }
 
-func (Point) move(dx int, dy int) {
+func (Point) translate(dx int, dy int) {
 	this.x = this.x + dx
 	this.y = this.y + dy
 }

@@ -183,14 +183,14 @@ func TestBarePrintReferenceIsStillError(t *testing.T) {
 
 func TestBareMethodReferenceIsStillError(t *testing.T) {
 	// Method values remain explicitly out of scope this round (see
-	// LANGUAGE.md) - only a MemberExpr *call* (`p.move()`) is legal; `p.move`
+	// LANGUAGE.md) - only a MemberExpr *call* (`p.translate()`) is legal; `p.translate`
 	// alone must still be rejected exactly as before. Also doubles as a
 	// regression test for the func-typed-struct-field call fix above (see
 	// TestCallThroughFuncTypedFieldOk): that fix only ever adds a fallback for
 	// a MemberExpr *callee* that resolves to an ordinary field, never touches
 	// this uncalled-value-position check at all, so a bare method reference
 	// must remain exactly as rejected as before.
-	src := pointWithMoveSrc + "func f() {\n\tp := Point{1, 2}\n\tvar a int = p.move\n}\n"
+	src := pointWithMoveSrc + "func f() {\n\tp := Point{1, 2}\n\tvar a int = p.translate\n}\n"
 	expectCheckErrors(t, src, 1)
 }
 

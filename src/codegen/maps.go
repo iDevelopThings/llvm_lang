@@ -355,7 +355,7 @@ func (g *Generator) genRangeForMap(keyNode, valueNode, subjectNode, bodyNode ast
 	g.builder.SetInsertPointAtEnd(bodyBB)
 	bodyIdx := g.builder.CreateLoad(g.i32Ty, idxAddr, "")
 	bodyBucketAddr := g.builder.CreateInBoundsGEP(bucketTy, bucketsPtr, []llvm.Value{bodyIdx}, "")
-	preBindBase := len(g.destructors)
+	preBindBase := g.snapshotDestructorScope()
 	if keyNode != ast.InvalidNode {
 		keyVal := g.builder.CreateLoad(g.llvmType(keyType), g.builder.CreateStructGEP(bucketTy, bodyBucketAddr, 1, ""), "")
 		g.bindRangeVar(keyNode, keyVal)
@@ -373,7 +373,7 @@ func (g *Generator) genRangeForMap(keyNode, valueNode, subjectNode, bodyNode ast
 	bodyTerm := g.genBlock(bodyNode)
 	g.loopStack = g.loopStack[:len(g.loopStack)-1]
 	if !bodyTerm {
-		g.unwindDestructorsTo(preBindBase)
+		g.unwindDestructorsToScope(preBindBase)
 		g.builder.CreateBr(postBB)
 	}
 

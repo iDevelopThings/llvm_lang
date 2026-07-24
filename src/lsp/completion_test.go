@@ -82,7 +82,7 @@ func TestCompletion_StructMethodsIncluded(t *testing.T) {
 	src := `struct Point {
 	x int
 }
-func (Point) move(dx int) {
+func (Point) translate(dx int) {
 	this.x = this.x + dx
 }
 
@@ -98,12 +98,12 @@ func f(p Point) int {
 
 	items := w.Completion(path, pos)
 	labels := completionLabels(items)
-	if got, want := labels, []string{"move", "x"}; !slices.Equal(got, want) {
+	if got, want := labels, []string{"translate", "x"}; !slices.Equal(got, want) {
 		t.Errorf("completion labels at p.<cursor> = %v, want %v (field + method)", got, want)
 	}
 	for _, it := range items {
-		if it.Label == "move" && *it.Kind != protocol.CompletionItemKindMethod {
-			t.Errorf("move's Kind = %v, want CompletionItemKindMethod", *it.Kind)
+		if it.Label == "translate" && *it.Kind != protocol.CompletionItemKindMethod {
+			t.Errorf("translate's Kind = %v, want CompletionItemKindMethod", *it.Kind)
 		}
 		if it.Label == "x" && *it.Kind != protocol.CompletionItemKindField {
 			t.Errorf("x's Kind = %v, want CompletionItemKindField", *it.Kind)

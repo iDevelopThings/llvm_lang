@@ -182,6 +182,8 @@ func parseIdentExpr(p *Parser) ast.NodeIndex {
 		return p.parseFuncLit()
 	case enums.Keywords.New:
 		return p.parseNewExpr()
+	case enums.Keywords.Move:
+		return p.parseMoveExpr()
 	case enums.Keywords.Match:
 		return p.parseMatchExpr()
 	case enums.Keywords.Range:
@@ -251,6 +253,27 @@ func (p *Parser) parseNewExpr() ast.NodeIndex {
 		End:   p.tree.SpanOf(inner).End,
 	}
 	return p.tree.NewNode(enums.NodeKinds.NewExpr, kwTok, span, inner)
+}
+
+// parseMoveExpr parses `move x` (see LANGUAGE.md's "Destructors" section) -
+// x must be a bare identifier; parsing the operand at precPostfix (rather
+// than just consuming a single identifier token) lets a wrong shape like
+// `move this.field`/`move arr[i]`/`move (x)` still parse as one contiguous
+// expression, so it can be rejected here with one clean diagnostic instead
+// of leaving a trailing `.field`/`[i]`/etc. for the statement parser to
+// stumble over. sema never re-reports this - see checkMoveExpr.
+func (p *Parser) parseMoveExpr() ast.NodeIndex {
+	kwTok := p.expectKeyword(enums.Keywords.Move)
+	operand := p.parseExpr(precPostfix)
+	if p.tree.Nodes[operand].Kind != enums.NodeKinds.Ident {
+		span := p.tree.SpanOf(operand)
+		p.errorAtSpan(span.Start, span.End, "move requires a plain variable name, not a more complex expression")
+	}
+	span := ast.Span{
+		Start: kwTok.Start,
+		End:   p.tree.SpanOf(operand).End,
+	}
+	return p.tree.NewNode(enums.NodeKinds.MoveExpr, kwTok, span, operand)
 }
 
 // parseMatchExpr parses `match` in EXPRESSION position (see LANGUAGE.md's

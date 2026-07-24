@@ -880,7 +880,7 @@ func TestMemberAssignToField(t *testing.T) {
 }
 
 const pointWithMoveSrc = pointSrc +
-	"func (Point) move(dx int, dy int) {\n" +
+	"func (Point) translate(dx int, dy int) {\n" +
 	"\tthis.x = this.x + dx\n" +
 	"\tthis.y = this.y + dy\n" +
 	"}\n"
@@ -912,7 +912,7 @@ func TestThisTypedAsReceiverStruct(t *testing.T) {
 // already goes through) must keep making this.field/this.method() work
 // completely unchanged.
 func TestThisFieldAndMethodAccessStillWorkAsPointer(t *testing.T) {
-	src := pointWithMoveSrc + "func f() {\n\tp := Point{1, 2}\n\tp.move(1, 1)\n\tvar a int = p.x\n}\n"
+	src := pointWithMoveSrc + "func f() {\n\tp := Point{1, 2}\n\tp.translate(1, 1)\n\tvar a int = p.x\n}\n"
 	checkSrc(t, src)
 }
 
@@ -944,17 +944,17 @@ func TestThisPassableAsPointerArgument(t *testing.T) {
 }
 
 func TestMethodCallOk(t *testing.T) {
-	src := pointWithMoveSrc + "func f() {\n\tp := Point{1, 2}\n\tp.move(1, 1)\n}\n"
+	src := pointWithMoveSrc + "func f() {\n\tp := Point{1, 2}\n\tp.translate(1, 1)\n}\n"
 	checkSrc(t, src)
 }
 
 func TestMethodCallArgCountMismatch(t *testing.T) {
-	src := pointWithMoveSrc + "func f() {\n\tp := Point{1, 2}\n\tp.move(1)\n}\n"
+	src := pointWithMoveSrc + "func f() {\n\tp := Point{1, 2}\n\tp.translate(1)\n}\n"
 	expectCheckErrors(t, src, 1)
 }
 
 func TestMethodCallArgTypeMismatch(t *testing.T) {
-	src := pointWithMoveSrc + "func f() {\n\tp := Point{1, 2}\n\tp.move(1, \"x\")\n}\n"
+	src := pointWithMoveSrc + "func f() {\n\tp := Point{1, 2}\n\tp.translate(1, \"x\")\n}\n"
 	expectCheckErrors(t, src, 1)
 }
 
@@ -964,7 +964,7 @@ func TestCallingFieldAsMethodIsError(t *testing.T) {
 }
 
 func TestAccessingMethodAsFieldIsError(t *testing.T) {
-	src := pointWithMoveSrc + "func f() {\n\tp := Point{1, 2}\n\tvar a int = p.move\n}\n"
+	src := pointWithMoveSrc + "func f() {\n\tp := Point{1, 2}\n\tvar a int = p.translate\n}\n"
 	expectCheckErrors(t, src, 1)
 }
 

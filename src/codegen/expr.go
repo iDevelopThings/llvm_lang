@@ -723,11 +723,29 @@ func (g *Generator) genExpr(n ast.NodeIndex) llvm.Value {
 		return g.genFuncLit(n)
 	case enums.NodeKinds.NewExpr:
 		return g.genNewExpr(n)
+	case enums.NodeKinds.MoveExpr:
+		return g.genMoveExpr(n)
 	case enums.NodeKinds.MatchStmt:
 		return g.genMatchExpr(n)
 	default:
 		panic("codegen: cannot generate an expression of kind " + g.tree.Nodes[n].Kind.String())
 	}
+}
+
+// genMoveExpr lowers `move x` (see LANGUAGE.md's "Destructors" section) - an
+// ordinary load of x's own current value, plus removing x's own destructor-
+// stack entry (removeDestructorEntry, coroutine.go - exactly what an
+// explicit `delete` already does for a coroutine handle). Nothing else is
+// needed: sema has already proven no later reference to x is reachable, and
+// whatever consumes this value pushes its own destructor entry the same way
+// any other freshly-owned value already does (pushDestructorEntry, func.go).
+func (g *Generator) genMoveExpr(n ast.NodeIndex) llvm.Value {
+	operand := g.tree.Child(n, 0)
+	val := g.genLoad(operand)
+	if sym, ok := g.info.Refs[operand]; ok {
+		g.removeDestructorEntry(sym)
+	}
+	return val
 }
 
 // genNumberLit lowers n to its already-resolved concrete numeric constant.
@@ -1517,10 +1535,10 @@ func (g *Generator) genFuncCall(calleeNode ast.NodeIndex, argNodes []ast.NodeInd
 	return result
 }
 
-// genMethodCall lowers `p.move(...)`: the receiver's address (not its
+// genMethodCall lowers `p.translate(...)`: the receiver's address (not its
 // loaded value - see AGENTS.md, every method is implicitly by-reference)
 // becomes the call's hidden first argument. genReceiverAddr auto-derefs a
-// pointer-typed receiver (`ptr.move(...)` where ptr is `*Point` - see
+// pointer-typed receiver (`ptr.translate(...)` where ptr is `*Point` - see
 // LANGUAGE.md's "Pointers" section), so this needs no awareness of the
 // distinction itself.
 func (g *Generator) genMethodCall(calleeNode ast.NodeIndex, argNodes []ast.NodeIndex) llvm.Value {

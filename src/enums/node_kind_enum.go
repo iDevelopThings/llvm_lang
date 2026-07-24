@@ -71,6 +71,7 @@ const (
 	NodeKindYieldReturnType   NodeKind = 55
 	NodeKindAwaitStmt         NodeKind = 56
 	NodeKindCFuncType         NodeKind = 57
+	NodeKindMoveExpr          NodeKind = 58
 )
 
 type NodeKindContainer struct {
@@ -132,6 +133,7 @@ type NodeKindContainer struct {
 	YieldReturnType   NodeKind
 	AwaitStmt         NodeKind
 	CFuncType         NodeKind
+	MoveExpr          NodeKind
 }
 
 // NodeKinds is the entry point for the NodeKind enum.
@@ -194,6 +196,7 @@ var NodeKinds = NodeKindContainer{
 	YieldReturnType:   NodeKindYieldReturnType,
 	AwaitStmt:         NodeKindAwaitStmt,
 	CFuncType:         NodeKindCFuncType,
+	MoveExpr:          NodeKindMoveExpr,
 }
 
 // NodeKindInfo is the static metadata attached to a NodeKind.
@@ -435,6 +438,10 @@ var nodeKindInfos = map[NodeKind]NodeKindInfo{
 		NodeKind: NodeKindCFuncType,
 		Name:     "CFuncType",
 	},
+	NodeKindMoveExpr: {
+		NodeKind: NodeKindMoveExpr,
+		Name:     "MoveExpr",
+	},
 }
 
 var nodeKindValues = []NodeKind{
@@ -496,6 +503,7 @@ var nodeKindValues = []NodeKind{
 	NodeKindYieldReturnType,
 	NodeKindAwaitStmt,
 	NodeKindCFuncType,
+	NodeKindMoveExpr,
 }
 
 var nodeKindByName = map[string]NodeKind{
@@ -557,6 +565,7 @@ var nodeKindByName = map[string]NodeKind{
 	"yieldreturntype":   NodeKindYieldReturnType,
 	"awaitstmt":         NodeKindAwaitStmt,
 	"cfunctype":         NodeKindCFuncType,
+	"moveexpr":          NodeKindMoveExpr,
 }
 
 // Values returns every declared value in declaration order.
