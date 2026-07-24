@@ -1,0 +1,8 @@
+# Force LF line endings for every text file, regardless of core.autocrlf on
+# whatever machine/agent checks this repo out - this repo's own
+# core.autocrlf=true (a Windows-friendly git default) was converting LF to
+# CRLF in the working tree on every checkout/stash/pull, which gofmt (LF-only)
+# then correctly flagged as "unformatted" even though the actual Go code was
+# fine - pure line-ending noise that repeatedly confused agents working in
+# this repo into thinking there was a real formatting problem to fix.
+* text=auto eol=lf
