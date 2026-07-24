@@ -248,3 +248,43 @@ func TestNonCopyableMultiAssignExistingValueIsError(t *testing.T) {
 		"func f() {\n\th := FileHandle(1)\n\tvar a FileHandle\n\tvar b int\n\ta, b = h, 2\n\tprint(a.raw)\n\tprint(b)\n}\n"
 	expectCheckErrors(t, src, 1)
 }
+
+// TestNonCopyableParallelMultiShortVarDeclFreshValueIsLegal is the parallel
+// (Go-style, LANGUAGE.md's "General Go-style parallel multi-assignment"
+// section) `:=` counterpart to TestNonCopyableMultiShortVarDeclFreshCallIsLegal:
+// unlike a multi-return call, each side of `a, b := ..., ...` is an
+// independent expression, checked at its own position, not the shared
+// MultiValueExpr node as a whole.
+func TestNonCopyableParallelMultiShortVarDeclFreshValueIsLegal(t *testing.T) {
+	src := fileHandleSrc +
+		"func f() {\n\ta, b := FileHandle(1), 2\n\tprint(a.raw)\n\tprint(b)\n}\n"
+	checkSrc(t, src)
+}
+
+// TestNonCopyableParallelMultiAssignFreshValueIsLegal is the `=` counterpart.
+func TestNonCopyableParallelMultiAssignFreshValueIsLegal(t *testing.T) {
+	src := fileHandleSrc +
+		"func f() {\n\tvar a FileHandle\n\tvar b int\n\ta, b = FileHandle(1), 2\n\tprint(a.raw)\n\tprint(b)\n}\n"
+	checkSrc(t, src)
+}
+
+// TestNonCopyableParallelMultiShortVarDeclExistingValueIsError is
+// TestNonCopyableMultiAssignExistingValueIsError's own `:=` counterpart -
+// proves the fix doesn't over-relax the `:=` form: an existing, non-fresh
+// value at one position of a parallel destructure is still rejected.
+func TestNonCopyableParallelMultiShortVarDeclExistingValueIsError(t *testing.T) {
+	src := fileHandleSrc +
+		"func f() {\n\th := FileHandle(1)\n\ta, b := h, 2\n\tprint(a.raw)\n\tprint(b)\n}\n"
+	expectCheckErrors(t, src, 1)
+}
+
+// TestNonCopyableParallelMultiShortVarDeclCountMismatchIsSafe proves
+// destructureSourceAt's own bounds guard (i < len(children)) is load-bearing:
+// more names than values still reports a clean "assignment mismatch"
+// diagnostic, not a panic, even though the loop over names still runs the
+// full name count against a shorter MultiValueExpr.
+func TestNonCopyableParallelMultiShortVarDeclCountMismatchIsSafe(t *testing.T) {
+	src := fileHandleSrc +
+		"func f() {\n\ta, b, c := FileHandle(1), 2\n\tprint(a.raw)\n\tprint(b)\n\tprint(c)\n}\n"
+	expectCheckErrors(t, src, 1)
+}
