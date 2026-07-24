@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"llvm_lang/src/ast"
+	"llvm_lang/src/sema"
 
 	protocol "github.com/tliron/glsp/protocol_3_16"
 )
@@ -15,23 +16,24 @@ import (
 // somewhere in the package), or pos doesn't land on a node with anything to
 // show.
 func (w *Workspace) Hover(path string, pos protocol.Position) *protocol.Hover {
-	fa, ok := w.Analysis(path)
-	if !ok || fa.Info == nil {
-		return nil
-	}
-
-	offset := positionToByteOffset(fa.Tree.File.Src, pos)
-	n := fa.Tree.NodeAt(offset)
-	if n == ast.InvalidNode {
+	fa, n, ok := w.resolveNode(path, pos)
+	if !ok {
 		return nil
 	}
 
 	var lines []string
-	if sym, ok := fa.Info.Refs[n]; ok && sym != nil {
+	var sym *sema.Symbol
+	if s, ok := fa.Info.Refs[n]; ok && s != nil {
+		sym = s
 		lines = append(lines, fmt.Sprintf("**%s** `%s`", sym.Kind, sym.Name))
 	}
 	if typ, ok := fa.Info.Types[n]; ok && !typ.IsInvalid() {
 		lines = append(lines, fmt.Sprintf("type: `%s`", typ.String()))
+	}
+	if sym != nil && sym.Tree != nil && sym.Decl != ast.InvalidNode {
+		if doc := sym.Tree.DocComment(sym.Decl); doc != "" {
+			lines = append(lines, doc)
+		}
 	}
 	if len(lines) == 0 {
 		return nil

@@ -5,9 +5,11 @@ import (
 	"path/filepath"
 	"sync"
 
+	"llvm_lang/src/ast"
 	"llvm_lang/src/loader"
 
 	"github.com/spf13/afero"
+	protocol "github.com/tliron/glsp/protocol_3_16"
 )
 
 // Workspace holds every open document's live buffer content and the most
@@ -32,6 +34,11 @@ type Workspace struct {
 	// get analyzed too and their Info is just as valid to serve from cache
 	// (e.g. a definition jumping into an unopened file).
 	analysis map[string]*FileAnalysis
+
+	// nextGeneration is a monotonically increasing counter, one value
+	// consumed per OpenOrChange call - see FileAnalysis.Generation's own
+	// doc comment for why every recompute needs a distinct identity.
+	nextGeneration int
 }
 
 // NewWorkspace returns an empty Workspace rooted at the real OS filesystem,
@@ -70,7 +77,13 @@ func (w *Workspace) OpenOrChange(path, text string) (map[string]*FileAnalysis, e
 	if err != nil {
 		return nil, err
 	}
-	result, err := safeAnalyzeProgram(prog)
+
+	w.mu.Lock()
+	w.nextGeneration++
+	generation := w.nextGeneration
+	w.mu.Unlock()
+
+	result, err := safeAnalyzeProgram(prog, generation)
 	if err != nil {
 		return nil, err
 	}
@@ -95,14 +108,14 @@ func (w *Workspace) OpenOrChange(path, text string) (map[string]*FileAnalysis, e
 // request that triggered it - a much worse outcome for an interactive tool
 // than one request returning an error the editor can just retry after the
 // next edit.
-func safeAnalyzeProgram(prog *loader.Program) (result map[string]*FileAnalysis, err error) {
+func safeAnalyzeProgram(prog *loader.Program, generation int) (result map[string]*FileAnalysis, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			result = nil
 			err = fmt.Errorf("lsp: analysis panicked (likely a sema bug against in-progress source): %v", r)
 		}
 	}()
-	return analyzeProgram(prog), nil
+	return analyzeProgram(prog, generation), nil
 }
 
 // Analysis returns the most recently computed FileAnalysis for path, if any
@@ -112,6 +125,42 @@ func (w *Workspace) Analysis(path string) (*FileAnalysis, bool) {
 	defer w.mu.Unlock()
 	fa, ok := w.analysis[path]
 	return fa, ok
+}
+
+// resolveNode is the "what is under the cursor, and does it have a real
+// checked Info to query" preamble Hover/Definition/References all start
+// with identically: look up path's own FileAnalysis, bail if analysis never
+// reached type-checking (fa.Info == nil - a parse/resolve error somewhere in
+// the package, see FileAnalysis's own doc comment), convert pos to a byte
+// offset, and find the innermost node there. ok is false whenever there's
+// nothing meaningful to query - every caller can treat that uniformly as
+// "return nil/no results" without re-deriving why.
+func (w *Workspace) resolveNode(path string, pos protocol.Position) (fa *FileAnalysis, n ast.NodeIndex, ok bool) {
+	fa, ok = w.Analysis(path)
+	if !ok || fa.Info == nil {
+		return nil, ast.InvalidNode, false
+	}
+	offset := positionToByteOffset(fa.Tree.File.Src, pos)
+	n = fa.Tree.NodeAt(offset)
+	if n == ast.InvalidNode {
+		return nil, ast.InvalidNode, false
+	}
+	return fa, n, true
+}
+
+// analysisSnapshot returns every cached FileAnalysis at the moment of the
+// call, as a defensive copy of the slice (not the *FileAnalysis values
+// themselves, which are never mutated after creation) - used by
+// Workspace.References, which needs to scan the whole cache without holding
+// w.mu for the duration of that scan.
+func (w *Workspace) analysisSnapshot() []*FileAnalysis {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := make([]*FileAnalysis, 0, len(w.analysis))
+	for _, fa := range w.analysis {
+		out = append(out, fa)
+	}
+	return out
 }
 
 // Forget drops path's cached analysis (didClose) - the buffer overlay

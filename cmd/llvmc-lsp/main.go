@@ -57,7 +57,9 @@ func main() {
 		TextDocumentDidChange:           didChange,
 		TextDocumentDidClose:            didClose,
 		TextDocumentHover:               hover,
+		TextDocumentDeclaration:         declaration,
 		TextDocumentDefinition:          definition,
+		TextDocumentReferences:          references,
 		TextDocumentSemanticTokensFull:  semanticTokensFull,
 	}
 
@@ -203,6 +205,32 @@ func hover(context *glsp.Context, params *protocol.HoverParams) (*protocol.Hover
 	return workspace.Hover(path, params.Position), nil
 }
 
+// declaration reuses Definition outright: this language has no separate
+// forward-declaration concept the way C/C++ headers do (every func/struct/
+// var has exactly one declaration site, same as Go) - "go to declaration"
+// and "go to definition" always mean the identical location here, so there's
+// no reason for a second, parallel implementation. Wired up anyway (rather
+// than leaving the handler nil) since some clients call textDocument/
+// declaration specifically for certain gestures rather than falling back to
+// textDocument/definition on their own.
+//
+// textDocument/implementation is deliberately NOT wired up at all: this
+// language has no interface/abstract-dispatch concept whatsoever (no
+// interface type, no virtual methods - see LANGUAGE.md) for "go to
+// implementation" to mean anything about. There's no reasonable target it
+// could ever return.
+func declaration(context *glsp.Context, params *protocol.DeclarationParams) (any, error) {
+	path, err := lsp.PathFromURI(params.TextDocument.URI)
+	if err != nil {
+		return nil, err
+	}
+	loc := workspace.Definition(path, params.Position)
+	if loc == nil {
+		return nil, nil
+	}
+	return *loc, nil
+}
+
 func definition(context *glsp.Context, params *protocol.DefinitionParams) (any, error) {
 	path, err := lsp.PathFromURI(params.TextDocument.URI)
 	if err != nil {
@@ -213,6 +241,14 @@ func definition(context *glsp.Context, params *protocol.DefinitionParams) (any, 
 		return nil, nil
 	}
 	return *loc, nil
+}
+
+func references(context *glsp.Context, params *protocol.ReferenceParams) ([]protocol.Location, error) {
+	path, err := lsp.PathFromURI(params.TextDocument.URI)
+	if err != nil {
+		return nil, err
+	}
+	return workspace.References(path, params.Position, params.Context.IncludeDeclaration), nil
 }
 
 func semanticTokensFull(context *glsp.Context, params *protocol.SemanticTokensParams) (*protocol.SemanticTokens, error) {

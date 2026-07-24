@@ -51,14 +51,21 @@ var semanticTokenTypeNames = []string{
 	semTokProperty:   string(protocol.SemanticTokenTypeProperty),
 }
 
-// SemanticTokensLegend is this server's fixed token-type legend, advertised
-// once at initialize time (see cmd/llvmc-lsp/main.go) and referenced by
-// index from every textDocument/semanticTokens/full response. No modifiers
-// are used this round - an empty TokenModifiers legend is valid LSP.
+// Semantic token modifier legend - bit position is the modifier bit set in
+// each token's own modifiers bitmask.
+const modReadonly = 1 << 0
+
+var semanticTokenModifierNames = []string{
+	string(protocol.SemanticTokenModifierReadonly),
+}
+
+// SemanticTokensLegend is this server's fixed token-type/modifier legend,
+// advertised once at initialize time (see cmd/llvmc-lsp/main.go) and
+// referenced by index from every textDocument/semanticTokens/full response.
 func SemanticTokensLegend() protocol.SemanticTokensLegend {
 	return protocol.SemanticTokensLegend{
 		TokenTypes:     semanticTokenTypeNames,
-		TokenModifiers: []string{},
+		TokenModifiers: semanticTokenModifierNames,
 	}
 }
 
@@ -68,6 +75,7 @@ type rawToken struct {
 	line, char int // both already UTF-16-based (see byteOffsetToPosition)
 	length     int // in UTF-16 units, not bytes
 	typeIdx    int
+	modifiers  int
 }
 
 // SemanticTokens answers a textDocument/semanticTokens/full request: every
@@ -75,24 +83,36 @@ type rawToken struct {
 // delta format (deltaLine, deltaStartChar, length, tokenType, tokenModifiers
 // per token, sorted by position). nil when path has no analysis yet.
 //
-// Two independent passes feed the token list: walking the already-parsed
-// Tree (keywords, identifiers - refined via Info.Refs when resolved,
-// operators, literals - see collectNodeTokens) and a fresh, throwaway
-// re-lex of the same source purely for comment trivia (see
-// collectCommentTokens - comments aren't represented as ast.Node's at all,
-// see ast.Node's own doc comment, so they can't be reached by walking the
-// tree). Re-lexing is cheap relative to the rest of this request (same
-// order of cost as the original parse - see BENCHMARKS.md) and deliberately
-// uses its own fresh *lexer.File rather than the Tree's own File, so it
-// can't perturb that File's already-built trivia arena/line table.
+// Three passes feed the token list: a first pass over the already-parsed
+// Tree collecting every SymVar/SymParam/SymReceiver that's ever the target
+// of a plain assignment/inc-dec anywhere (see collectReassignedSymbols) -
+// needed before classification, not during it, since a variable can be
+// reassigned anywhere in the file, not only at or after the point being
+// classified; a second pass over the same Tree that actually classifies
+// every node's own "main" token (keywords, identifiers - refined via
+// Info.Refs when resolved, using the reassigned set to decide the readonly
+// modifier for a variable/parameter - operators, literals - see
+// collectNodeTokens); and a fresh, throwaway re-lex of the same source
+// purely for comment trivia (see collectCommentTokens - comments aren't
+// represented as ast.Nodes at all, see ast.Node's own doc comment, so they
+// can't be reached by walking the tree). Re-lexing is cheap relative to the
+// rest of this request (same order of cost as the original parse - see
+// BENCHMARKS.md) and deliberately uses its own fresh *lexer.File rather than
+// the Tree's own File, so it can't perturb that File's already-built trivia
+// arena/line table.
 func (w *Workspace) SemanticTokens(path string) *protocol.SemanticTokens {
 	fa, ok := w.Analysis(path)
 	if !ok || fa.Tree == nil {
 		return nil
 	}
 
+	reassigned := make(map[*sema.Symbol]bool)
+	if fa.Info != nil {
+		collectReassignedSymbols(fa.Tree, fa.Info, fa.Tree.Root, reassigned)
+	}
+
 	var raw []rawToken
-	collectNodeTokens(fa.Tree, fa.Info, fa.Tree.Root, &raw)
+	collectNodeTokens(fa.Tree, fa.Info, fa.Tree.Root, reassigned, &raw)
 	collectCommentTokens(fa.Tree.File.Name, fa.Tree.File.Src, &raw)
 
 	sort.Slice(raw, func(i, j int) bool {
@@ -115,7 +135,7 @@ func (w *Workspace) SemanticTokens(path string) *protocol.SemanticTokens {
 			protocol.UInteger(deltaChar),
 			protocol.UInteger(t.length),
 			protocol.UInteger(t.typeIdx),
-			protocol.UInteger(0), // no modifiers this round
+			protocol.UInteger(t.modifiers),
 		)
 		prevLine, prevChar = t.line, t.char
 	}
@@ -123,22 +143,71 @@ func (w *Workspace) SemanticTokens(path string) *protocol.SemanticTokens {
 	return &protocol.SemanticTokens{Data: data}
 }
 
+// collectReassignedSymbols walks tree from n, recording into out every
+// symbol that's ever the target of a plain assignment (AssignStmt,
+// MultiAssignStmt) or increment/decrement (IncDecStmt) anywhere - the
+// signal classifyIdentToken uses to decide the readonly modifier (see
+// SemanticTokens' own doc comment for why this has to be its own pass,
+// separate from classification, and modReadonly's own doc comment for why
+// that modifier matters beyond just being "more accurate": LSP4IJ's default
+// color mapping for a modifier-less "variable" token is
+// REASSIGNED_LOCAL_VARIABLE, not LOCAL_VARIABLE - visually indistinguishable
+// from a real reassignment (typically an underline) for every variable this
+// server tags, whether or not it's ever actually reassigned, unless this
+// modifier says otherwise). Only a bare Ident target counts - `p.field = v`/
+// `arr[i] = v`/`*p = v` don't reassign p/arr/p themselves - markReassignedTarget
+// checks the target's own Kind explicitly for exactly this reason: a
+// MemberExpr/IndexExpr/UnaryExpr(*) target still gets a real Info.Refs entry
+// (see typecheck.go's checkMemberExpr/checkLValue), so skipping it isn't
+// something the AssignStmt/IncDecStmt/MultiAssignStmt cases below get "for
+// free" just by shape - it has to be checked.
+func collectReassignedSymbols(tree *ast.Tree, info *sema.Info, n ast.NodeIndex, out map[*sema.Symbol]bool) {
+	if n == ast.InvalidNode {
+		return
+	}
+	switch tree.Nodes[n].Kind {
+	case enums.NodeKinds.AssignStmt,
+		enums.NodeKinds.IncDecStmt:
+		markReassignedTarget(tree, info, tree.Child(n, 0), out)
+	case enums.NodeKinds.MultiAssignStmt:
+		for _, target := range tree.MultiAssignStmtTargets(n) {
+			markReassignedTarget(tree, info, target, out)
+		}
+	}
+	for _, c := range tree.Children(n) {
+		collectReassignedSymbols(tree, info, c, out)
+	}
+}
+
+// markReassignedTarget records target's own resolved Symbol into out, but
+// only when target is itself a bare Ident - see collectReassignedSymbols'
+// own doc comment for why that Kind check is load-bearing, not redundant.
+func markReassignedTarget(tree *ast.Tree, info *sema.Info, target ast.NodeIndex, out map[*sema.Symbol]bool) {
+	if target == ast.InvalidNode || tree.Nodes[target].Kind != enums.NodeKinds.Ident {
+		return
+	}
+	sym, ok := info.Refs[target]
+	if ok && sym != nil {
+		out[sym] = true
+	}
+}
+
 // collectNodeTokens walks tree from n, classifying every node's own "main"
 // token (see ast.Node's doc comment - most kinds carry one; Block/CallExpr/
 // ParenExpr/... deliberately don't, and are skipped via the Start==End zero
 // -Token check) into out.
-func collectNodeTokens(tree *ast.Tree, info *sema.Info, n ast.NodeIndex, out *[]rawToken) {
+func collectNodeTokens(tree *ast.Tree, info *sema.Info, n ast.NodeIndex, reassigned map[*sema.Symbol]bool, out *[]rawToken) {
 	if n == ast.InvalidNode {
 		return
 	}
 	node := &tree.Nodes[n]
 	if node.Tok.Start != node.Tok.End {
-		if typeIdx, ok := classifyNodeToken(node.Tok, info, n); ok {
-			appendSpanToken(tree.File, node.Tok.Start, node.Tok.End, typeIdx, out)
+		if typeIdx, modifiers, ok := classifyNodeToken(node.Tok, info, n, reassigned); ok {
+			appendSpanToken(tree.File, node.Tok.Start, node.Tok.End, typeIdx, modifiers, out)
 		}
 	}
 	for _, c := range tree.Children(n) {
-		collectNodeTokens(tree, info, c, out)
+		collectNodeTokens(tree, info, c, reassigned, out)
 	}
 }
 
@@ -155,17 +224,17 @@ func collectNodeTokens(tree *ast.Tree, info *sema.Info, n ast.NodeIndex, out *[]
 // pass (re-lexing for punctuation generally, mirroring
 // collectCommentTokens), not just adding it to the operator case below -
 // not worth the complexity for one punctuation token this round.
-func classifyNodeToken(tok lexer.Token, info *sema.Info, n ast.NodeIndex) (int, bool) {
+func classifyNodeToken(tok lexer.Token, info *sema.Info, n ast.NodeIndex, reassigned map[*sema.Symbol]bool) (typeIdx, modifiers int, ok bool) {
 	if tok.Keyword != "" {
-		return semTokKeyword, true
+		return semTokKeyword, 0, true
 	}
 	switch tok.Lexeme {
 	case enums.Lexemes.Number:
-		return semTokNumber, true
+		return semTokNumber, 0, true
 	case enums.Lexemes.String:
-		return semTokString, true
+		return semTokString, 0, true
 	case enums.Lexemes.Identifier:
-		return classifyIdentToken(info, n)
+		return classifyIdentToken(info, n, reassigned)
 	case enums.Lexemes.Plus,
 		enums.Lexemes.Minus,
 		enums.Lexemes.Slash,
@@ -191,9 +260,9 @@ func classifyNodeToken(tok lexer.Token, info *sema.Info, n ast.NodeIndex) (int, 
 		enums.Lexemes.SlashEqual,
 		enums.Lexemes.Ampersand,
 		enums.Lexemes.Pipe:
-		return semTokOperator, true
+		return semTokOperator, 0, true
 	default:
-		return 0, false
+		return 0, 0, false
 	}
 }
 
@@ -203,37 +272,51 @@ func classifyNodeToken(tok lexer.Token, info *sema.Info, n ast.NodeIndex) (int, 
 // see the approved plan) when info is nil, or the node was never resolved
 // (an undefined-name error, or a node kind Resolve/Check deliberately never
 // populates Refs for).
-func classifyIdentToken(info *sema.Info, n ast.NodeIndex) (int, bool) {
+//
+// A SymVar/SymParam/SymReceiver that reassigned doesn't contain gets the
+// readonly modifier - see collectReassignedSymbols' own doc comment for why
+// this matters beyond mere accuracy (a client-side default-color-mapping
+// quirk, not just a nice-to-have).
+func classifyIdentToken(info *sema.Info, n ast.NodeIndex, reassigned map[*sema.Symbol]bool) (typeIdx, modifiers int, ok bool) {
 	if info == nil {
-		return semTokVariable, true
+		return semTokVariable, 0, true
 	}
-	sym, ok := info.Refs[n]
-	if !ok || sym == nil {
-		return semTokVariable, true
+	sym, refOK := info.Refs[n]
+	if !refOK || sym == nil {
+		return semTokVariable, 0, true
 	}
 	switch sym.Kind {
 	case sema.SymFunc:
-		return semTokFunction, true
+		return semTokFunction, 0, true
 	case sema.SymStruct:
-		return semTokStruct, true
+		return semTokStruct, 0, true
 	case sema.SymEnum:
-		return semTokEnum, true
+		return semTokEnum, 0, true
 	case sema.SymEnumVariant:
-		return semTokEnumMember, true
+		return semTokEnumMember, 0, true
 	case sema.SymField:
-		return semTokProperty, true
+		return semTokProperty, 0, true
 	case sema.SymBuiltinType:
-		return semTokType, true
+		return semTokType, 0, true
 	case sema.SymPackage:
-		return semTokNamespace, true
+		return semTokNamespace, 0, true
 	case sema.SymConstructor,
 		sema.SymDestructor:
-		return semTokMethod, true
+		return semTokMethod, 0, true
 	case sema.SymParam:
-		return semTokParameter, true
+		return semTokParameter, variableModifiers(sym, reassigned), true
 	default: // SymVar, SymReceiver, SymBuiltinValue
-		return semTokVariable, true
+		return semTokVariable, variableModifiers(sym, reassigned), true
 	}
+}
+
+// variableModifiers returns modReadonly iff sym is never reassigned
+// anywhere in the file (see collectReassignedSymbols).
+func variableModifiers(sym *sema.Symbol, reassigned map[*sema.Symbol]bool) int {
+	if reassigned[sym] {
+		return 0
+	}
+	return modReadonly
 }
 
 // collectCommentTokens re-lexes src (see SemanticTokens' own doc comment for
@@ -248,7 +331,7 @@ func collectCommentTokens(name, src string, out *[]rawToken) {
 			if tr.Kind != lexer.TriviaKinds.LineComment && tr.Kind != lexer.TriviaKinds.BlockComment {
 				continue
 			}
-			appendSpanToken(file, tr.Start, tr.End, semTokComment, out)
+			appendSpanToken(file, tr.Start, tr.End, semTokComment, 0, out)
 		}
 		if tok.Lexeme == enums.Lexemes.EOF {
 			break
@@ -261,16 +344,17 @@ func collectCommentTokens(name, src string, out *[]rawToken) {
 // semantic token to be single-line (this can only actually happen for a
 // multi-line block comment; every other token kind this package classifies
 // is inherently single-line already).
-func appendSpanToken(file *lexer.File, start, end lexer.Pos, typeIdx int, out *[]rawToken) {
+func appendSpanToken(file *lexer.File, start, end lexer.Pos, typeIdx, modifiers int, out *[]rawToken) {
 	startPos := byteOffsetToPosition(file, start)
 	endPos := byteOffsetToPosition(file, end)
 	if startPos.Line != endPos.Line {
 		return
 	}
 	*out = append(*out, rawToken{
-		line:    int(startPos.Line),
-		char:    int(startPos.Character),
-		length:  int(endPos.Character - startPos.Character),
-		typeIdx: typeIdx,
+		line:      int(startPos.Line),
+		char:      int(startPos.Character),
+		length:    int(endPos.Character - startPos.Character),
+		typeIdx:   typeIdx,
+		modifiers: modifiers,
 	})
 }

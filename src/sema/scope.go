@@ -5,6 +5,7 @@ import (
 	"unicode/utf8"
 
 	"llvm_lang/src/ast"
+	"llvm_lang/src/enums"
 )
 
 // ScopeKind classifies a Scope by what introduces it, mirroring Go's own
@@ -347,6 +348,62 @@ type Symbol struct {
 	// order, so an importer's own imports are always already-resolved
 	// PackageResults by the time its file scope is built).
 	Package *PackageResult
+}
+
+// DeclaringNameNode returns the specific node within s.Decl that s's own
+// declaring Info.Refs entry is actually keyed by - distinct from Decl itself
+// whenever Decl is a *container* node (VarDecl, FuncDecl, StructDecl, ...)
+// rather than the name occurrence directly, which is the common case: Refs
+// is keyed by nameNode, a child of the n that's also passed as Decl (see
+// resolve.go's declareLocal) - so a caller trying to recognize "is this
+// particular Refs entry the declaring occurrence, or a later reference"
+// (e.g. an LSP find-references implementation excluding the declaration, or
+// a future rename refactor) needs this, not s.Decl directly, or it will
+// simply never match anything.
+//
+// A handful of SymbolKinds are their own exception, each documented at its
+// own declaring call site in resolve.go - and one non-exception frequently
+// mistaken for one: a MultiShortVarDecl-destructured name, where Decl and
+// the Refs key are deliberately the very same Ident node already (see
+// declareLocal's own doc comment), caught here by the same "Decl's own Kind
+// is already Ident" check as any of the real exceptions below, without
+// needing its own separate case.
+//
+//   - SymEnumVariant, SymPackage, SymConstructor, SymDestructor: each IS its
+//     own declaring Info.Refs entry directly - an EnumVariant's own Tok is
+//     its name; an ImportDecl has no separate name node; a constructor/
+//     destructor has no name at all to have one (see declareEnum/
+//     buildFileScope/declareConstructor/declareDestructor).
+//   - SymFunc (a FuncDecl) / an ExternFuncDecl: the name isn't the first
+//     child (FuncDecl's own children lead with an optional receiver clause)
+//   - use FuncName/ExternFuncName instead of assuming Child(0).
+//   - everything else declareLocal ever calls Decl for (VarDecl,
+//     ShortVarDecl, Param, StructDecl, EnumDecl, Field): the name is always
+//     the first child - see ast.Node's own doc comment.
+//
+// Returns ast.InvalidNode for a predeclared symbol (Decl == ast.InvalidNode,
+// no declaration site to point at at all) or a SymReceiver ("this" has no
+// real per-occurrence declaring node of its own - see resolveFuncBody's own
+// Receiver construction, which reuses the receiver struct/enum's own Decl,
+// not something specific to "this").
+func (s *Symbol) DeclaringNameNode(tree *ast.Tree) ast.NodeIndex {
+	if s.Decl == ast.InvalidNode || s.Kind == SymReceiver {
+		return ast.InvalidNode
+	}
+	switch tree.Nodes[s.Decl].Kind {
+	case enums.NodeKinds.Ident,
+		enums.NodeKinds.EnumVariant,
+		enums.NodeKinds.ImportDecl,
+		enums.NodeKinds.ConstructorDecl,
+		enums.NodeKinds.DestructorDecl:
+		return s.Decl
+	case enums.NodeKinds.FuncDecl:
+		return tree.FuncName(s.Decl)
+	case enums.NodeKinds.ExternFuncDecl:
+		return tree.ExternFuncName(s.Decl)
+	default:
+		return tree.Child(s.Decl, 0)
+	}
 }
 
 // isExportedName reports whether name is exported by this language's

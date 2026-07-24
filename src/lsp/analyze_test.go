@@ -47,7 +47,7 @@ func main() int {
 }
 `)
 
-	out := analyzeProgram(prog)
+	out := analyzeProgram(prog, 1)
 	if len(out) != 2 {
 		t.Fatalf("len(out) = %d, want 2", len(out))
 	}
@@ -77,7 +77,7 @@ func main() int {
 }
 `)
 
-	out := analyzeProgram(prog)
+	out := analyzeProgram(prog, 1)
 	if len(out) != 2 {
 		t.Fatalf("len(out) = %d, want 2", len(out))
 	}
@@ -112,7 +112,7 @@ func main() int {
 }
 `)
 
-	out := analyzeProgram(prog)
+	out := analyzeProgram(prog, 1)
 	sawError := false
 	for path, fa := range out {
 		if fa.Info != nil {
@@ -145,7 +145,7 @@ func main() int {
 }
 `)
 
-	out := analyzeProgram(prog)
+	out := analyzeProgram(prog, 1)
 	sawError := false
 	for path, fa := range out {
 		if fa.Info == nil {

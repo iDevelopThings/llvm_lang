@@ -2,6 +2,7 @@ package ast
 
 import (
 	"iter"
+	"strings"
 
 	"llvm_lang/src/enums"
 	"llvm_lang/src/lexer"
@@ -406,4 +407,76 @@ func (t *Tree) nodeAtIn(n NodeIndex, pos lexer.Pos) NodeIndex {
 		}
 	}
 	return n
+}
+
+// LeadingToken returns n's own leftmost token - usually n.Tok directly (most
+// declaration kinds carry their own leading keyword there, see Node's own
+// doc comment), but for a kind whose Tok is unused (e.g. a struct Field,
+// whose name lives in a child Ident instead) this descends into the first
+// child until it finds the node that actually owns the leading token.
+func (t *Tree) LeadingToken(n NodeIndex) lexer.Token {
+	for {
+		node := &t.Nodes[n]
+		if node.Tok.Start == node.Span.Start {
+			return node.Tok
+		}
+		c := t.Child(n, 0)
+		if c == InvalidNode {
+			return node.Tok
+		}
+		n = c
+	}
+}
+
+// DocComment returns the doc comment immediately attached to n - the
+// contiguous run of line/block comments directly preceding n's own leading
+// token (see LeadingToken), with no blank line in between (the same
+// "attached iff adjacent" convention Go/Rust doc comments use) - or "" if n
+// has none. Each comment's own leading "//"/"/*"/"*/" delimiters are
+// stripped.
+func (t *Tree) DocComment(n NodeIndex) string {
+	trivia := t.File.Trivia(t.LeadingToken(n).LeadingTrivia)
+
+	// Walk backwards from the token, collecting the trailing contiguous
+	// run of comments - stopping at the first blank line (2+ newlines in
+	// an intervening whitespace run), which marks the comment block above
+	// it as not attached to n.
+	var comments []lexer.Trivia
+scan:
+	for i := len(trivia) - 1; i >= 0; i-- {
+		tr := trivia[i]
+		switch tr.Kind {
+		case lexer.TriviaKinds.LineComment, lexer.TriviaKinds.BlockComment:
+			comments = append(comments, tr)
+		case lexer.TriviaKinds.Whitespace:
+			if strings.Count(t.File.TriviaText(tr), "\n") >= 2 {
+				break scan // blank line - nothing further back is attached
+			}
+		}
+	}
+	if len(comments) == 0 {
+		return ""
+	}
+
+	lines := make([]string, len(comments))
+	for i, tr := range comments {
+		// comments was built back-to-front (nearest n first) - reverse
+		// into source order as we fill lines.
+		lines[len(comments)-1-i] = stripCommentMarkers(t.File.TriviaText(tr))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// stripCommentMarkers strips a line comment's leading "//" (plus one
+// optional following space) or a block comment's surrounding "/*"/"*/", so
+// DocComment returns the comment's own text, not its lexical delimiters.
+func stripCommentMarkers(text string) string {
+	switch {
+	case strings.HasPrefix(text, "//"):
+		return strings.TrimPrefix(strings.TrimPrefix(text, "//"), " ")
+	case strings.HasPrefix(text, "/*") && strings.HasSuffix(text, "*/"):
+		return strings.TrimSpace(text[2 : len(text)-2])
+	default:
+		return text
+	}
 }
