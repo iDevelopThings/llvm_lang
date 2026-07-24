@@ -376,6 +376,16 @@ type Span struct {
 //     produces once its value is a RangeExpr - key/value are simply that
 //     statement's own already-parsed name node(s), never a fresh grammar
 //     rule of their own.
+//   - YieldReturnType: [elemType] - fixed arity, a FuncDecl's own `yield T`
+//     return-type marker (see LANGUAGE.md's "Generator functions" section) -
+//     elemType is an ordinary type-position node, the same shape
+//     PointerType's own single child already has. Sits in FuncDecl's
+//     existing return-type child slot, mirroring MultiReturnType - only ever
+//     produced parsing a FuncDecl's own return type
+//     (parser.parseFuncDeclReturnType); a method's receiver-clause
+//     restriction (a generator can't be a method) is a sema concern, not a
+//     grammar one, since parseFuncDecl's return-type parsing doesn't know
+//     yet whether a receiver clause preceded it.
 //   - a fixed-arity kind may reserve a positional slot as InvalidNode for an
 //     omitted optional child (e.g. VarDecl's type annotation); a
 //     variable-arity kind (Block's statements, CallExpr's arguments) is

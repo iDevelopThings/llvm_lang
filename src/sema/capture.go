@@ -12,41 +12,33 @@ import (
 	"llvm_lang/src/enums"
 )
 
-// computeCaptures runs capture analysis for every FuncLit in tree, using
-// info's already-fully-resolved Refs/Scopes (see resolve.go's resolvePackage,
-// the only caller, which runs this after every file's ordinary lexical
-// resolution is done). Iterates every node in the tree's own flat array
-// rather than walking from the root, since a FuncLit's own position in the
-// tree doesn't matter for this pass - only its own subtree does (see
-// analyzeFuncLitCaptures) - and this way nothing needs its own recursive
-// tree-walker just to *find* every literal first.
+// computeCaptures runs capture analysis for every FuncLit, and every
+// generator-consuming RangeForStmt (see LANGUAGE.md's "Generator functions"
+// section: its own body is synthesized into a real, independent function at
+// codegen time, exactly like a FuncLit's - see analyzeGeneratorRangeCaptures),
+// in tree, using info's already-fully-resolved Refs/Scopes (see resolve.go's
+// resolvePackage, the only caller, which runs this after every file's
+// ordinary lexical resolution is done). Iterates every node in the tree's own
+// flat array rather than walking from the root, since neither node kind's own
+// position in the tree matters for this pass - only its own subtree does -
+// and this way nothing needs its own recursive tree-walker just to *find*
+// every candidate first.
 func computeCaptures(tree *ast.Tree, info *Info, bag *diag.Bag) {
 	for idx := 1; idx < len(tree.Nodes); idx++ {
-		lit := ast.NodeIndex(idx)
-		if tree.Nodes[lit].Kind != enums.NodeKinds.FuncLit {
-			continue
+		n := ast.NodeIndex(idx)
+		switch tree.Nodes[n].Kind {
+		case enums.NodeKinds.FuncLit:
+			analyzeFuncLitCaptures(tree, info, bag, n)
+		case enums.NodeKinds.RangeForStmt:
+			analyzeGeneratorRangeCaptures(tree, info, bag, n)
 		}
-		analyzeFuncLitCaptures(tree, info, bag, lit)
 	}
 }
 
-// analyzeFuncLitCaptures computes lit's own free-variable set: every
-// Ident/ThisExpr reference anywhere in lit's subtree - deliberately including
-// inside any FuncLit nested inside lit, not stopping at its boundary; see the
-// paragraph below for why that's exactly what's needed - that resolves (via
-// info.Refs) to a Symbol declared in a strictly enclosing function scope
-// (isProperAncestorFuncScope), as opposed to lit's own params/locals or
-// anything declared inside a lambda nested inside it.
-//
-// This is a deliberately simple, conservative rule, not a real escape
-// analysis (see AGENTS.md's Architecture section on preferring correctness
-// over an optimization not asked for): every captured Symbol gets marked
-// Symbol.Captured = true unconditionally, and every one of them is recorded
-// into info.Captures[lit] in first-seen order (stable, since that order
-// becomes the literal's own capture-context struct's field order at codegen
-// time) - there's no attempt to prove a particular lambda could never
-// actually escape its declaring function's stack frame and so could have kept
-// a plain stack alloca.
+// analyzeFuncLitCaptures computes lit's own free-variable set - see
+// analyzeCaptures for the shared walk/mark logic - walking lit's entire
+// subtree (params, return type, and body alike), since none of those ever
+// reference anything but lit's own scope or an enclosing one.
 //
 // Walking lit's *entire* subtree - through a nested FuncLit's own body too,
 // not just lit's immediate statements - is what makes a variable captured
@@ -70,11 +62,56 @@ func analyzeFuncLitCaptures(tree *ast.Tree, info *Info, bag *diag.Bag, lit ast.N
 	if fnScope == nil {
 		return // defensive - resolveFuncLit always creates one for a FuncLit
 	}
+	captures := analyzeCaptures(tree, info, bag, fnScope, lit, "cannot capture `this` inside a function literal")
+	if len(captures) > 0 {
+		info.Captures[lit] = captures
+	}
+}
 
+// analyzeGeneratorRangeCaptures is analyzeFuncLitCaptures' counterpart for a
+// generator-consuming range-for (see LANGUAGE.md's "Generator functions"
+// section) - reached for every RangeForStmt, but only actually analyzed when
+// resolveRangeForStmt gave its own scope ScopeFunc kind (an ordinary map/array
+// range-for's scope stays ScopeBlock, and is skipped here). Unlike
+// analyzeFuncLitCaptures, only the body is walked, never the subject
+// expression: the subject call (`Gen(args)`) runs once in the ENCLOSING
+// function, at the original call site - never inside the synthesized
+// callback the body becomes - so a variable an argument expression happens to
+// reference is an ordinary reference there, not a capture.
+func analyzeGeneratorRangeCaptures(tree *ast.Tree, info *Info, bag *diag.Bag, n ast.NodeIndex) {
+	fnScope := info.Scopes[n]
+	if fnScope == nil || fnScope.Kind != ScopeFunc {
+		return
+	}
+	captures := analyzeCaptures(tree, info, bag, fnScope, tree.RangeForBody(n), "cannot capture `this` inside a generator-consuming range-for")
+	if len(captures) > 0 {
+		info.Captures[n] = captures
+	}
+}
+
+// analyzeCaptures computes the free-variable set reachable by walking
+// walkRoot's subtree: every Ident/ThisExpr reference that resolves (via
+// info.Refs) to a Symbol declared in a scope strictly enclosing fnScope
+// (isProperAncestorFuncScope), as opposed to fnScope's own params/locals or
+// anything declared inside a lambda nested inside it.
+//
+// This is a deliberately simple, conservative rule, not a real escape
+// analysis (see AGENTS.md's Architecture section on preferring correctness
+// over an optimization not asked for): every captured Symbol gets marked
+// Symbol.Captured = true unconditionally, and every one of them is returned
+// in first-seen order (stable, since that order becomes the capture-context
+// struct's own field order at codegen time) - there's no attempt to prove a
+// particular closure could never actually escape its declaring function's
+// stack frame and so could have kept a plain stack alloca.
+//
+// thisCaptureMsg is the diagnostic reported for a `this` reference that would
+// need capturing - the only behavior that differs between analyzeFuncLitCaptures
+// and analyzeGeneratorRangeCaptures is purely this wording.
+func analyzeCaptures(tree *ast.Tree, info *Info, bag *diag.Bag, fnScope *Scope, walkRoot ast.NodeIndex, thisCaptureMsg string) []*Symbol {
 	seen := make(map[*Symbol]bool)
 	var captures []*Symbol
 
-	walkCaptureRefs(tree, lit, func(refNode ast.NodeIndex) {
+	walkCaptureRefs(tree, walkRoot, func(refNode ast.NodeIndex) {
 		sym, ok := info.Refs[refNode]
 		if !ok {
 			return
@@ -98,14 +135,12 @@ func analyzeFuncLitCaptures(tree *ast.Tree, info *Info, bag *diag.Bag, lit ast.N
 			// declares it) - no nearestFunc indirection needed here.
 			if isProperAncestorFuncScope(sym.Scope, fnScope) {
 				span := tree.SpanOf(refNode)
-				bag.ErrorfSpan(span.Start, span.End, "cannot capture `this` inside a function literal")
+				bag.ErrorfSpan(span.Start, span.End, "%s", thisCaptureMsg)
 			}
 		}
 	})
 
-	if len(captures) > 0 {
-		info.Captures[lit] = captures
-	}
+	return captures
 }
 
 // isProperAncestorFuncScope reports whether candidate is a strict ancestor of

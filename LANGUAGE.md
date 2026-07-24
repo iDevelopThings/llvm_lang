@@ -1760,6 +1760,122 @@ non-issue today: nothing currently lets a non-copyable type be a `for` loop's
 own header variable in the first place, this is purely a defensive
 guarantee should the grammar ever grow one.
 
+## Generator functions
+
+A `yield T` return-type marker on a top-level `func` declares a **generator
+function** - C#-style, producing a sequence of `T` values one at a time
+rather than a single return value:
+
+```go
+func Range(a int, b int) yield int {
+    for i := a; i < b; i++ {
+        yield i
+    }
+}
+```
+
+Inside a generator's own body, `yield expr` (the same `yield` keyword
+"match" above already introduced for match expressions - see that section's
+own "`yield` is a distinct keyword from `return`" note) produces one value
+of the sequence; `expr` must be assignable to the declared element type `T`.
+An ordinary `return` **with a value** is illegal inside a generator's own
+body - a generator "returns" only by finishing its body or exiting early
+with nothing left to produce - but a **bare** `return` (no value) is legal
+and means "stop yielding, exit now":
+
+```go
+func FirstNPositive(n int) yield int {
+    count := 0
+    i := 1
+    for {
+        if count == n {
+            return   // stop yielding early - fine
+        }
+        yield i
+        count = count + 1
+        i = i + 1
+    }
+}
+```
+
+A generator function's own body needs no "missing return" check - falling
+off the end is legitimate (it simply means "no more values"), exactly like
+an ordinary function declaring no return type at all.
+
+### Consuming a generator
+
+A generator call (`Range(1, 10)`) is consumed via the same `for ... range
+...` grammar "Range loops" above already introduced - a generator subject
+supports only the **zero-binding** and **one-binding** forms, never
+two-binding: there is no key/index concept for a generator the way a map has
+a key or an array has an index, only the single yielded value.
+
+```go
+for v := range Range(1, 10) {   // one binding - v is the yielded value
+    if v == 5 {
+        break
+    }
+    print(v)
+}
+
+for range Range(0, 5) {         // zero binding - side effects only
+    ...
+}
+```
+
+`break`/`continue` inside the consuming loop work exactly like any other
+`for` form - `break` stops consuming the generator early, `continue` skips
+straight to the next yielded value:
+
+```go
+sum := 0
+for v := range Range(1, 6) {
+    if v == 3 {
+        continue   // skip 3, keep going
+    }
+    sum = sum + v
+}
+// sum == 1+2+4+5 == 12
+```
+
+A generator call's own result has no real standalone runtime representation
+under this lowering (see `CODEGEN.md`'s "Generator functions" section for
+why) - it is legal **only** directly as a range-for's own subject
+expression, called directly by name. Every other use is a clean compile-time
+diagnostic, never a panic:
+
+```go
+x := Range(1, 10)        // error - a generator's result can't be stored
+print(Range(1, 10))      // error - can't be passed as an argument either
+for k, v := range Range(1, 10) { }   // error - produces at most 1 value, not 2
+
+g := Range
+for v := range g(1, 10) { }          // error - must call the generator
+                                      // directly by name, not through a
+                                      // stored function value
+```
+
+A generator function can't be a method (`yield T` on a receiver-declared
+`func` is rejected) - only a plain top-level function.
+
+### Explicitly out of scope
+
+- **Multi-value yields** (`yield (k, v)` producing a pair). This language's
+  `yield T` syntax names exactly one type, so a generator supports only the
+  one-binding or zero-binding consuming forms, never two-binding.
+- **Nested generator composition** - a generator function's own body ranging
+  over *another* generator, forwarding its yields onward. This needs the
+  inner synthesized callback to capture the outer generator's own implicit
+  yield-callback parameter, which this language's existing capture analysis
+  (built around named identifier references, not an invisible codegen-only
+  parameter) doesn't obviously cover - a real, separate feature for later,
+  rejected with a clean diagnostic today rather than silently mis-compiled.
+- **True suspend/resume** - calling a generator's `.Next()` externally,
+  pausing mid-function, holding two live generators concurrently and
+  stepping them independently. See `CODEGEN.md`'s "Generator functions"
+  section and `DECISIONS.md` for why a push/callback lowering was chosen
+  over this instead.
+
 ## Multi-file packages
 
 A package is a directory of `.llx` files, Go-style: every `.llx` file

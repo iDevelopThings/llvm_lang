@@ -1,6 +1,8 @@
 package codegen
 
 import (
+	"fmt"
+
 	"llvm_lang/src/ast"
 	"llvm_lang/src/enums"
 	"llvm_lang/src/sema"
@@ -578,7 +580,11 @@ func (g *Generator) genBreakStmt(n ast.NodeIndex) bool {
 	}
 	top := g.loopStack[len(g.loopStack)-1]
 	g.unwindDestructorsTo(top.destructorBase)
-	g.builder.CreateBr(top.breakTarget)
+	if top.returnFromCallback {
+		g.builder.CreateRet(llvm.ConstInt(g.boolTy, 0, false))
+	} else {
+		g.builder.CreateBr(top.breakTarget)
+	}
 	return true
 }
 
@@ -588,54 +594,97 @@ func (g *Generator) genContinueStmt(n ast.NodeIndex) bool {
 	}
 	top := g.loopStack[len(g.loopStack)-1]
 	g.unwindDestructorsTo(top.destructorBase)
-	g.builder.CreateBr(top.continueTarget)
+	if top.returnFromCallback {
+		g.builder.CreateRet(llvm.ConstInt(g.boolTy, 1, false))
+	} else {
+		g.builder.CreateBr(top.continueTarget)
+	}
 	return true
 }
 
 // genYieldStmt lowers `yield expr` (see ast.Node's own YieldStmt doc
-// comment) - genReturnStmt/genBreakStmt/genContinueStmt's own match-
-// expression-scoped counterpart: evaluates expr, unwinds every destructor
-// declared since the enclosing match expression's own entry
-// (top.destructorBase - deliberately NOT 0/the whole function, and not any
-// enclosing loop's own base either, only what this specific match
-// expression itself introduced, exactly the way break/continue only ever
-// unwind back to their own enclosing loop's destructorBase, never
-// further), records (value, current block) onto the enclosing match
-// expression's own frame for its mergeBB's eventual phi, and branches
-// there - terminating this block exactly like return/break/continue
-// already do, which is what lets genBlock's own existing terminated-block
-// bookkeeping (and genMatchStmt's own per-arm "did this arm terminate"
-// tracking) keep working with zero changes there. An empty matchExprStack
-// here means the tree wasn't actually valid per sema (see
-// checkYieldStmt's own "yield outside a match expression" rejection) -
-// this whole package already assumes that never happens (see the package
-// doc comment), so this is a panic, exactly like genBreakStmt/
-// genContinueStmt's own identical empty-stack case.
+// comment) - reached inside either a match expression's own arm (unchanged
+// from before this round) or a generator function's own body (see
+// LANGUAGE.md's "Generator functions" section), mirroring sema's own
+// checkYieldStmt dispatch: matchExprStack is checked first and takes
+// priority, exactly like that function's own doc comment explains.
+//
+// Match-expression case: evaluates expr, unwinds every destructor declared
+// since the enclosing match expression's own entry (top.destructorBase -
+// deliberately NOT 0/the whole function, and not any enclosing loop's own
+// base either, only what this specific match expression itself introduced,
+// exactly the way break/continue only ever unwind back to their own
+// enclosing loop's destructorBase, never further), records (value, current
+// block) onto the enclosing match expression's own frame for its mergeBB's
+// eventual phi, and branches there - terminating this block exactly like
+// return/break/continue already do.
+//
+// Generator case: evaluates expr, invokes the generator's own implicit
+// trailing callback parameter indirectly (genIndirectCallValue, the same
+// indirect-call lowering an ordinary function-typed value's call already
+// uses) with expr as its one argument. If the callback reports false (the
+// consumer's own range-for broke out early), unwinds every destructor back
+// to 0 (a real early function exit, exactly like a bare `return`) and
+// returns void immediately; otherwise falls through to the rest of the
+// generator's own body normally - this does NOT terminate the current block
+// (unlike the match-expression case above), since only the "stop" branch is
+// a real function exit.
+//
+// An empty matchExprStack and !curIsGenerator here means the tree wasn't
+// actually valid per sema (see checkYieldStmt's own rejection) - this whole
+// package already assumes that never happens (see the package doc comment),
+// so this is a panic, exactly like genBreakStmt/genContinueStmt's own
+// identical empty-stack case.
 func (g *Generator) genYieldStmt(n ast.NodeIndex) bool {
-	if len(g.matchExprStack) == 0 {
-		panic("codegen: yield outside a match expression - sema.Check should have rejected this")
-	}
-	top := g.matchExprStack[len(g.matchExprStack)-1]
-
 	valueNode := g.tree.Child(n, 0)
-	v := g.genExpr(valueNode)
-	g.unwindDestructorsTo(top.destructorBase)
 
-	top.incomingVals = append(top.incomingVals, v)
-	top.incomingBlocks = append(top.incomingBlocks, g.builder.GetInsertBlock())
-	g.builder.CreateBr(top.mergeBB)
-	return true
+	if len(g.matchExprStack) > 0 {
+		top := g.matchExprStack[len(g.matchExprStack)-1]
+		v := g.genExpr(valueNode)
+		g.unwindDestructorsTo(top.destructorBase)
+
+		top.incomingVals = append(top.incomingVals, v)
+		top.incomingBlocks = append(top.incomingBlocks, g.builder.GetInsertBlock())
+		g.builder.CreateBr(top.mergeBB)
+		return true
+	}
+
+	if g.curIsGenerator {
+		v := g.genExpr(valueNode)
+		cont := g.genIndirectCallValue(
+			g.curGeneratorCallback,
+			[]sema.Type{g.curGeneratorElem},
+			sema.Type{Kind: sema.TypeBool},
+			[]llvm.Value{v},
+		)
+
+		contBB := g.ctx.AddBasicBlock(g.curFn, "yield.cont")
+		stopBB := g.ctx.AddBasicBlock(g.curFn, "yield.stop")
+		g.builder.CreateCondBr(cont, contBB, stopBB)
+
+		g.builder.SetInsertPointAtEnd(stopBB)
+		g.unwindDestructorsTo(0)
+		g.builder.CreateRetVoid()
+
+		g.builder.SetInsertPointAtEnd(contBB)
+		return false
+	}
+
+	panic("codegen: yield outside a match expression or a generator function - sema.Check should have rejected this")
 }
 
 // genRangeForStmt lowers `for [key[, value]] := range subject { body }` (see
 // LANGUAGE.md's "Range loops" section) - dispatching on subject's own
-// resolved type to one of two genuinely different lowering strategies: an
-// ordinary indexed loop over an array/slice (genRangeForArray), or a bucket-
-// array walk over a map's own control block (genRangeForMap, maps.go). Both
-// share the identical loopCtx/destructorBase discipline genForStmt already
-// uses for break/continue - see bindRangeVar's own doc comment for why a
-// fresh key/value binding needs no genForStmt-style per-iteration capture
-// workaround of its own.
+// resolved type to one of three genuinely different lowering strategies: an
+// ordinary indexed loop over an array/slice (genRangeForArray), a bucket-
+// array walk over a map's own control block (genRangeForMap, maps.go), or a
+// push/callback call into a generator function (genRangeForGenerator - see
+// LANGUAGE.md's "Generator functions" section). The first two share the
+// identical loopCtx/destructorBase discipline genForStmt already uses for
+// break/continue - see bindRangeVar's own doc comment for why a fresh key/
+// value binding needs no genForStmt-style per-iteration capture workaround
+// of its own; the generator case is architecturally different (see its own
+// doc comment).
 func (g *Generator) genRangeForStmt(n ast.NodeIndex) bool {
 	keyNode := g.tree.RangeForKey(n)
 	valueNode := g.tree.RangeForValue(n)
@@ -648,6 +697,8 @@ func (g *Generator) genRangeForStmt(n ast.NodeIndex) bool {
 		return g.genRangeForMap(keyNode, valueNode, subjectNode, bodyNode, subjType)
 	case sema.TypeArray:
 		return g.genRangeForArray(keyNode, valueNode, subjectNode, bodyNode, subjType)
+	case sema.TypeGenerator:
+		return g.genRangeForGenerator(n, keyNode, subjectNode, bodyNode, subjType)
 	default:
 		// Unreachable on a tree that already passed sema.Check (see
 		// checkRangeForStmt) - see the package doc comment.
@@ -765,6 +816,103 @@ func (g *Generator) genRangeForArray(keyNode, valueNode, subjectNode, bodyNode a
 
 	g.builder.SetInsertPointAtEnd(endBB)
 	return false
+}
+
+// genRangeForGenerator lowers `for [v] := range Gen(args) { body }` (see
+// LANGUAGE.md's "Generator functions" section) - the push/callback
+// counterpart to genRangeForArray/genRangeForMap's own indexed/bucket-walk
+// loops. There is no real loop generated HERE at all: body becomes a real,
+// independent, top-level LLVM function (the "callback" - genRangeGeneratorCallback),
+// reusing the exact same capture-context/fat-pointer machinery genFuncLit
+// already builds for an ordinary FuncLit (see buildClosureValue and sema's
+// own analyzeGeneratorRangeCaptures, capture.go, which computes
+// info.Captures[n] the identical way for this construct). Gen's own declared
+// arguments are evaluated once, here, in the CONSUMING function's own
+// context - never inside the callback, which the generator itself calls
+// back into zero or more times afterward - then Gen is called exactly once
+// with the callback's own fat pointer appended as its real trailing
+// argument; the generator itself drives every iteration.
+func (g *Generator) genRangeForGenerator(n, keyNode, subjectNode, bodyNode ast.NodeIndex, subjType sema.Type) bool {
+	elemType := *subjType.Elem
+	elemLLType := g.llvmType(elemType)
+
+	children := g.tree.Children(subjectNode)
+	calleeNode, argNodes := children[0], children[1:]
+	genEntry := g.funcs[g.info.Refs[calleeNode]]
+
+	args := make([]llvm.Value, len(argNodes), len(argNodes)+1)
+	for i, a := range argNodes {
+		args[i] = g.genExpr(a)
+	}
+
+	callbackVal := g.genRangeGeneratorCallback(n, keyNode, bodyNode, elemLLType)
+	args = append(args, callbackVal)
+
+	g.builder.CreateCall(genEntry.fnType, genEntry.fn, args, "")
+	return false
+}
+
+// genRangeGeneratorCallback builds the closure value backing a generator-
+// consuming range-for's own body (see genRangeForGenerator) - a thin wrapper
+// around buildClosureValue (expr.go, the same helper genFuncLit uses),
+// supplying genRangeGeneratorCallbackFunc as the actual body-generating step.
+func (g *Generator) genRangeGeneratorCallback(n, keyNode, bodyNode ast.NodeIndex, elemLLType llvm.Type) llvm.Value {
+	captures := g.info.Captures[n]
+	return g.buildClosureValue(captures, func(ctxTy llvm.Type) llvm.Value {
+		return g.genRangeGeneratorCallbackFunc(keyNode, bodyNode, elemLLType, captures, ctxTy)
+	})
+}
+
+// genRangeGeneratorCallbackFunc lowers a generator-consuming range-for's own
+// body into a real, independent, top-level LLVM function - the "callback"
+// the generator itself calls back into, zero or more times. Mirrors
+// genLambdaFunc's own per-function-frame reset/capture setup, but with a
+// fixed `(ctxPtr ptr, v elemLLType) -> bool` signature (there's no declared
+// param list/return type to derive one from) and loopCtx's own
+// returnFromCallback mode for break/continue, since there's no real loop
+// inside the callback to branch within - see genBreakStmt/genContinueStmt.
+//
+// A normal fall-through past the end of body means "continue": unwinds
+// whatever's left on Generator.destructors and returns true.
+func (g *Generator) genRangeGeneratorCallbackFunc(keyNode, bodyNode ast.NodeIndex, elemLLType llvm.Type, captures []*sema.Symbol, ctxTy llvm.Type) llvm.Value {
+	fnType := llvm.FunctionType(g.boolTy, []llvm.Type{g.ptrTy, elemLLType}, false)
+
+	name := fmt.Sprintf("llvm_lang.rangegen.%d", g.rangeGenCounter)
+	g.rangeGenCounter++
+	fn := llvm.AddFunction(g.mod, name, fnType)
+	fn.SetLinkage(llvm.PrivateLinkage)
+
+	savedBB := g.builder.GetInsertBlock()
+	restore := g.beginSyntheticFunc(fn)
+
+	g.curCtxPtr = fn.Param(0)
+	g.curCaptureTy = ctxTy
+	captureIndex := make(map[*sema.Symbol]int, len(captures))
+	for i, sym := range captures {
+		captureIndex[sym] = i
+	}
+	g.curCaptureIndex = captureIndex
+
+	if keyNode != ast.InvalidNode {
+		g.bindRangeVar(keyNode, fn.Param(1))
+	}
+
+	base := len(g.destructors)
+	g.loopStack = append(g.loopStack, loopCtx{
+		returnFromCallback: true,
+		destructorBase:     base,
+	})
+	bodyTerm := g.genBlock(bodyNode)
+	g.loopStack = g.loopStack[:len(g.loopStack)-1]
+	if !bodyTerm {
+		g.unwindDestructorsTo(base)
+		g.builder.CreateRet(llvm.ConstInt(g.boolTy, 1, false))
+	}
+
+	restore()
+	g.builder.SetInsertPointAtEnd(savedBB)
+
+	return fn
 }
 
 // genIfStmt lowers both grammar forms (`if cond: stmt` and the brace form

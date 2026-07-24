@@ -1098,6 +1098,150 @@ here directly: a single `func(int, int) int`-typed variable holds a plain
 free-function reference first, then a genuine lambda, calling it indirectly
 both times through the identical variable.
 
+## Generator functions
+
+See `LANGUAGE.md`'s "Generator functions" section for the language-level
+feature (`yield T` return-type marker, `yield expr`/bare `return` inside the
+body, consuming one via `for [v] := range Gen(args) { ... }`) and
+`DECISIONS.md`'s dated entry for why a push/callback lowering was chosen
+over true suspend/resume coroutines. Two genuinely separate lowerings meet
+at one ordinary call: the **producer** (the generator function itself)
+takes an implicit trailing callback parameter and never really returns a
+value; the **consumer** (a generator-consuming range-for) synthesizes that
+callback, reusing the lambda/closure machinery wholesale.
+
+### Producer: an implicit trailing callback parameter, always-void return
+
+`declareFuncSignature` (`func.go`) recognizes a generator FuncDecl (its
+declared return type's `Kind == sema.TypeGenerator`) and appends one
+implicit trailing parameter to its REAL LLVM signature - `g.funcValTy`, the
+exact same `{fnPtr, ctxPtr}` fat-pointer representation this language's
+first-class functions/lambdas already use (see "First-class functions"/
+"Lambdas" above) - and forces its real LLVM return type to `void`,
+regardless of the declared element type. `genFuncBody` mirrors this: when
+generating a generator's own body, it reads that trailing parameter
+(`g.curGeneratorCallback`) and the declared element type (`g.curGeneratorElem`)
+into per-function Generator fields (reset in `beginSyntheticFunc` alongside
+every other per-function-frame field), and `hasReturn` is forced false
+(mirroring an ordinary void function) - both the "no missing-return check"
+and "an ordinary `return value` is illegal" rules fall out of this one flag
+with no dedicated logic of their own.
+
+`genYieldStmt` (`stmt.go`) dispatches on `g.matchExprStack` FIRST (completely
+unchanged from the match-expression case), and only when that's empty checks
+`g.curIsGenerator`. The generator case: evaluate the yielded expression,
+invoke the trailing callback parameter indirectly via `genIndirectCallValue`
+(a small helper factored out of the existing `genIndirectCall` - see below),
+then branch on its bool result - `false` means the consumer broke out of its
+own range-for early, so this unwinds every destructor back to 0 (a real
+early function exit, exactly like a bare `return`) and emits `ret void`
+immediately; `true` falls straight through to whatever follows the `yield`
+in the body, completely unremarkable. Unlike the match-expression case
+(which always terminates its own block, branching unconditionally to
+`mergeBB`), this does NOT always terminate - only the `false` branch is a
+real function exit, so `genYieldStmt` returns `false` (not terminated) here,
+leaving the builder positioned at the "continue" block for whatever code
+follows.
+
+`genIndirectCallValue` (`expr.go`) is `genIndirectCall`'s own extraction
+refactored into a reusable helper: given an already-evaluated fat-pointer
+value, a parameter-type list, a return type, and already-evaluated
+arguments, it extracts `fnPtr`/`ctxPtr`, builds the matching
+`llvm.FunctionType`, and calls through - `genIndirectCall` itself now just
+evaluates its callee node and forwards to this; `genYieldStmt` calls it
+directly with the generator's own trailing parameter as `fnVal`, since
+there's no AST node backing that value to evaluate in the first place.
+
+### Consumer: a synthesized callback, reusing lambda/closure machinery wholesale
+
+`genRangeForStmt` recognizes a `sema.TypeGenerator` subject and dispatches to
+`genRangeForGenerator` (`stmt.go`) - architecturally nothing like
+`genRangeForArray`/`genRangeForMap`'s own real loops: there is no loop
+generated at the call site at all. The consuming loop's own body becomes a
+real, independent, private-linkage LLVM function (the "callback",
+`genRangeGeneratorCallbackFunc`) with a fixed signature -
+`(ctxPtr ptr, v elemType) -> bool` - built via `buildClosureValue`, the same
+helper `genFuncLit` uses to build an ordinary lambda's closure value (a
+`ConstStruct` when there are no captures, a real runtime aggregate over an
+arena-allocated capture context otherwise - see "Lambdas" above). The
+generator's own declared arguments are evaluated once, in the CONSUMING
+function's own context (never inside the callback), then the generator is
+called exactly once with the callback's own fat pointer appended as its real
+trailing argument - the generator itself drives every iteration by calling
+back into it.
+
+**Capture analysis is reused, not reinvented**, because the consuming loop's
+own body needed the identical free-variable analysis a `FuncLit`'s body
+already gets. `sema.resolveRangeForStmt` (`resolve.go`) promotes a
+generator-consuming range-for's own `Scope` to `ScopeFunc` kind (instead of
+the ordinary `ScopeBlock` a map/array range-for keeps) whenever its subject
+is a direct call to a generator function (`isGeneratorRangeSubject` - purely
+syntactic, decidable from a FuncDecl's own declared return-type shape, well
+before type-checking ever computes `sema.TypeGenerator`) - exactly the same
+`ScopeFunc`-with-nil-`Receiver` shape `resolveFuncLit` already builds for a
+`FuncLit`. `capture.go`'s `computeCaptures` then also walks every
+`RangeForStmt` node, calling `analyzeGeneratorRangeCaptures` (a thin wrapper
+around the same `analyzeCaptures` helper `analyzeFuncLitCaptures` now calls
+too) whenever that scope promotion actually happened - walking only the
+range-for's own BODY (never its subject expression, which runs in the
+enclosing function, not the callback) and recording the result into
+`info.Captures[n]`, keyed by the `RangeForStmt` node itself rather than a
+`FuncLit` node (`Info.Captures` is keyed by a bare `ast.NodeIndex`, with no
+`FuncLit`-specific assumption baked in). `genRangeGeneratorCallback` reads
+that same map and passes it straight to `buildClosureValue` - codegen's own
+`addrOfSymbol`/capture-context-field machinery needs zero changes to serve a
+second caller.
+
+### The one genuinely new mechanism: `loopCtx`'s return-from-callback mode
+
+Inside the synthesized callback, `break`/`continue` can't branch to a real
+basic block the way every other loop kind's own `breakTarget`/
+`continueTarget` do - there is no real loop inside the callback at all (the
+generator itself does the looping, by calling this callback repeatedly).
+`loopCtx` (`codegen.go`) gained one new field, `returnFromCallback bool`,
+alongside its existing `breakTarget`/`continueTarget`/`destructorBase`:
+when true, `genBreakStmt`/`genContinueStmt` (`stmt.go`) - still the ONE
+shared implementation every loop kind funnels through, unchanged in shape -
+return a bool directly from the callback's own frame instead of branching:
+`false` (stop early) for break, `true` (keep going) for continue.
+`breakTarget`/`continueTarget` are simply unused, zero-valued, when this
+mode is active. Every other loop kind (`genForStmt`, array/map range-for)
+constructs its own `loopCtx` exactly as before - `returnFromCallback`
+defaults false, so none of them needed a single line changed.
+
+A normal, non-terminating fall-through past the end of the callback's own
+body means "continue" (`genRangeGeneratorCallbackFunc`'s own fallback,
+mirroring `finishBody`'s fallback-terminator role for an ordinary function,
+just specialized to this construct's own bool-return convention): unwind
+whatever's left on `Generator.destructors` and `ret i1 true`.
+
+### What sema rejects to keep this sound
+
+A handful of restrictions exist purely because this lowering has no way to
+support them soundly without real additional machinery this round doesn't
+build (see `LANGUAGE.md`'s own "Explicitly out of scope" list for the
+language-level framing):
+
+- **`return` reached directly inside a generator-consuming range-for's own
+  body** (not nested inside a further `FuncLit`, which gets its own fresh
+  frame entirely) is a clean diagnostic (`checker.inGeneratorRangeBody`,
+  saved/restored around `checkFuncLit`'s own body check exactly like
+  `curFunc`) - that body executes as a genuinely separate LLVM function at
+  runtime, with no way to make the REAL enclosing function return early
+  the way an ordinary nested return can (true non-local return, a real,
+  separate feature this round doesn't build).
+- **A generator function's own body ranging over another generator**
+  (nested composition) is rejected in `checkRangeForStmt` the moment
+  `c.curFunc.isGenerator` is already true - the inner synthesized callback
+  would need to capture the outer generator's own invisible callback
+  parameter, which the capture analysis above (built around named
+  identifier references) has no way to reach.
+- **Any other use of a generator call's own result** (stored, passed,
+  returned, or ranged-over indirectly through a stored function value) is
+  rejected at the type level (`sema.TypeGenerator`, `checkValueExprAllowGenerator`) -
+  it has no legal standalone runtime representation under this lowering at
+  all, only ever appearing as a range-for's own direct subject.
+
 ## `main` is the real entry point
 
 The function literally named `main` (no receiver) becomes the real LLVM

@@ -1,0 +1,109 @@
+// generators.llx - demonstrates C#-style generator functions (see
+// LANGUAGE.md's "Generator functions" section): a `yield T` return-type
+// marker, `yield expr` inside the body, and consuming one via
+// `for [v] := range Gen(args) { ... }` - zero/one-binding forms, break/
+// continue proven with concrete values, a generator with internal filtering
+// logic (Evens) and an internal early exit (FirstNPositive), and capturing
+// both a read-only outer local and an accumulator outer local across
+// iterations (the same closure-capture machinery lambdas already use).
+//
+// Run with:
+//   .\llvmc.exe examples\generators\generators.llx
+//   echo $LASTEXITCODE   # (PowerShell) -> 77
+
+func Range(a int, b int) yield int {
+    for i := a; i < b; i++ {
+        yield i
+    }
+}
+
+// Evens yields only even numbers below limit - filtering happens inside the
+// generator's own body (an ordinary `if`), not in the consumer.
+func Evens(limit int) yield int {
+    i := 0
+    for i < limit {
+        if i % 2 == 0 {
+            yield i
+        }
+        i = i + 1
+    }
+}
+
+// FirstNPositive stops yielding early via a bare `return` once n values have
+// been produced - a generator's own internal early exit, distinct from the
+// consumer breaking out of its own range-for.
+func FirstNPositive(n int) yield int {
+    count := 0
+    i := 1
+    for {
+        if count == n {
+            return
+        }
+        yield i
+        count = count + 1
+        i = i + 1
+    }
+}
+
+func main() int {
+    // --- zero-binding form: side effects only ---
+    iterations := 0
+    for range Range(0, 5) {
+        iterations = iterations + 1
+    }
+    print(iterations)   // 5
+
+    // --- one-binding form, break: stop the moment v == 5 ---
+    sum := 0
+    for v := range Range(1, 10) {
+        if v == 5 {
+            break
+        }
+        sum = sum + v
+    }
+    print(sum)   // 1+2+3+4 = 10
+
+    // --- continue: skip odd values inside the consuming loop ---
+    skipSum := 0
+    for v := range Range(0, 6) {
+        if v % 2 != 0 {
+            continue
+        }
+        skipSum = skipSum + v
+    }
+    print(skipSum)   // 0+2+4 = 6
+
+    // --- generator filters internally (Evens never yields an odd number) ---
+    evenSum := 0
+    for v := range Evens(10) {
+        evenSum = evenSum + v
+    }
+    print(evenSum)   // 0+2+4+6+8 = 20
+
+    // --- generator stops itself early via a bare `return` ---
+    firstThreeSum := 0
+    for v := range FirstNPositive(3) {
+        firstThreeSum = firstThreeSum + v
+    }
+    print(firstThreeSum)   // 1+2+3 = 6
+
+    // --- capturing a read-only outer local across every callback call ---
+    multiplier := 3
+    scaled := 0
+    for v := range Range(1, 4) {
+        scaled = scaled + v * multiplier
+    }
+    print(scaled)   // (1+2+3)*3 = 18
+
+    // --- a local declared inside the consuming loop's own body is fresh
+    //     every iteration, not shared/stale across calls ---
+    doubled := 0
+    for v := range Range(1, 4) {
+        local := v * 2
+        doubled = doubled + local
+    }
+    print(doubled)   // (2+4+6) = 12
+
+    return iterations + sum + skipSum + evenSum + firstThreeSum + scaled + doubled
+    // 5 + 10 + 6 + 20 + 6 + 18 + 12 = 77
+}
