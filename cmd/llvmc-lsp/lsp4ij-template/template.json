@@ -1,0 +1,19 @@
+{
+  "id": "llvmc-lsp",
+  "name": "llvm_lang Language Server (llvmc-lsp)",
+  "programArgs": {
+    "windows": "$PROJECT_DIR$/llvmc-lsp.exe",
+    "default": "$PROJECT_DIR$/llvmc-lsp"
+  },
+  "fileTypeMappings": [
+    {
+      "fileType": {
+        "name": "llvm_lang",
+        "patterns": [
+          "*.llx"
+        ]
+      },
+      "languageId": "llx"
+    }
+  ]
+}

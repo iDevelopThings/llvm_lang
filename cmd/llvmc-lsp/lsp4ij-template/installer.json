@@ -1,0 +1,32 @@
+{
+  "id": "llvmc-lsp",
+  "name": "llvmc-lsp",
+  "check": {
+    "exec": {
+      "name": "Check llvmc-lsp is already built",
+      "command": "${server.command}",
+      "timeout": 2000
+    }
+  },
+  "run": {
+    "exec": {
+      "name": "Build llvmc-lsp",
+      "workingDir": "$PROJECT_DIR$",
+      "ignoreStderr": true,
+      "command": {
+        "windows": "go build -o llvmc-lsp.exe ./cmd/llvmc-lsp",
+        "default": "go build -o llvmc-lsp ./cmd/llvmc-lsp"
+      },
+      "onSuccess": {
+        "configureServer": {
+          "name": "Configure llvmc-lsp command",
+          "command": {
+            "windows": "$PROJECT_DIR$/llvmc-lsp.exe",
+            "default": "$PROJECT_DIR$/llvmc-lsp"
+          },
+          "update": true
+        }
+      }
+    }
+  }
+}
