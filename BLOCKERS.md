@@ -78,3 +78,77 @@ small fixture, ~3.2ms for a large (40x) one - make this comfortably fast
 enough for an interactive editor loop at this project's current scale.
 Revisit only once a real, large `.llx` file actually demonstrates
 reparse-per-edit is too slow in practice - not speculatively ahead of that.
+
+---
+
+## True suspend/resume coroutines (async/await, game-loop style)
+
+This language's `yield T` generator functions (see `LANGUAGE.md`'s
+"Generator functions" section) are deliberately push/callback-lowered, not
+real suspend/resume - a generator's own body runs synchronously to
+completion (or an early stop) the moment it's ranged over; there is no way
+to pause a function mid-execution and resume it later from an unrelated
+point in time (a timer firing, a scheduler's own next tick). The user asked
+what a *real* coroutine primitive - specifically Unity/C#-style
+`StartCoroutine`-flavored async ("in X seconds, run Y, without blocking"),
+not the iterator/`range`-flavored kind already built - would actually take.
+
+**What's genuinely hard, and why:** LLVM has real, mature first-class
+coroutine support (`llvm.coro.id`/`coro.begin`/`coro.suspend`/`coro.resume`/
+`coro.destroy`/`coro.end`, plus a `CoroSplit` pass that splits a function
+into resume/destroy entry points backed by one heap-allocated frame) - this
+isn't something to build from scratch. Two real risks, investigated but not
+yet resolved:
+
+- **Tooling gap**: the vendored `go-llvm` bindings (`third_party/go-llvm`)
+  have zero wrapper functions for any `coro.*` intrinsic and no generic
+  "declare an intrinsic by name" helper. Very likely still usable - LLVM
+  recognizes intrinsics by name against its own table, so
+  `llvm.AddFunction("llvm.coro.id", fnType)` + an ordinary `CreateCall`
+  (the exact mechanism already used for `printf`/`malloc`/`free`) should
+  work - but this is unverified, would need real experimentation (exact
+  intrinsic signatures from LLVM's own coroutine docs, confirming
+  `RunPasses` accepts `coro-split`/`coro-cleanup` pass names through the C
+  API's string pipeline) before committing to the approach.
+- **A genuinely new codegen shape, not a sign the existing destructor
+  mechanism is wrong**: every destructor-unwind path today
+  (`Generator.destructors`, `src/codegen/stmt.go`) is emitted during one
+  single, straight-line compile-time pass, reached via normal, statically-
+  determined control flow. A coroutine's own "destroy while suspended"
+  path is dispatched *dynamically*, at an arbitrary later time, via a
+  saved suspend-index - LLVM's coroutine ABI expects the frontend to
+  author one cleanup block per suspend point for exactly this case. The
+  information needed to write each block (what's on the destructor stack
+  at that point) is already fully available at compile time via the
+  existing mechanism - `CoroSplit` separately handles ordinary value
+  liveness across suspend points automatically, with no frontend
+  involvement needed. **The gap is a new consumer of already-tracked
+  information (emit N cleanup blocks, dispatched via a switch), not a
+  case for refactoring destructor handling itself** - investigated this
+  specifically since it looked at first like the destructor mechanism
+  might need to become more "formal"/runtime-based; a closer look showed
+  the existing compile-time bookkeeping already has what's needed.
+
+**If pursued, the recommended shape** (validated against the user's own
+Unity-coroutine framing specifically, not general arbitrary-interleaving
+true coroutines): single-threaded and cooperative, matching Unity's real
+design - no OS threads, no data races, no thread-safety burden in the
+runtime. A coroutine handle modeled as *just another* non-copyable,
+destructor-owning value in the existing type system (its own "destructor"
+calls `llvm.coro.destroy`), reusing the scope-exit cleanup machinery
+already built rather than inventing a new concept. A minimal
+stdlib-level scheduler (a sorted list of `(resumeAt, handle)` pairs, driven
+by an explicit `Tick(dt)` call from the user's own game loop) plus a small
+set of awaitables (`Wait(seconds)`, later `WaitUntil(predicate)`) - both
+ordinary runtime/library code, not a hard compiler problem. Deliberately
+*not* general "hold and interleave two coroutines by hand" true coroutines
+- that pushes real new complexity into handle-type surface syntax for a
+capability the motivating use case (game-loop timers) doesn't need.
+
+**Why this isn't inferable/default-able:** a real feature-investment
+decision (is async/await-style scheduling worth the compiler-architecture
+risk above, given push/callback generators already cover the
+iteration/filtering use cases that motivated the whole "iterators" arc) -
+not something with an obvious default. **Current status:** not started, no
+priority decided - this entry exists so the analysis isn't lost, not
+because work is in progress.
