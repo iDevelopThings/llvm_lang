@@ -54,8 +54,26 @@ func (g *Generator) declareFuncSignature(decl ast.NodeIndex) {
 		retType = g.info.Types[returnTypeNode]
 	}
 
+	// A generator function (`yield T` return type - see LANGUAGE.md's
+	// "Generator functions" section) gets one implicit trailing parameter
+	// beyond its declared ones - the consumer's own synthesized callback fat
+	// pointer (the exact same {fnPtr, ctxPtr} representation this language's
+	// first-class functions/lambdas already use - see funcValTy) - and its
+	// real LLVM return type is always void, regardless of its declared
+	// element type: every `yield expr` inside its body lowers to an indirect
+	// call through this trailing parameter instead of a real return value
+	// (see genYieldStmt, stmt.go).
+	isGenerator := retType.Kind == sema.TypeGenerator
+	var llvmRet llvm.Type
+	if isGenerator {
+		paramTypes = append(paramTypes, g.funcValTy)
+		llvmRet = g.voidTy
+		retType = sema.Type{Kind: sema.TypeVoid}
+	} else {
+		llvmRet = g.llvmType(retType)
+	}
+
 	isMain := receiver == ast.InvalidNode && g.tree.Text(nameNode) == "main"
-	llvmRet := g.llvmType(retType)
 	name := g.tree.Text(nameNode)
 	switch {
 	case isMain:
@@ -133,13 +151,14 @@ func (g *Generator) declareExternFuncSignature(decl ast.NodeIndex) {
 
 // beginSyntheticFunc resets Generator's per-function generation fields
 // (curFn/entryBlock/locals/loopStack/matchExprStack/destructors, plus
-// curReceiver/curCtxPtr/curCaptureIndex/curCaptureTy back to "no receiver,
-// no lambda capture context") to lower fn's own body from scratch, leaving
-// fn's own fresh
-// entry block as the builder's current insert point - the reset shape
-// genFuncBody/genConstructorBody/genDestructorBody/buildGlobalInitFn
-// (globalinit.go)/buildArgsInitFn (args.go)/genLambdaFunc (expr.go) all need,
-// deduplicated here rather than six hand-copies that could drift.
+// curReceiver/curCtxPtr/curCaptureIndex/curCaptureTy and
+// curIsGenerator/curGeneratorCallback/curGeneratorElem back to "no receiver,
+// no lambda capture context, not a generator") to lower fn's own body from
+// scratch, leaving fn's own fresh entry block as the builder's current insert
+// point - the reset shape genFuncBody/genConstructorBody/genDestructorBody/
+// buildGlobalInitFn (globalinit.go)/buildArgsInitFn (args.go)/genLambdaFunc
+// (expr.go)/genRangeGeneratorCallbackFunc (stmt.go) all need, deduplicated
+// here rather than hand-copies that could drift.
 //
 // Returns a restore func undoing this. Every call site but genLambdaFunc can
 // ignore it - an ordinary top-level body never depends on what the previous
@@ -154,6 +173,7 @@ func (g *Generator) beginSyntheticFunc(fn llvm.Value) (restore func()) {
 	savedMatchExprStack := g.matchExprStack
 	savedReceiver := g.curReceiver
 	savedCtxPtr, savedCaptureIndex, savedCaptureTy := g.curCtxPtr, g.curCaptureIndex, g.curCaptureTy
+	savedIsGenerator, savedGeneratorCallback, savedGeneratorElem := g.curIsGenerator, g.curGeneratorCallback, g.curGeneratorElem
 
 	g.curFn = fn
 	g.entryBlock = g.ctx.AddBasicBlock(fn, "entry")
@@ -166,6 +186,9 @@ func (g *Generator) beginSyntheticFunc(fn llvm.Value) (restore func()) {
 	g.curCtxPtr = llvm.Value{}
 	g.curCaptureIndex = nil
 	g.curCaptureTy = llvm.Type{}
+	g.curIsGenerator = false
+	g.curGeneratorCallback = llvm.Value{}
+	g.curGeneratorElem = sema.Type{}
 
 	return func() {
 		g.curFn, g.entryBlock, g.locals = savedFn, savedEntry, savedLocals
@@ -173,6 +196,7 @@ func (g *Generator) beginSyntheticFunc(fn llvm.Value) (restore func()) {
 		g.matchExprStack = savedMatchExprStack
 		g.curReceiver = savedReceiver
 		g.curCtxPtr, g.curCaptureIndex, g.curCaptureTy = savedCtxPtr, savedCaptureIndex, savedCaptureTy
+		g.curIsGenerator, g.curGeneratorCallback, g.curGeneratorElem = savedIsGenerator, savedGeneratorCallback, savedGeneratorElem
 	}
 }
 
@@ -187,11 +211,13 @@ func (g *Generator) genFuncBody(decl ast.NodeIndex) {
 	paramListNode := g.tree.FuncParamList(decl)
 	returnTypeNode := g.tree.FuncReturnType(decl)
 	body := g.tree.FuncBody(decl)
+	paramNodes := g.tree.Children(paramListNode)
 
-	retType := sema.Type{Kind: sema.TypeVoid}
+	declaredRetType := sema.Type{Kind: sema.TypeVoid}
 	if returnTypeNode != ast.InvalidNode {
-		retType = g.info.Types[returnTypeNode]
+		declaredRetType = g.info.Types[returnTypeNode]
 	}
+	isGenerator := declaredRetType.Kind == sema.TypeGenerator
 
 	entry := g.funcs[g.info.Refs[nameNode]]
 	g.beginSyntheticFunc(entry.fn)
@@ -201,7 +227,7 @@ func (g *Generator) genFuncBody(decl ast.NodeIndex) {
 		g.curReceiver = g.curFn.Param(0)
 		offset = 1
 	}
-	for i, paramNode := range g.tree.Children(paramListNode) {
+	for i, paramNode := range paramNodes {
 		psym := g.info.Refs[g.tree.Child(paramNode, 0)]
 		ptype := g.info.Types[g.tree.Child(paramNode, 1)]
 		addr := g.allocLocalSlot(psym, g.llvmType(ptype), psym.Name)
@@ -210,9 +236,20 @@ func (g *Generator) genFuncBody(decl ast.NodeIndex) {
 		g.pushDestructorEntry(psym, ptype)
 	}
 
+	retType := declaredRetType
+	if isGenerator {
+		// The generator's own implicit trailing callback parameter (see
+		// declareFuncSignature) - always the real function's very last
+		// parameter, after every declared one.
+		g.curIsGenerator = true
+		g.curGeneratorCallback = g.curFn.Param(offset + len(paramNodes))
+		g.curGeneratorElem = *declaredRetType.Elem
+		retType = sema.Type{Kind: sema.TypeVoid}
+	}
+
 	g.curFunc = &funcCtx{
 		isMain:    receiver == ast.InvalidNode && g.tree.Text(nameNode) == "main",
-		hasReturn: returnTypeNode != ast.InvalidNode,
+		hasReturn: returnTypeNode != ast.InvalidNode && !isGenerator,
 		retType:   retType,
 	}
 

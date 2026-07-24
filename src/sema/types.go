@@ -68,6 +68,16 @@ import (
 // multiReturnTypeFromNode - funcSignature.Return holds it directly, with no
 // separate "is this multi" flag needed anywhere else in this pass.
 //
+// TypeGenerator is a generator function's own call result (see LANGUAGE.md's
+// "Generator functions" section: `func Range(a, b int) yield int { ... }`) -
+// never a real, storable value type, mirroring TypeMultiReturn's own
+// "exists purely to be rejected everywhere except its one legal consuming
+// position" role: a generator call's result is legal ONLY as a RangeForStmt's
+// own subject expression (checkRangeForStmt/checkValueExprAllowGenerator),
+// everywhere else it's a clean diagnostic. Reuses Type's own Elem field (the
+// yielded element type) - the same "wraps one other Type" field
+// TypeArray/TypePointer already share.
+//
 // TypeUntypedNil is the predeclared `nil` identifier's own starting type
 // (see LANGUAGE.md's "Pointers" section), modeled directly on that same
 // untyped-constant precedent but deliberately scoped to pointer types only -
@@ -103,6 +113,7 @@ const (
 	TypeUntypedNil
 
 	TypeMultiReturn
+	TypeGenerator
 )
 
 // TypeInt is a synonym for TypeI32, not a distinct TypeKind value: "int" in
@@ -310,6 +321,8 @@ func (t Type) Equal(u Type) bool {
 			}
 		}
 		return true
+	case TypeGenerator:
+		return t.Elem.Equal(*u.Elem)
 	default:
 		return true
 	}
@@ -384,6 +397,8 @@ func (t Type) String() string {
 			parts[i] = p.String()
 		}
 		return "(" + strings.Join(parts, ", ") + ")"
+	case TypeGenerator:
+		return "yield " + t.Elem.String()
 	default:
 		return "<unknown type>"
 	}

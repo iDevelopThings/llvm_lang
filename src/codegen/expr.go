@@ -270,13 +270,31 @@ func (g *Generator) genFuncThunk(sym *sema.Symbol) llvm.Value {
 // addrOfSymbol's doc comment.
 func (g *Generator) genFuncLit(n ast.NodeIndex) llvm.Value {
 	captures := g.info.Captures[n]
+	return g.buildClosureValue(captures, func(ctxTy llvm.Type) llvm.Value {
+		return g.genLambdaFunc(n, captures, ctxTy)
+	})
+}
 
+// buildClosureValue builds a real closure fat-pointer value {fnPtr, ctxPtr}
+// from an already-resolved capture list, delegating the actual function
+// body's own generation to genFn (given the capture-context struct type to
+// read captures through - the zero llvm.Type{} when there are no captures).
+// Shared by genFuncLit and genRangeGeneratorCallback (stmt.go's generator-
+// consuming range-for callback builder - see CODEGEN.md's "Generator
+// functions" section) - both build a closure value the identical way,
+// differing only in how genFn generates its own body.
+//
+// With no captures, both fat-pointer fields are genuine LLVM constants (a
+// function address and a null pointer), so this stays a plain ConstStruct.
+// Otherwise ctxPtr is a genuine runtime value (an arena_alloc result), which
+// ConstStruct can't embed, so the fat pointer is built as a real runtime
+// aggregate instead (llvm.Undef + CreateInsertValue). Every captured
+// symbol's address is resolved before the arena allocation writes anything -
+// genArenaAlloc/genAddr calls don't nest safely with an in-progress,
+// not-yet-fully-stored struct.
+func (g *Generator) buildClosureValue(captures []*sema.Symbol, genFn func(ctxTy llvm.Type) llvm.Value) llvm.Value {
 	if len(captures) == 0 {
-		// No capture context to allocate at all - both fields of the fat
-		// pointer are genuine LLVM constants (a function's own address, and
-		// a null pointer), so this can stay a real ConstStruct, exactly like
-		// genFuncValue's own free-function case.
-		fn := g.genLambdaFunc(n, nil, llvm.Type{})
+		fn := genFn(llvm.Type{})
 		return g.ctx.ConstStruct([]llvm.Value{fn, llvm.ConstNull(g.ptrTy)}, false)
 	}
 
@@ -286,9 +304,6 @@ func (g *Generator) genFuncLit(n ast.NodeIndex) llvm.Value {
 	}
 	ctxTy := g.ctx.StructType(fieldTypes, false)
 
-	// Every captured symbol's address must be computed before the arena
-	// allocation below writes anything - genArenaAlloc/genAddr calls don't
-	// nest safely with an in-progress, not-yet-fully-stored struct.
 	addrs := make([]llvm.Value, len(captures))
 	for i, sym := range captures {
 		addrs[i] = g.addrOfSymbol(sym)
@@ -300,15 +315,8 @@ func (g *Generator) genFuncLit(n ast.NodeIndex) llvm.Value {
 		g.builder.CreateStore(addr, fieldAddr)
 	}
 
-	fn := g.genLambdaFunc(n, captures, ctxTy)
+	fn := genFn(ctxTy)
 
-	// Unlike the no-capture case above, ctxPtr here (raw) is a genuine
-	// runtime value (an arena_alloc call's result), not a compile-time
-	// constant - LLVM's ConstStruct requires every field to itself be a
-	// constant, so a real closure's fat pointer has to be built as a real
-	// runtime aggregate instead (llvm.Undef + CreateInsertValue), the same
-	// approach genStringConcat/genMakeCall already use for their own
-	// multi-field runtime-computed aggregate results.
 	result := llvm.Undef(g.funcValTy)
 	result = g.builder.CreateInsertValue(result, fn, 0, "")
 	result = g.builder.CreateInsertValue(result, raw, 1, "")
@@ -1195,23 +1203,40 @@ func (g *Generator) isDirectFuncCall(calleeNode ast.NodeIndex) bool {
 // own real (ctxPtr-less) signature directly, exactly as before.
 func (g *Generator) genIndirectCall(calleeNode ast.NodeIndex, argNodes []ast.NodeIndex) llvm.Value {
 	fnVal := g.genExpr(calleeNode)
+	calleeType := g.info.Types[calleeNode]
+
+	args := make([]llvm.Value, len(argNodes))
+	for i, a := range argNodes {
+		args[i] = g.genExpr(a)
+	}
+	return g.genIndirectCallValue(fnVal, calleeType.Params, *calleeType.Return, args)
+}
+
+// genIndirectCallValue calls through fnVal - an already-evaluated fat-pointer
+// {fnPtr, ctxPtr} value (sema.TypeFunc's own representation) - passing
+// ctxPtr as the real leading argument, followed by args, and returns the
+// call's result. Shared by genIndirectCall (whose fnVal comes from
+// evaluating an ordinary function-typed expression) and genYieldStmt's own
+// generator-callback invocation (stmt.go, whose fnVal is the generator's own
+// implicit trailing callback parameter - see CODEGEN.md's "Generator
+// functions" section) - both need the identical "extract fnPtr/ctxPtr,
+// build the call type from paramTypes/retType, CreateCall" lowering,
+// differing only in where fnVal itself comes from.
+func (g *Generator) genIndirectCallValue(fnVal llvm.Value, paramTypes []sema.Type, retType sema.Type, args []llvm.Value) llvm.Value {
 	fnPtr := g.builder.CreateExtractValue(fnVal, 0, "")
 	ctxPtr := g.builder.CreateExtractValue(fnVal, 1, "")
 
-	calleeType := g.info.Types[calleeNode]
-	paramTypes := make([]llvm.Type, len(calleeType.Params)+1)
-	paramTypes[0] = g.ptrTy
-	for i, pt := range calleeType.Params {
-		paramTypes[i+1] = g.llvmType(pt)
+	llvmParamTypes := make([]llvm.Type, len(paramTypes)+1)
+	llvmParamTypes[0] = g.ptrTy
+	for i, pt := range paramTypes {
+		llvmParamTypes[i+1] = g.llvmType(pt)
 	}
-	fnType := llvm.FunctionType(g.llvmType(*calleeType.Return), paramTypes, false)
+	fnType := llvm.FunctionType(g.llvmType(retType), llvmParamTypes, false)
 
-	args := make([]llvm.Value, len(argNodes)+1)
-	args[0] = ctxPtr
-	for i, a := range argNodes {
-		args[i+1] = g.genExpr(a)
-	}
-	return g.builder.CreateCall(fnType, fnPtr, args, "")
+	callArgs := make([]llvm.Value, len(args)+1)
+	callArgs[0] = ctxPtr
+	copy(callArgs[1:], args)
+	return g.builder.CreateCall(fnType, fnPtr, callArgs, "")
 }
 
 // isConstructorCall mirrors sema's own recognition of `Name(args)` as

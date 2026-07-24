@@ -131,18 +131,22 @@ func (p *Parser) parseFuncDecl() ast.NodeIndex {
 }
 
 // parseFuncDeclReturnType parses a FuncDecl's own return-type position: a
-// plain type (`func f() int`, completely unchanged - see parseTypeExpr) or a
+// plain type (`func f() int`, completely unchanged - see parseTypeExpr), a
 // parenthesized, comma-separated list of 2+ types (`func f() (int, bool)` -
 // see LANGUAGE.md's "Go-style multi-return values" section), wrapped in a
 // MultiReturnType node the same way parseParamList wraps FuncDecl's own
-// variable-arity params (see ast.Node's own MultiReturnType doc comment).
-// Deliberately its own function, not folded into parseTypeExpr itself - a
-// bare type position never starts with `(` anywhere else in this grammar
+// variable-arity params (see ast.Node's own MultiReturnType doc comment), or
+// a `yield T` generator return-type marker (see LANGUAGE.md's "Generator
+// functions" section), wrapped in a YieldReturnType node. Deliberately its
+// own function, not folded into parseTypeExpr itself - a bare type position
+// never starts with `(` or the `yield` keyword anywhere else in this grammar
 // (a var's type annotation, a param's type, a struct field's type, an array
 // element type, a FuncType/FuncLit/ExternFuncDecl's own return type all still
-// call parseTypeExpr directly, unchanged), so this new `(` case only ever
-// applies right here, at a FuncDecl's own return-type position - the one
-// place this round's scope actually asked for it.
+// call parseTypeExpr directly, unchanged), so both new cases only ever apply
+// right here, at a FuncDecl's own return-type position - the one place each
+// round that added one actually needed it. A method's receiver-clause
+// restriction on `yield` (a generator can't be a method) is enforced by sema,
+// not here - this function has no idea whether a receiver clause preceded it.
 //
 // A parenthesized list of fewer than 2 types (`func f() ()`, `func f() (int)`)
 // still parses fine structurally - the same "grammar accepts the general
@@ -151,6 +155,9 @@ func (p *Parser) parseFuncDecl() ast.NodeIndex {
 // destructor param list (see sema.checkDestructorDecl) - see
 // sema.multiReturnTypeFromNode for the actual "at least 2" diagnostic.
 func (p *Parser) parseFuncDeclReturnType() ast.NodeIndex {
+	if p.atKeyword(enums.Keywords.Yield) {
+		return p.parseYieldReturnType()
+	}
 	if !p.at(enums.Lexemes.LeftParen) {
 		return p.parseTypeExpr()
 	}
@@ -162,6 +169,19 @@ func (p *Parser) parseFuncDeclReturnType() ast.NodeIndex {
 		End:   closeTok.End,
 	}
 	return p.tree.NewNode(enums.NodeKinds.MultiReturnType, lexer.Token{}, span, types...)
+}
+
+// parseYieldReturnType parses `yield T` in a FuncDecl's own return-type
+// position (see LANGUAGE.md's "Generator functions" section) - the `yield`
+// keyword followed by the generator's own single yielded element type.
+func (p *Parser) parseYieldReturnType() ast.NodeIndex {
+	kwTok := p.expectKeyword(enums.Keywords.Yield)
+	elemType := p.parseTypeExpr()
+	span := ast.Span{
+		Start: kwTok.Start,
+		End:   p.tree.SpanOf(elemType).End,
+	}
+	return p.tree.NewNode(enums.NodeKinds.YieldReturnType, kwTok, span, elemType)
 }
 
 // parseExternFuncDecl parses `extern func Name(params) RetType` - a top-level

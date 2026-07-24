@@ -63,3 +63,4 @@ values:
   - name: YieldStmt
   - name: RangeExpr
   - name: RangeForStmt
+  - name: YieldReturnType

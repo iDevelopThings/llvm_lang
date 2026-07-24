@@ -48,8 +48,22 @@ func (m *Module) Dispose() {
 // loopCtx is one nested for-loop's break/continue branch targets - see
 // genForStmt and genBreakStmt/genContinueStmt.
 type loopCtx struct {
+	// breakTarget/continueTarget are used when returnFromCallback is false -
+	// every ordinary loop kind (plain for, array/map range-for).
 	breakTarget    llvm.BasicBlock
 	continueTarget llvm.BasicBlock
+
+	// returnFromCallback is true only for a generator-consuming range-for's
+	// own synthesized callback body (see genRangeGeneratorCallbackFunc and
+	// CODEGEN.md's "Generator functions" section) - there is no real loop
+	// inside the callback at all (the generator itself does the looping, by
+	// calling this callback repeatedly), so break/continue can't branch to a
+	// real basic block the way every other loop kind's own breakTarget/
+	// continueTarget do; they return a bool directly from the callback's own
+	// frame instead (see genBreakStmt/genContinueStmt) - false (stop early)
+	// for break, true (keep going) for continue. breakTarget/continueTarget
+	// are simply unused (zero-valued) when this is true.
+	returnFromCallback bool
 
 	// destructorBase is len(Generator.destructors) at the point this loop's
 	// own body started generating - see genBreakStmt/genContinueStmt's own
@@ -373,6 +387,25 @@ type Generator struct {
 	curCtxPtr       llvm.Value
 	curCaptureIndex map[*sema.Symbol]int
 	curCaptureTy    llvm.Type
+
+	// curIsGenerator/curGeneratorCallback/curGeneratorElem describe the
+	// function currently being generated only when it's itself a generator
+	// function's own real body (see declareFuncSignature/genFuncBody and
+	// CODEGEN.md's "Generator functions" section) - zero/false for an
+	// ordinary function/method/constructor/lambda, none of which take an
+	// implicit trailing callback parameter at all. curGeneratorCallback is
+	// that trailing parameter's own fat-pointer value (the same {fnPtr,
+	// ctxPtr} representation genFuncValue/genFuncLit already build);
+	// curGeneratorElem is the generator's own declared `yield T` element
+	// type - both read only by genYieldStmt.
+	curIsGenerator       bool
+	curGeneratorCallback llvm.Value
+	curGeneratorElem     sema.Type
+
+	// rangeGenCounter synthesizes each generator-consuming range-for's own
+	// unique, collision-free callback function name (genRangeGeneratorCallbackFunc) -
+	// lambdaCounter's own counterpart, one construct over.
+	rangeGenCounter int
 
 	// thunks memoizes, per free-function Symbol, the small uniform-ABI thunk
 	// genFuncValue builds the first time that function is ever referenced

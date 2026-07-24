@@ -53,6 +53,15 @@ func funcType(sig funcSignature) Type {
 type enclosingFunc struct {
 	hasReturn bool // whether the function declared a return type at all
 	ret       Type // meaningful only when hasReturn is true
+
+	// isGenerator/yieldElem describe a `yield T` generator function's own
+	// body (see LANGUAGE.md's "Generator functions" section) - yieldElem is
+	// T, meaningful only when isGenerator is true. A generator's hasReturn
+	// stays false (an ordinary `return value` is illegal, exactly like a
+	// void function's - only a bare `return` is legal, see checkReturnStmt),
+	// so checkYieldStmt is the only place yieldElem is actually read.
+	isGenerator bool
+	yieldElem   Type
 }
 
 // matchExprCheckCtx is one live expression-mode match's own running result
@@ -166,6 +175,18 @@ type checker struct {
 	// arm bodies are checked via plain checkBlock, exactly as before this
 	// round.
 	matchExprStack []*matchExprCheckCtx
+
+	// inGeneratorRangeBody is > 0 while checking a generator-consuming
+	// range-for's own body (checkRangeForStmt's TypeGenerator case) - a
+	// `return` reached directly inside it (not nested inside a further
+	// FuncLit, which gets its own fresh curFunc/depth entirely - see
+	// checkFuncLit) is rejected: that body becomes a genuinely separate,
+	// independent callback function at codegen time (see CODEGEN.md's
+	// "Generator functions" section), which has no way to make the real
+	// enclosing function return early the way an ordinary nested return can
+	// - true non-local return is a real, separate feature this round
+	// doesn't build (see checkReturnStmt).
+	inGeneratorRangeBody int
 
 	// computingCopyable is structCopyable's own cycle guard - a struct's
 	// Copyable can depend (transitively, through a field) on another
@@ -527,10 +548,21 @@ func (c *checker) checkFuncDecl(decl ast.NodeIndex) {
 	c.checkMainReturnType(decl, sig)
 	body := c.tree.FuncBody(decl)
 
+	isGenerator := sig.Return.Kind == TypeGenerator
+	if isGenerator && c.tree.FuncReceiver(decl) != ast.InvalidNode {
+		c.errorAt(decl, "a method cannot be a generator function (yield return type)")
+	}
+
 	prevFunc := c.curFunc
 	c.curFunc = &enclosingFunc{
-		hasReturn: c.tree.FuncReturnType(decl) != ast.InvalidNode,
-		ret:       sig.Return,
+		// A generator's hasReturn stays false, exactly like a void function -
+		// see enclosingFunc's own doc comment and checkReturnStmt.
+		hasReturn:   c.tree.FuncReturnType(decl) != ast.InvalidNode && !isGenerator,
+		ret:         sig.Return,
+		isGenerator: isGenerator,
+	}
+	if isGenerator {
+		c.curFunc.yieldElem = *sig.Return.Elem
 	}
 	c.checkBlock(body)
 	if c.curFunc.hasReturn && !isTerminatingStmt(c.tree, c.info, body) {
@@ -735,6 +767,8 @@ func (c *checker) checkFuncLit(n ast.NodeIndex) Type {
 	}
 
 	prevFunc := c.curFunc
+	prevInGeneratorRangeBody := c.inGeneratorRangeBody
+	c.inGeneratorRangeBody = 0
 	c.curFunc = &enclosingFunc{
 		hasReturn: returnTypeNode != ast.InvalidNode,
 		ret:       ret,
@@ -744,6 +778,7 @@ func (c *checker) checkFuncLit(n ast.NodeIndex) Type {
 		c.errorAt(n, "missing return")
 	}
 	c.curFunc = prevFunc
+	c.inGeneratorRangeBody = prevInGeneratorRangeBody
 
 	return funcType(funcSignature{Params: params, Return: ret})
 }
@@ -1419,8 +1454,23 @@ func (c *checker) computeTypeFromNode(n ast.NodeIndex) Type {
 		return c.funcTypeFromNode(n)
 	case enums.NodeKinds.MultiReturnType:
 		return c.multiReturnTypeFromNode(n)
+	case enums.NodeKinds.YieldReturnType:
+		return c.yieldReturnTypeFromNode(n)
 	default:
 		return invalidType
+	}
+}
+
+// yieldReturnTypeFromNode converts a YieldReturnType type-position node (a
+// FuncDecl's own `yield T` return-type marker - see LANGUAGE.md's "Generator
+// functions" section and ast.Node's own YieldReturnType doc comment) into a
+// Type - the generator counterpart to pointerTypeFromNode/arrayTypeFromNode,
+// wrapping T via Elem the same "wraps one other Type" way.
+func (c *checker) yieldReturnTypeFromNode(n ast.NodeIndex) Type {
+	elem := c.typeFromNode(c.tree.Child(n, 0))
+	return Type{
+		Kind: TypeGenerator,
+		Elem: &elem,
 	}
 }
 
@@ -1804,7 +1854,10 @@ func (c *checker) checkStmt(n ast.NodeIndex) {
 		// this grammar doesn't reject) still needs to default like any other
 		// value context nothing else will ever revisit - see defaultIfUntyped.
 		expr := c.tree.Child(n, 0)
-		c.defaultIfUntyped(expr, c.checkExpr(expr))
+		t := c.checkExpr(expr)
+		if !c.rejectGeneratorValue(expr, t) {
+			c.defaultIfUntyped(expr, t)
+		}
 	case enums.NodeKinds.ReturnStmt:
 		c.checkReturnStmt(n)
 	case enums.NodeKinds.BreakStmt:
@@ -1828,38 +1881,43 @@ func (c *checker) checkStmt(n ast.NodeIndex) {
 	}
 }
 
-// checkYieldStmt type-checks `yield expr` (see ast.Node's own YieldStmt doc
-// comment and LANGUAGE.md's "match" section's "match as an expression"
-// subsection) - legal only inside a match-expression arm's own block,
-// enforced here exactly the way checkBreakOrContinue enforces break/
-// continue's own loop-only legality, c.matchExprStack being c.loopDepth's
-// stack-shaped counterpart (see that field's own doc comment for why a
-// stack, not a counter). The first yield seen anywhere across the WHOLE
-// enclosing match expression (any arm, not just this one) fixes its result
-// type; every subsequent yield, anywhere in any arm, must be assignable to
-// that already-established type - checkAssignable itself reports the clean
-// diagnostic on a mismatch (naming both types), exactly like every other
-// assignability-checked position in this file.
+// checkYieldStmt type-checks `yield expr` - legal inside a match-expression
+// arm's own block OR a generator function's own body (see LANGUAGE.md's
+// "match" and "Generator functions" sections). c.matchExprStack is checked
+// first and takes priority - a yield inside a still-innermost match-
+// expression arm always targets that match, never an enclosing generator,
+// even when the enclosing function is itself one.
+//
+// Inside a match expression, the first yield seen anywhere across the whole
+// enclosing match fixes its result type; every subsequent yield must be
+// assignable to it. Inside a generator, every yield is checked directly
+// against the generator's own declared element type (curFunc.yieldElem).
 func (c *checker) checkYieldStmt(n ast.NodeIndex) {
-	if len(c.matchExprStack) == 0 {
-		c.errorAt(n, "yield outside a match expression")
-		c.checkValueExpr(c.tree.Child(n, 0))
-		return
-	}
-	frame := c.matchExprStack[len(c.matchExprStack)-1]
-
 	value := c.tree.Child(n, 0)
-	vt := c.defaultIfUntyped(value, c.checkValueExpr(value))
-	if vt.IsInvalid() {
+
+	if len(c.matchExprStack) > 0 {
+		frame := c.matchExprStack[len(c.matchExprStack)-1]
+		vt := c.defaultIfUntyped(value, c.checkValueExpr(value))
+		if vt.IsInvalid() {
+			return
+		}
+		if !frame.resultTypeSet {
+			frame.resultType = vt
+			frame.resultTypeSet = true
+			return
+		}
+		c.checkAssignable(value, frame.resultType, vt, "match arm yield")
 		return
 	}
 
-	if !frame.resultTypeSet {
-		frame.resultType = vt
-		frame.resultTypeSet = true
+	if c.curFunc != nil && c.curFunc.isGenerator {
+		vt := c.checkValueExpr(value)
+		c.checkAssignable(value, c.curFunc.yieldElem, vt, "yield")
 		return
 	}
-	c.checkAssignable(value, frame.resultType, vt, "match arm yield")
+
+	c.errorAt(n, "yield outside a match expression or a generator function")
+	c.checkValueExpr(value)
 }
 
 // checkBreakOrContinue verifies n (a BreakStmt or ContinueStmt) actually
@@ -2028,6 +2086,14 @@ func (c *checker) checkReturnStmt(n ast.NodeIndex) {
 		return // unreachable given the grammar (return only inside a func body)
 	}
 
+	if c.inGeneratorRangeBody > 0 {
+		c.errorAt(n, "return is not supported inside a generator-consuming range-for's own body (this would require non-local return, not implemented)")
+		if value != ast.InvalidNode {
+			c.checkValueExpr(value)
+		}
+		return
+	}
+
 	if value == ast.InvalidNode {
 		if fn.hasReturn {
 			c.errorAt(n, "missing return value (function returns %s)", fn.ret)
@@ -2154,8 +2220,9 @@ func (c *checker) checkRangeForStmt(n ast.NodeIndex) {
 	valueNode := c.tree.RangeForValue(n)
 	subjectNode := c.tree.RangeForSubject(n)
 
-	subjType := c.checkValueExpr(subjectNode)
+	subjType := c.checkRangeForSubjectExpr(subjectNode)
 
+	isGeneratorSubject := subjType.Kind == TypeGenerator
 	switch subjType.Kind {
 	case TypeMap:
 		c.seedRangeBindingChecked(keyNode, *subjType.Key, "range key binding")
@@ -2163,18 +2230,53 @@ func (c *checker) checkRangeForStmt(n ast.NodeIndex) {
 	case TypeArray:
 		c.seedRangeBinding(keyNode, i32Type)
 		c.seedRangeBindingChecked(valueNode, *subjType.Elem, "range value binding")
+	case TypeGenerator:
+		c.checkGeneratorRangeSubject(subjectNode)
+		if c.curFunc != nil && c.curFunc.isGenerator {
+			c.errorAt(subjectNode, "a generator function's own body cannot range over another generator (nested generator composition is not supported)")
+		}
+		if valueNode != ast.InvalidNode {
+			c.errorAt(subjectNode, "range over a generator produces at most 1 value, got 2")
+			c.seedRangeBinding(keyNode, invalidType)
+			c.seedRangeBinding(valueNode, invalidType)
+		} else {
+			// There is no key/index binding at all for a generator subject,
+			// unlike a map (key) or array (index) - the single binding, when
+			// present, is seeded from keyNode (the one-binding form's own
+			// slot - see ast.Node's own RangeForStmt doc comment) but means
+			// the yielded VALUE here, not a key or index.
+			c.seedRangeBindingChecked(keyNode, *subjType.Elem, "range value binding")
+		}
 	case TypeInvalid:
 		c.seedRangeBinding(keyNode, invalidType)
 		c.seedRangeBinding(valueNode, invalidType)
 	default:
-		c.errorAt(subjectNode, "range requires a map or array value, got %s", subjType)
+		c.errorAt(subjectNode, "range requires a map, array, or generator value, got %s", subjType)
 		c.seedRangeBinding(keyNode, invalidType)
 		c.seedRangeBinding(valueNode, invalidType)
 	}
 
+	if isGeneratorSubject {
+		c.inGeneratorRangeBody++
+	}
 	c.loopDepth++
 	c.checkBlock(c.tree.RangeForBody(n))
 	c.loopDepth--
+	if isGeneratorSubject {
+		c.inGeneratorRangeBody--
+	}
+}
+
+// checkGeneratorRangeSubject enforces that subjectNode (already known to be
+// TypeGenerator) is a direct call to a function declared by name -
+// directFuncCallSymbol (resolve.go, shared with isGeneratorRangeSubject)
+// is the actual predicate: the generator-consuming range-for's own codegen
+// (genRangeForGenerator) needs the callee's real FuncDecl-based signature to
+// append its synthesized callback argument to, which only a direct call has.
+func (c *checker) checkGeneratorRangeSubject(subjectNode ast.NodeIndex) {
+	if _, ok := directFuncCallSymbol(c.tree, c.info, subjectNode); !ok {
+		c.errorAt(subjectNode, "range over a generator requires calling it directly by name (for v := range Gen(...) { ... }), not through a stored function value or any other indirection")
+	}
 }
 
 // seedRangeBinding seeds nameNode's (a RangeForStmt's key or value binding,
@@ -2714,9 +2816,23 @@ func (c *checker) checkExpr(n ast.NodeIndex) Type {
 
 // checkValueExpr is checkExpr for a position that requires an actual value -
 // everywhere except a bare call used as a statement (see checkStmt's
-// ExprStmt case). A void result (a call to a function with no declared
-// return type) is valid there and nowhere else.
+// ExprStmt case) and a range-for's own subject (see checkRangeForSubjectExpr).
+// A void result (a call to a function with no declared return type) is valid
+// in the former and nowhere else; a TypeGenerator result is valid in the
+// latter and nowhere else.
 func (c *checker) checkValueExpr(n ast.NodeIndex) Type {
+	return c.checkValueExprAllowGenerator(n, false)
+}
+
+// checkRangeForSubjectExpr is checkValueExpr with exactly one exception: a
+// TypeGenerator result is let through instead of rejected - see
+// checkRangeForStmt, the one legal position a generator call's own result may
+// appear in (LANGUAGE.md's "Generator functions" section).
+func (c *checker) checkRangeForSubjectExpr(n ast.NodeIndex) Type {
+	return c.checkValueExprAllowGenerator(n, true)
+}
+
+func (c *checker) checkValueExprAllowGenerator(n ast.NodeIndex, allowGenerator bool) Type {
 	t := c.checkExpr(n)
 	if t.Kind == TypeVoid {
 		c.errorAt(n, "call does not return a value, cannot be used here")
@@ -2738,7 +2854,26 @@ func (c *checker) checkValueExpr(n ast.NodeIndex) Type {
 		c.errorAt(n, "multi-value result %s cannot be used as a single value; it can only be destructured immediately (a, b := ... / a, b = ...) or returned matching a function's own multi-return type", t)
 		return invalidType
 	}
+	if !allowGenerator && c.rejectGeneratorValue(n, t) {
+		return invalidType
+	}
 	return t
+}
+
+// rejectGeneratorValue reports (and reports a diagnostic for) whether t is a
+// generator call's result (TypeGenerator - see LANGUAGE.md's "Generator
+// functions" section) reaching a position other than the one it's legal in.
+// Shared by checkValueExprAllowGenerator's own gate and checkStmt's ExprStmt
+// case (a bare `Gen(...)` statement, discarding the result - the other
+// position a generator's result could otherwise leak out uncaught, since
+// ExprStmt intentionally calls checkExpr directly to let a genuine void
+// result through).
+func (c *checker) rejectGeneratorValue(n ast.NodeIndex, t Type) bool {
+	if t.Kind != TypeGenerator {
+		return false
+	}
+	c.errorAt(n, "a generator call's result can only be used directly as a range-for's own subject (for v := range Gen(...) { ... }); it cannot be stored, passed as an argument, returned, or discarded")
+	return true
 }
 
 func (c *checker) inferExpr(n ast.NodeIndex) Type {

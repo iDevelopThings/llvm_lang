@@ -989,11 +989,29 @@ func (r *resolver) resolveForStmt(parent *Scope, n ast.NodeIndex) {
 // MultiShortVarDecl reasoning resolveStmt's own case above documents - see
 // typecheck.go's checkRangeForStmt for where each one's Type actually gets
 // computed and cached).
+//
+// When the subject is a direct call to a generator function (`yield T` -
+// see LANGUAGE.md's "Generator functions" section), this statement's own
+// scope is promoted to ScopeFunc kind instead of the ordinary ScopeBlock a
+// map/array range-for keeps: its body is synthesized into a real,
+// independent function at codegen time (the generator's own callback),
+// exactly like a FuncLit's body, and needs the identical capture-boundary
+// treatment (see capture.go's analyzeGeneratorRangeCaptures/isProperAncestorFuncScope)
+// so a reference to an outer local gets marked captured, and the callback's
+// own value binding doesn't get mistaken for one. isGeneratorRangeSubject is
+// purely syntactic (a FuncDecl's own declared return-type shape), decidable
+// here well before type-checking ever computes sema.TypeGenerator.
 func (r *resolver) resolveRangeForStmt(parent *Scope, n ast.NodeIndex) {
 	scope := newScope(ScopeBlock, parent, ast.InvalidNode)
 	r.info.Scopes[n] = scope
 
-	r.resolveExpr(scope, r.tree.RangeForSubject(n))
+	subject := r.tree.RangeForSubject(n)
+	r.resolveExpr(scope, subject)
+
+	if isGeneratorRangeSubject(r.tree, r.info, subject) {
+		scope.Kind = ScopeFunc
+		scope.Owner = n
+	}
 
 	if key := r.tree.RangeForKey(n); key != ast.InvalidNode {
 		r.declareLocal(scope, key, key, SymVar)
@@ -1003,6 +1021,49 @@ func (r *resolver) resolveRangeForStmt(parent *Scope, n ast.NodeIndex) {
 	}
 
 	r.resolveBlock(scope, r.tree.RangeForBody(n))
+}
+
+// isGeneratorRangeSubject reports whether subject (a RangeForStmt's own,
+// already-resolved subject expression) is a direct call to a function
+// declared with a `yield T` return-type marker (ast.NodeKinds.YieldReturnType).
+// sym.Tree (not tree) is used to read the FuncDecl's own return-type child,
+// since the generator may be declared in a different file than the one
+// currently being resolved (see Symbol's own Tree field doc comment).
+func isGeneratorRangeSubject(tree *ast.Tree, info *Info, subject ast.NodeIndex) bool {
+	sym, ok := directFuncCallSymbol(tree, info, subject)
+	if !ok {
+		return false
+	}
+	retTypeNode := sym.Tree.FuncReturnType(sym.Decl)
+	if retTypeNode == ast.InvalidNode {
+		return false
+	}
+	return sym.Tree.Nodes[retTypeNode].Kind == enums.NodeKinds.YieldReturnType
+}
+
+// directFuncCallSymbol reports whether subject is a direct call to a
+// function declared by name (an Ident callee resolving, via info.Refs, to a
+// SymFunc with a real declaration) - as opposed to any indirection (a call
+// through a stored function-typed variable/parameter, a parenthesized call
+// wrapping one, ...). Shared by isGeneratorRangeSubject above (deciding
+// purely syntactically whether a range-for's subject is a generator call,
+// before type-checking exists) and typecheck.go's checkGeneratorRangeSubject
+// (enforcing the identical "must be direct" rule once TypeGenerator is
+// already known) - mirrors codegen's own isDirectFuncCall distinction one
+// layer up (src/codegen/expr.go).
+func directFuncCallSymbol(tree *ast.Tree, info *Info, subject ast.NodeIndex) (*Symbol, bool) {
+	if tree.Nodes[subject].Kind != enums.NodeKinds.CallExpr {
+		return nil, false
+	}
+	callee := tree.Child(subject, 0)
+	if tree.Nodes[callee].Kind != enums.NodeKinds.Ident {
+		return nil, false
+	}
+	sym, ok := info.Refs[callee]
+	if !ok || sym.Kind != SymFunc || sym.Decl == ast.InvalidNode {
+		return nil, false
+	}
+	return sym, true
 }
 
 // resolveMatchStmt resolves a `match subject { pattern => body, ... }`
@@ -1212,6 +1273,11 @@ func (r *resolver) resolveType(scope *Scope, n ast.NodeIndex) {
 		for _, typeNode := range r.tree.Children(n) {
 			r.resolveType(scope, typeNode)
 		}
+	case enums.NodeKinds.YieldReturnType:
+		// A generator function's own `yield T` return-type marker (see
+		// LANGUAGE.md's "Generator functions" section) - T is an ordinary
+		// type-position node, resolved exactly like any other.
+		r.resolveType(scope, r.tree.Child(n, 0))
 	}
 }
 
