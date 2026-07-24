@@ -221,6 +221,17 @@ var (
 // IsInvalid reports whether t is the TypeInvalid error-recovery sentinel.
 func (t Type) IsInvalid() bool { return t.Kind == TypeInvalid }
 
+// Underlying derefs one TypePointer level, returning t unchanged for any
+// other Kind - a pointer-to-struct/enum's own member access auto-derefs
+// (see LANGUAGE.md's "Pointers" section: `p.field` behaves like
+// `(*p).field`), and every member-lookup site needs the identical step.
+func (t Type) Underlying() Type {
+	if t.Kind == TypePointer {
+		return *t.Elem
+	}
+	return t
+}
+
 // IsIntegerKind reports whether t is a signed integer type of any width
 // (i8/i16/i32/i64 - "int" is exactly i32, see TypeInt's doc comment) or the
 // untyped-int constant kind.

@@ -3829,9 +3829,7 @@ func (c *checker) resolveMember(n ast.NodeIndex) (*Symbol, bool) {
 	// Go's own automatic pointer-dereference rule for selector expressions.
 	// codegen's genAddr/genMethodCall mirror this same auto-deref at the
 	// value-address level.
-	if objType.Kind == TypePointer {
-		objType = *objType.Elem
-	}
+	objType = objType.Underlying()
 
 	var found *Symbol
 	switch objType.Kind {
