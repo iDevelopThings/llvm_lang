@@ -1088,6 +1088,12 @@ func (g *Generator) genCallExpr(n ast.NodeIndex) llvm.Value {
 		g.genMapRemoveCall(argNodes)
 		return llvm.Value{}
 	}
+	if g.isBuiltinCall(calleeNode, "resume") {
+		return g.genResumeCall(g.genExpr(argNodes[0]))
+	}
+	if g.isBuiltinCall(calleeNode, "done") {
+		return g.genDoneCall(g.genExpr(argNodes[0]))
+	}
 	if g.isConstructorCall(calleeNode) {
 		return g.genConstructorCall(calleeNode, argNodes)
 	}

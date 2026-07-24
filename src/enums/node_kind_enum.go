@@ -69,6 +69,7 @@ const (
 	NodeKindRangeExpr         NodeKind = 53
 	NodeKindRangeForStmt      NodeKind = 54
 	NodeKindYieldReturnType   NodeKind = 55
+	NodeKindAwaitStmt         NodeKind = 56
 )
 
 type NodeKindContainer struct {
@@ -128,6 +129,7 @@ type NodeKindContainer struct {
 	RangeExpr         NodeKind
 	RangeForStmt      NodeKind
 	YieldReturnType   NodeKind
+	AwaitStmt         NodeKind
 }
 
 // NodeKinds is the entry point for the NodeKind enum.
@@ -188,6 +190,7 @@ var NodeKinds = NodeKindContainer{
 	RangeExpr:         NodeKindRangeExpr,
 	RangeForStmt:      NodeKindRangeForStmt,
 	YieldReturnType:   NodeKindYieldReturnType,
+	AwaitStmt:         NodeKindAwaitStmt,
 }
 
 // NodeKindInfo is the static metadata attached to a NodeKind.
@@ -421,6 +424,10 @@ var nodeKindInfos = map[NodeKind]NodeKindInfo{
 		NodeKind: NodeKindYieldReturnType,
 		Name:     "YieldReturnType",
 	},
+	NodeKindAwaitStmt: {
+		NodeKind: NodeKindAwaitStmt,
+		Name:     "AwaitStmt",
+	},
 }
 
 var nodeKindValues = []NodeKind{
@@ -480,6 +487,7 @@ var nodeKindValues = []NodeKind{
 	NodeKindRangeExpr,
 	NodeKindRangeForStmt,
 	NodeKindYieldReturnType,
+	NodeKindAwaitStmt,
 }
 
 var nodeKindByName = map[string]NodeKind{
@@ -539,6 +547,7 @@ var nodeKindByName = map[string]NodeKind{
 	"rangeexpr":         NodeKindRangeExpr,
 	"rangeforstmt":      NodeKindRangeForStmt,
 	"yieldreturntype":   NodeKindYieldReturnType,
+	"awaitstmt":         NodeKindAwaitStmt,
 }
 
 // Values returns every declared value in declaration order.

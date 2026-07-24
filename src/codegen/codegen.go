@@ -402,6 +402,23 @@ type Generator struct {
 	curGeneratorCallback llvm.Value
 	curGeneratorElem     sema.Type
 
+	// curIsAsync/curCoroId/curCoroHandle/curCoroTeardownBB describe the
+	// function currently being generated only when it's itself an `async
+	// func`'s own real body (see LANGUAGE.md's "Coroutines" section and
+	// CODEGEN.md's "Coroutines" section) - zero/nil for every other
+	// function kind. curCoroId/curCoroHandle are the token/ptr values
+	// llvm.coro.id/llvm.coro.begin produce in the function's own entry
+	// block (genCoroPrologue) - safe to keep as plain SSA values rather than
+	// re-loading from a slot, since the entry block dominates every later
+	// use, including every per-await cleanup block. curCoroTeardownBB is
+	// the function's own shared final-teardown block (coroEndBlock),
+	// lazily created on first use since a coroutine with zero awaits still
+	// needs exactly one.
+	curIsAsync        bool
+	curCoroId         llvm.Value
+	curCoroHandle     llvm.Value
+	curCoroTeardownBB llvm.BasicBlock
+
 	// rangeGenCounter synthesizes each generator-consuming range-for's own
 	// unique, collision-free callback function name (genRangeGeneratorCallbackFunc) -
 	// lambdaCounter's own counterpart, one construct over.
@@ -516,6 +533,55 @@ type Generator struct {
 	// surface.
 	argsGlobal llvm.Value
 	argsUsed   bool
+
+	// Coroutine intrinsics (see CODEGEN.md's "Coroutines" section) - declared
+	// once in setupCoroutines via the generic intrinsic-declaration mechanism
+	// (LookupIntrinsicID/IntrinsicType/IntrinsicDeclaration - none of these
+	// have a dedicated llvm-c header). coroSize is always the i64 overload,
+	// matching mallocFn's own i64 size parameter with no cast needed.
+	coroIdFn        llvm.Value
+	coroIdType      llvm.Type
+	coroSizeFn      llvm.Value
+	coroSizeType    llvm.Type
+	coroBeginFn     llvm.Value
+	coroBeginType   llvm.Type
+	coroFreeFn      llvm.Value
+	coroFreeType    llvm.Type
+	coroEndFn       llvm.Value
+	coroEndType     llvm.Type
+	coroSuspendFn   llvm.Value
+	coroSuspendType llvm.Type
+	coroSaveFn      llvm.Value
+	coroSaveType    llvm.Type
+	coroResumeFn    llvm.Value
+	coroResumeType  llvm.Type
+	coroDestroyFn   llvm.Value
+	coroDestroyType llvm.Type
+	coroDoneFn      llvm.Value
+	coroDoneType    llvm.Type
+
+	// presplitCoroutineAttrKind is the "presplitcoroutine" enum attribute
+	// kind ID (see CODEGEN.md's "Coroutines" section) - every async
+	// function's own LLVM function must carry this, or LLVM's coroutine-
+	// splitting passes silently never look at it.
+	presplitCoroutineAttrKind uint
+
+	// coroDestroyLocalFn/-Type is a small synthesized wrapper this package
+	// builds once - void(ptr addr): loads the handle stored at addr, then
+	// calls coroDestroyFn on it. destructorFuncFor's TypeCoroutine case
+	// returns this, so a coroutine-handle local's own automatic scope-exit
+	// cleanup reuses pushDestructorEntry/unwindDestructorsTo wholesale (both
+	// already forward a local's own storage ADDRESS, never its loaded
+	// value - exactly what a struct/enum destructor's pointer receiver
+	// already expects, but llvm.coro.destroy needs the handle BY VALUE, thus
+	// this adapter) - see CODEGEN.md's "Coroutines" section.
+	coroDestroyLocalFn   llvm.Value
+	coroDestroyLocalType llvm.Type
+
+	// coroTokenTy is llvm.coro.end's own "no token" operand type - built
+	// once in setupCoroutines rather than re-querying ctx.TokenType() at
+	// every coroEndBlock call site.
+	coroTokenTy llvm.Type
 }
 
 // Generate lowers tree (with its resolved/checked info) into a fresh LLVM
@@ -577,6 +643,17 @@ func GeneratePackage(trees []*ast.Tree, infos map[*ast.Tree]*sema.Info, moduleNa
 	g.setupTypes()
 	g.setupMapTypes()
 	g.setupRuntime()
+	if programHasAsyncFunc(trees) {
+		// Lazy, like g.argsGlobal/argsUsed just below - not merely for
+		// cleanliness here: coroDestroyLocalFn's own body calls
+		// llvm.coro.destroy, which only ever gets lowered by the
+		// optimization pipeline's coroutine-cleanup passes when the module
+		// actually contains a presplitcoroutine function (see CODEGEN.md's
+		// "Coroutines" section) - declaring it unconditionally would leave
+		// an unlowerable intrinsic call in every program that never uses
+		// coroutines at all, a real, confirmed instruction-selection crash.
+		g.setupCoroutines()
+	}
 	g.setupArgsGlobal()
 	g.genPackage(trees)
 

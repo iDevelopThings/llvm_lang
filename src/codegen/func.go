@@ -64,12 +64,20 @@ func (g *Generator) declareFuncSignature(decl ast.NodeIndex) {
 	// call through this trailing parameter instead of a real return value
 	// (see genYieldStmt, stmt.go).
 	isGenerator := retType.Kind == sema.TypeGenerator
+	isAsync := g.tree.FuncIsAsync(decl)
 	var llvmRet llvm.Type
-	if isGenerator {
+	switch {
+	case isAsync:
+		// An async function's own real LLVM return type is the coroutine
+		// handle llvm.coro.begin produces (a ptr), never its declared
+		// (void-only this round) result type - see CODEGEN.md's
+		// "Coroutines" section.
+		llvmRet = g.ptrTy
+	case isGenerator:
 		paramTypes = append(paramTypes, g.funcValTy)
 		llvmRet = g.voidTy
 		retType = sema.Type{Kind: sema.TypeVoid}
-	} else {
+	default:
 		llvmRet = g.llvmType(retType)
 	}
 
@@ -90,8 +98,13 @@ func (g *Generator) declareFuncSignature(decl ast.NodeIndex) {
 	}
 
 	fnType := llvm.FunctionType(llvmRet, paramTypes, false)
+	fn := llvm.AddFunction(g.mod, name, fnType)
+	if isAsync {
+		attr := g.ctx.CreateEnumAttribute(g.presplitCoroutineAttrKind, 0)
+		fn.AddFunctionAttr(attr)
+	}
 	g.funcs[sym] = funcEntry{
-		fn:       llvm.AddFunction(g.mod, name, fnType),
+		fn:       fn,
 		fnType:   fnType,
 		retType:  retType,
 		isMethod: receiver != ast.InvalidNode,
@@ -174,6 +187,7 @@ func (g *Generator) beginSyntheticFunc(fn llvm.Value) (restore func()) {
 	savedReceiver := g.curReceiver
 	savedCtxPtr, savedCaptureIndex, savedCaptureTy := g.curCtxPtr, g.curCaptureIndex, g.curCaptureTy
 	savedIsGenerator, savedGeneratorCallback, savedGeneratorElem := g.curIsGenerator, g.curGeneratorCallback, g.curGeneratorElem
+	savedIsAsync, savedCoroId, savedCoroHandle, savedCoroTeardownBB := g.curIsAsync, g.curCoroId, g.curCoroHandle, g.curCoroTeardownBB
 
 	g.curFn = fn
 	g.entryBlock = g.ctx.AddBasicBlock(fn, "entry")
@@ -189,6 +203,10 @@ func (g *Generator) beginSyntheticFunc(fn llvm.Value) (restore func()) {
 	g.curIsGenerator = false
 	g.curGeneratorCallback = llvm.Value{}
 	g.curGeneratorElem = sema.Type{}
+	g.curIsAsync = false
+	g.curCoroId = llvm.Value{}
+	g.curCoroHandle = llvm.Value{}
+	g.curCoroTeardownBB = llvm.BasicBlock{}
 
 	return func() {
 		g.curFn, g.entryBlock, g.locals = savedFn, savedEntry, savedLocals
@@ -197,6 +215,7 @@ func (g *Generator) beginSyntheticFunc(fn llvm.Value) (restore func()) {
 		g.curReceiver = savedReceiver
 		g.curCtxPtr, g.curCaptureIndex, g.curCaptureTy = savedCtxPtr, savedCaptureIndex, savedCaptureTy
 		g.curIsGenerator, g.curGeneratorCallback, g.curGeneratorElem = savedIsGenerator, savedGeneratorCallback, savedGeneratorElem
+		g.curIsAsync, g.curCoroId, g.curCoroHandle, g.curCoroTeardownBB = savedIsAsync, savedCoroId, savedCoroHandle, savedCoroTeardownBB
 	}
 }
 
@@ -218,9 +237,15 @@ func (g *Generator) genFuncBody(decl ast.NodeIndex) {
 		declaredRetType = g.info.Types[returnTypeNode]
 	}
 	isGenerator := declaredRetType.Kind == sema.TypeGenerator
+	isAsync := g.tree.FuncIsAsync(decl)
 
 	entry := g.funcs[g.info.Refs[nameNode]]
 	g.beginSyntheticFunc(entry.fn)
+
+	if isAsync {
+		g.curIsAsync = true
+		g.genCoroPrologue()
+	}
 
 	offset := 0
 	if receiver != ast.InvalidNode {
@@ -305,11 +330,19 @@ func (g *Generator) emitFallbackTerminator() {
 // whatever's left here is exactly this function/constructor/destructor's own
 // by-value parameters, pushed by pushDestructorEntry before body ever started
 // generating.
+// An async function's own fall-through case is genuinely different from
+// every other function kind's (see finishCoroBody): falling off the end
+// must reach the coroutine's own final suspend, not a plain `ret`.
 func (g *Generator) finishBody(body ast.NodeIndex) {
-	if !g.genBlock(body) {
-		g.unwindDestructorsTo(0)
-		g.emitFallbackTerminator()
+	if g.genBlock(body) {
+		return
 	}
+	if g.curIsAsync {
+		g.finishCoroBody()
+		return
+	}
+	g.unwindDestructorsTo(0)
+	g.emitFallbackTerminator()
 }
 
 // pushDestructorEntry records sym (a local var/short-var-decl/parameter
@@ -349,6 +382,12 @@ func (g *Generator) destructorFuncFor(t sema.Type) (funcEntry, bool) {
 			return funcEntry{}, false
 		}
 		return g.enumDtors[t.Enum], true
+	case sema.TypeCoroutine:
+		// Every coroutine handle owns a real heap frame unconditionally (see
+		// sema.IsNonCopyable) - coroDestroyLocalFn (coroutine.go) is this
+		// package's own single, shared "destructor" for the whole type, not
+		// a per-async-func one the way a struct/enum destructor is.
+		return funcEntry{fn: g.coroDestroyLocalFn, fnType: g.coroDestroyLocalType}, true
 	default:
 		return funcEntry{}, false
 	}

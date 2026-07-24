@@ -182,6 +182,15 @@ func (t *Tree) FuncBody(decl NodeIndex) NodeIndex {
 	return t.Child(decl, 4)
 }
 
+// FuncIsAsync reports whether decl (a FuncDecl) is an `async func` (see
+// LANGUAGE.md's "Coroutines" section) - carried in decl's own Tok (`async`
+// instead of the usual `func`) rather than a return-type-position node the
+// way YieldReturnType marks a generator, since async modifies the whole
+// declaration, not its return type - see Node's own FuncDecl doc comment.
+func (t *Tree) FuncIsAsync(decl NodeIndex) bool {
+	return t.Nodes[decl].Tok.Keyword == enums.Keywords.Async
+}
+
 // ExternFuncName returns decl's (an ExternFuncDecl's) name child - see
 // Node's own ExternFuncDecl doc comment for the [name, paramList, returnType]
 // shape these three accessors index into. A deliberately separate, parallel

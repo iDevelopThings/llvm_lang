@@ -49,6 +49,8 @@ func (p *Parser) parseStmt() ast.NodeIndex {
 		return p.parseMatchStmt()
 	case p.atKeyword(enums.Keywords.Yield):
 		return p.parseYieldStmt()
+	case p.atKeyword(enums.Keywords.Await):
+		return p.parseAwaitStmt()
 	default:
 		return p.parseSimpleStmt()
 	}
@@ -723,6 +725,16 @@ func (p *Parser) parseBreakStmt() ast.NodeIndex {
 func (p *Parser) parseContinueStmt() ast.NodeIndex {
 	kwTok := p.expectKeyword(enums.Keywords.Continue)
 	return p.tree.NewNode(enums.NodeKinds.ContinueStmt, kwTok, tokenSpan(kwTok))
+}
+
+// parseAwaitStmt parses a bare `await` (see LANGUAGE.md's "Coroutines"
+// section) - no operand, unlike `yield expr`, and no result: the exact same
+// bare-keyword, zero-children shape as parseBreakStmt/parseContinueStmt.
+// Legal only inside an async function's own body - enforced by sema
+// (checkAwaitStmt), not this grammar.
+func (p *Parser) parseAwaitStmt() ast.NodeIndex {
+	kwTok := p.expectKeyword(enums.Keywords.Await)
+	return p.tree.NewNode(enums.NodeKinds.AwaitStmt, kwTok, tokenSpan(kwTok))
 }
 
 // parseDeleteStmt parses `delete p` (see LANGUAGE.md's "Pointers" section) -

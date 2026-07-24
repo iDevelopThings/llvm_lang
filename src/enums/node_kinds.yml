@@ -64,3 +64,4 @@ values:
   - name: RangeExpr
   - name: RangeForStmt
   - name: YieldReturnType
+  - name: AwaitStmt
