@@ -113,10 +113,14 @@ func TestNonCopyableByValueParameterAllowsFreshConstruction(t *testing.T) {
 	checkSrc(t, src)
 }
 
-// TestNonCopyableByValueReturnIsError covers rejecting a non-copyable type
-// returned by value from a function.
+// TestNonCopyableByValueReturnIsError covers rejecting an EXISTING
+// non-copyable value returned by value from a function - unlike a fresh
+// construction or `move x` (see TestNonCopyableFreshConstructionReturnIsLegal,
+// move_test.go), which are both legal return values (see LANGUAGE.md's
+// "Destructors" section's "move" subsection and DECISIONS.md's dated entry
+// for why the old blanket rejection no longer applies).
 func TestNonCopyableByValueReturnIsError(t *testing.T) {
-	src := fileHandleSrc + "func make() FileHandle {\n\treturn FileHandle(1)\n}\n"
+	src := fileHandleSrc + "func make() FileHandle {\n\ta := FileHandle(1)\n\treturn a\n}\n"
 	expectCheckErrors(t, src, 1)
 }
 
@@ -202,4 +206,45 @@ func TestDynamicArrayOfNonCopyableElementTypeIsError(t *testing.T) {
 // perfectly legal, same as before.
 func TestPlainStructWithoutDestructorRemainsCopyable(t *testing.T) {
 	checkSrc(t, pointSrc+"func f() {\n\ta := Point{1, 2}\n\tb := a\n\tprint(b.x)\n}\n")
+}
+
+// multiReturnFreshHandleSrc pairs fileHandleSrc with a multi-return function
+// whose first result is non-copyable - the fixture for the
+// checkMultiAssignStmt/checkMultiShortVarDeclNode cases below.
+const multiReturnFreshHandleSrc = fileHandleSrc +
+	"func makeHandle() (FileHandle, int) {\n\treturn FileHandle(1), 2\n}\n"
+
+// TestNonCopyableMultiAssignFreshCallIsLegal covers `a, b = f(...)` (the
+// `=` form, checkMultiAssignStmt) destructuring a multi-return call whose
+// first result is non-copyable: previously rejected regardless of the RHS,
+// because checkNoIllegalCopy was checking the assignment target itself for
+// freshness rather than the call it's being assigned from - target is
+// always an existing lvalue, never a fresh construction, so this could never
+// pass. See checkMultiShortVarDeclNode's own identical `value` call for the
+// already-correct `:=` counterpart this now mirrors.
+func TestNonCopyableMultiAssignFreshCallIsLegal(t *testing.T) {
+	src := multiReturnFreshHandleSrc +
+		"func f() {\n\tvar a FileHandle\n\tvar b int\n\ta, b = makeHandle()\n\tprint(a.raw)\n\tprint(b)\n}\n"
+	checkSrc(t, src)
+}
+
+// TestNonCopyableMultiShortVarDeclFreshCallIsLegal is the `:=` counterpart -
+// already routed through the correct `value` expression, but previously
+// still rejected: isFreshConstruction's CallExpr case only recognized a
+// single-value non-copyable return, never TypeMultiReturn, so no multi-
+// return call was ever seen as fresh regardless of form.
+func TestNonCopyableMultiShortVarDeclFreshCallIsLegal(t *testing.T) {
+	src := multiReturnFreshHandleSrc +
+		"func f() {\n\ta, b := makeHandle()\n\tprint(a.raw)\n\tprint(b)\n}\n"
+	checkSrc(t, src)
+}
+
+// TestNonCopyableMultiAssignExistingValueIsError is the invalid-path
+// counterpart: a multi-assign whose source is a genuine existing value (the
+// Go-style parallel `a, b = x, y` form, not a multi-return call) still
+// correctly rejects copying a non-copyable value that isn't fresh.
+func TestNonCopyableMultiAssignExistingValueIsError(t *testing.T) {
+	src := fileHandleSrc +
+		"func f() {\n\th := FileHandle(1)\n\tvar a FileHandle\n\tvar b int\n\ta, b = h, 2\n\tprint(a.raw)\n\tprint(b)\n}\n"
+	expectCheckErrors(t, src, 1)
 }

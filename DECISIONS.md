@@ -1733,3 +1733,85 @@ pipeline (`compileAndJITOptimized`, coroutine intrinsics only lower there)
 a changing `NextWait`, simultaneous due entries, and removal not disturbing
 neighboring entries. Worked example: `examples/scheduler_demo/
 scheduler_demo.llx`, run JIT and AOT alike.
+
+---
+
+## 2026-07-24 - `move x`: reject conditional moves outright, extend fresh-construction to resolve the return-statement escape-analysis gap
+
+**Decision:** add a `move x` prefix expression (`x` a bare identifier only)
+as a second exception to the non-copyable copy rule, alongside fresh
+construction, now legal everywhere including a return statement (see
+`LANGUAGE.md`'s "move" subsection - this is exactly the gap the prior
+`coroutine`/`std/scheduler` entry above worked around with `*Entry`
+pointer indirection). Enforcement is entirely sema-side, flow-sensitive but
+deliberately simple: a moved-from symbol is tracked per function, and a
+value moved on only *some* of two converging paths (one `if`/`else` branch,
+one `match` arm, or a loop iteration after the first) is rejected outright
+as ambiguous, never reconciled.
+
+**Why reject rather than reconcile:** a real per-iteration/per-branch fixed
+point (tracking a "maybe moved" state and resolving it against every
+runtime path) is the textbook-correct approach, but it's real added
+complexity this round doesn't need: rejecting the ambiguous case outright
+means codegen never has to *decide* whether a given entry is ambiguously
+moved - no "moved" sentinel added to any type's representation, no runtime
+check at a destructor call site. This did NOT turn out to mean zero codegen
+changes at all, though (an earlier draft of this entry claimed exactly
+that, before independent verification caught the gap): `removeDestructorEntry`
+removing an entry from *anywhere* in `Generator.destructors`, not only the
+top, broke two scope-boundary mechanisms that had always assumed otherwise -
+see `CODEGEN.md`'s own "move x" subsection for both (a plain integer
+`base`/`destructorBase` snapshot silently invalidated by a below-it removal,
+and `genIfStmt`/`genMatchStmt`'s own blind post-branch `restoreDestructors`
+resurrecting an entry every reachable branch had legitimately moved away).
+Both fixes are still purely "recompute the right bookkeeping against
+whatever's actually on the stack" - no new per-type runtime state, no
+generalizing the coroutine-handle nil-guard to arbitrary struct types -
+just correcting an assumption two existing mechanisms made that no longer
+held once removal-from-anywhere became possible.
+
+**The loop case specifically:** rather than a real back-edge dataflow join
+(the loop-head state depending on both loop entry and the body's own exit
+state, requiring fixed-point iteration), moving a symbol declared *outside*
+the current loop, from inside that loop's own body, is rejected
+unconditionally regardless of break/continue placement - a value declared
+inside the loop body has no such restriction, being fresh every iteration
+by construction. This is provably sound (a real unsoundness exists whenever
+such a loop can iterate more than once) but strictly more conservative than
+necessary: a move immediately followed by an unconditional `break`, never
+reading the moved-from symbol again inside the loop, is rejected here even
+though it's actually safe. Accepted as this round's own scope boundary,
+matching the same "simpler and stricter over a real fixed point" trade-off
+as the conditional-move rule above.
+
+**Resolving the return-statement gap:** the prior entry's own `*Entry`
+workaround existed because a fresh-value return had no way to prove
+soundness without knowing, at every call site, that the callee always
+hands back sole ownership. `move` sidesteps that: `isFreshConstruction`
+now also treats a call to any function whose own declared return type is
+non-copyable as fresh at that call's own use site - sound because such a
+function could only have type-checked if every one of its own returns
+already satisfied this same fresh-or-move rule, transitively guaranteeing
+sole ownership with no per-function annotation needed.
+
+**Independent finding, fixed in the same round:** `genAssignStmt`'s plain
+`=` case never destructed an existing non-copyable target's old value
+before overwriting it - a real, pre-existing leak (`f := Res(1); f =
+Res(2)` never ran `Res(1)`'s destructor) independent of `move`, but one
+`move` would have doubled: `y = move x` overwriting an already-live `y`
+needs the identical fix to be sound. Fixed by `genAssignInto` (see
+`CODEGEN.md`), reusing `destructorFuncFor`/`genDestructorCall`.
+
+**Status:** shipped. Parser (`src/parser/move_test.go`), sema
+(`src/sema/move_test.go` - every fresh-or-move call site, use-after-move in
+every form, the if/else/match ambiguity rule both directions, the loop
+restriction, and the factory-function-return reasoning above), and codegen
+(`src/codegen/move_test.go` - JIT-verified destructor counts for a moved
+struct at every call site, the reassignment-leak fix for both a struct and
+a coroutine handle, and - added after independent review caught the two
+scope-boundary bugs above - a value moved in both branches of an if/every
+arm of a match actually destructing once at runtime, not zero or twice, and
+composing correctly with an enclosing loop's own break) all covered.
+`std/scheduler` itself was NOT migrated
+to the now-legal `Schedule(h coroutine, ...)` shape this round - the
+`*Entry` design from the prior entry still stands, left as a follow-up.

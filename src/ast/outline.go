@@ -25,7 +25,7 @@ const (
 // DeclSymbol is one declaration's own outline entry: its display name,
 // kind, full extent (Span - the whole declaration, e.g. a FuncDecl's own
 // "func ... { ... }") and precise "name only" extent (NameSpan - just the
-// identifier, e.g. "move" within a method's own signature - contained by
+// identifier, e.g. "translate" within a method's own signature - contained by
 // Span, per DocumentSymbol's own LSP doc comment), plus any nested children
 // (a struct's fields/constructors/destructor, an enum's variants/
 // destructor).

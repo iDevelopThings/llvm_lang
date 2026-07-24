@@ -19,7 +19,7 @@ struct Point {
     }
 }
 
-func (Point) move(dx int, dy int) {
+func (Point) translate(dx int, dy int) {
     this.x = this.x + dx
     this.y = this.y + dy
 }
@@ -44,7 +44,7 @@ func main() int {
     p := new Point(3, 4)
     print(p.x)      // 3 - auto-deref: p.x reads exactly like (*p).x
     print(p.y)      // 4
-    p.move(10, 20)  // auto-deref: the method receiver is the same heap Point
+    p.translate(10, 20)  // auto-deref: the method receiver is the same heap Point
     print(p.x)      // 13
     print(p.y)      // 24
     moved := p.x + p.y   // 37

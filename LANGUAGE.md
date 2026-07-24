@@ -555,16 +555,16 @@ A destructor **always takes zero parameters** - there's no calling syntax that c
 
 ### The non-copyable rule
 
-**A struct that declares a `destructor()` becomes non-copyable, full stop - no exceptions, including no "it happens to be the last use of this variable" leniency.** This is the one rule that makes the whole feature sound without needing move semantics or last-use analysis: if a value can never be duplicated, there is only ever one instance of it, so "when does it destruct" is never ambiguous.
+**A struct that declares a `destructor()` becomes non-copyable, full stop - no exceptions, including no "it happens to be the last use of this variable" leniency.** A value can only ever be handed to a new owner explicitly (`move x` - see below), never implicitly inferred from "this happens to be its last use": if a value is never duplicated, there is only ever one instance of it, so "when does it destruct" is never ambiguous.
 
 Concretely, for any type that is non-copyable (see "Transitive propagation" below), each of the following is a real compile-time error:
 
 - `b := a` / `b = a` where `a` is an existing value of that type - a short var decl or assignment copying an *existing, already-live* value.
-- Passing such a value **by value** as a function argument - to either a free function/method or a constructor. Unlike the return case below, this needs no exception carved out for a *fresh* value (see the next paragraph): a freshly-constructed argument is exactly as sound as a fresh var-decl initializer, since the callee's own parameter becomes that value's one and only owner, destructing it at its own scope exit, with nothing else anywhere still referencing it.
-- **Returning such a value by value** from a function, **even a freshly-constructed one** - this is the one context that allows no exception at all, and it's what forces "resource-owning types only exist behind a pointer or a plain local of their own," the deliberate, accepted trade-off here: soundly allowing a fresh-value return would require knowing, at every call site consuming the result, that the callee always hands back a freshly-owned instance - a small but real escape-analysis question this round deliberately doesn't take on. A `new`'d `*T` (or constructing the value directly at its actual use site) is always how you get one of these across a function boundary instead.
+- Passing such a value **by value** as a function argument - to either a free function/method or a constructor. Unlike a plain existing-value reference, this needs no exception carved out for a *fresh* value (see the next paragraph): a freshly-constructed argument is exactly as sound as a fresh var-decl initializer, since the callee's own parameter becomes that value's one and only owner, destructing it at its own scope exit, with nothing else anywhere still referencing it.
+- **Returning such a value by value** from a function - see "move" below for the one exception (a fresh construction or `move x`).
 - Storing an *existing* value of that type by-value into a struct field or array element - as an assignment/copy, not as fresh construction (see immediately below).
 
-**A composite literal (`T{...}`) or a `new T(...)`/`new T{...}` call constructing a *fresh* instance is NOT a copy and remains completely legal**, even for a non-copyable type, in every context above except a return statement's value - it's creating the one instance, not duplicating an existing one:
+**A composite literal (`T{...}`) or a `new T(...)`/`new T{...}` call constructing a *fresh* instance is NOT a copy and remains completely legal**, even for a non-copyable type, in every context above including a return statement's value - it's creating the one instance, not duplicating an existing one:
 
 ```go
 f := FileHandle(path)      // fine - constructs the one instance f now owns
@@ -574,6 +574,26 @@ useFile(f)                 // error - f is an existing value, not fresh
 ```
 
 Calling a method on a non-copyable value is completely unaffected by any of this - a method receiver is already always an implicit pointer, never a copy, so this was true before this feature and stays true.
+
+### move
+
+`move x` - a prefix expression, `x` always a bare identifier naming a local variable or parameter - is the other legal exception alongside fresh construction, everywhere above **including the return statement**, which used to allow no exception at all:
+
+```go
+func take(f FileHandle) { }
+func make(path string) FileHandle {
+    f := FileHandle(path)
+    return move f          // fine - hands off f's own ownership to the caller
+}
+g := make("a")
+take(move g)                // fine - g is never referenced again after this
+```
+
+Moving `x` transfers its value out and marks `x` itself moved-from for the rest of the current function: any later reference to `x` on any reachable path - a read, `delete x`, another `move x`, or even just letting its own scope end - is a compile-time error ("use of moved value"). A value moved on only some of two converging paths (one `if`/`else` branch, or one `match` arm, but not every other reachable one) is rejected outright as ambiguous ("may already have been moved") rather than reconciled - see DECISIONS.md's dated entry for why. The symmetric cases are both fine: every reachable branch moves it, or a branch that doesn't return/break/continue before the join. Moving a value declared outside the current loop, from inside that loop's own body, is rejected unconditionally (a later iteration could then move an already-moved value) - a value declared inside the loop body itself has no such restriction, being fresh every iteration.
+
+A function whose own return type is non-copyable can be called as a *fresh* value at any of its own call sites (a var-decl init, an argument, nested inside another return), with no extra annotation: it could only have type-checked at all if every one of its own returns already satisfied this same fresh-or-move rule, which transitively guarantees it always hands back sole ownership.
+
+Moving a copyable-typed value is legal and harmless - a plain read, since there's no ownership to track. `move` only ever applies to a bare identifier; moving `this.field`, an array element, or any other expression shape is a parse-time error.
 
 ### Transitive propagation
 
@@ -667,7 +687,7 @@ A method value (`shape.Area`, referenced without a call) remains out of scope fo
 
 An enum may also declare **at most one** `destructor() { body }` block, nested directly inside the enum declaration - the exact same syntax and "at most one, checked at declaration time" rule a struct's own destructor already has (see "Destructors" above). It fires **once**, regardless of which variant is actually active, at every one of the same control-flow scope-exit points a struct's destructor already fires at (falling off the end of its declaring block, an early `return`, or a `break`/`continue` exiting an enclosing loop) - there is no per-variant destructor concept, and no way to run different cleanup logic depending on which variant happens to be live.
 
-Declaring a destructor makes the enum **non-copyable**, exactly like a struct - the identical rule from "Destructors" above (`b := a` of an existing non-copyable value is rejected; a fresh construction is not a copy; a return by value allows no exception) applies verbatim, substituting "enum" for "struct" throughout.
+Declaring a destructor makes the enum **non-copyable**, exactly like a struct - the identical rule from "Destructors" above (`b := a` of an existing non-copyable value is rejected; a fresh construction or `move x` is not a copy, everywhere including a return) applies verbatim, substituting "enum" for "struct" throughout.
 
 ### Non-copyable propagation
 
@@ -1081,6 +1101,8 @@ result, ok = divide(10, 0)    // result == 0, ok == false
 
 p.field, arr[0] = divide(20, 4)   // targets don't have to be plain idents
 ```
+
+If a component type is itself non-copyable (see "Destructors" above), destructuring the call is a fresh construction for that component, not a copy - the same "callee's own return already proved fresh-or-move" reasoning the single-value rule uses, applied per component.
 
 In both forms, **the right-hand side must be exactly one call expression**
 (or, for a 2-target destructuring, a map index - see "Maps" above) whose

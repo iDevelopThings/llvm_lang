@@ -108,7 +108,7 @@ func TestForLoopVariableScopedToLoop(t *testing.T) {
 
 func TestMethodAndThisResolve(t *testing.T) {
 	src := "struct Point {\n\tx int\n\ty int\n}\n" +
-		"func (Point) move(dx int, dy int) {\n\tthis.x = this.x + dx\n}\n"
+		"func (Point) translate(dx int, dy int) {\n\tthis.x = this.x + dx\n}\n"
 	tree, info := resolveSrc(t, src)
 
 	structDecl := tree.Children(tree.Root)[0]
@@ -119,8 +119,8 @@ func TestMethodAndThisResolve(t *testing.T) {
 	if len(structInfo.Fields) != 2 {
 		t.Errorf("Point has %d cataloged fields, want 2", len(structInfo.Fields))
 	}
-	if _, ok := structInfo.Methods["move"]; !ok {
-		t.Error("expected move to be cataloged as a method on Point")
+	if _, ok := structInfo.Methods["translate"]; !ok {
+		t.Error("expected translate to be cataloged as a method on Point")
 	}
 	_ = structDecl
 

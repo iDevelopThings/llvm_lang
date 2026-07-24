@@ -16,14 +16,14 @@ func (Point) sum() int {
 	return this.x + this.y
 }
 
-func (Point) move(dx int, dy int) {
+func (Point) translate(dx int, dy int) {
 	this.x = this.x + dx
 	this.y = this.y + dy
 }
 
 func pointSumAfterMove(px int, py int, dx int, dy int) int {
 	p := Point{px, py}
-	p.move(dx, dy)
+	p.translate(dx, dy)
 	return p.sum()
 }
 `)

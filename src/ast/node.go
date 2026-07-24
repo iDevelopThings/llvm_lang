@@ -65,7 +65,8 @@ type Span struct {
 //     FuncDecl's own body already disambiguates it from a bare declaration;
 //     NewExpr's is the `new` keyword, DeleteStmt's the `delete` keyword -
 //     see LANGUAGE.md's "Pointers" section; DestructorDecl's is the
-//     `destructor` keyword - see LANGUAGE.md's "Destructors" section)
+//     `destructor` keyword - see LANGUAGE.md's "Destructors" section;
+//     MoveExpr's is the `move` keyword, same section)
 //   - `&`/`*` address-of/dereference are ordinary UnaryExpr nodes - Tok is
 //     the operator token exactly like unary `-`/`!`, distinguished purely by
 //     Tok.Lexeme, no new node kind needed for either (see LANGUAGE.md's
@@ -206,6 +207,10 @@ type Span struct {
 //     value-producing call, the same way BreakStmt/ContinueStmt/ReturnStmt
 //     are their own dedicated statement forms rather than call-shaped
 //     builtins.
+//   - MoveExpr: [operand] - fixed arity; operand is always a bare Ident (see
+//     LANGUAGE.md's "Destructors" section) - the parser rejects any other
+//     shape (`this.field`, `arr[i]`, a parenthesized name) at parse time,
+//     never producing a MoveExpr around one.
 //   - ExternFuncDecl: [name, paramList, returnType] - fixed arity; returnType
 //     may be InvalidNode (an implicitly-void extern declaration). A deliberate,
 //     separate top-level declaration kind for `extern func Name(params)

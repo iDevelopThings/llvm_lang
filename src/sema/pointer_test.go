@@ -197,7 +197,7 @@ func TestAutoDerefFieldAccess(t *testing.T) {
 }
 
 // TestAutoDerefMethodCall covers a method call through a pointer receiver
-// (`p.move(...)` where p is `*Point`) resolving correctly.
+// (`p.translate(...)` where p is `*Point`) resolving correctly.
 func TestAutoDerefMethodCall(t *testing.T) {
 	src := "struct Point {\n" +
 		"\tx int\n\n" +

@@ -1380,7 +1380,7 @@ func (r *resolver) resolveExpr(scope *Scope, n ast.NodeIndex) {
 	case enums.NodeKinds.BinaryExpr:
 		r.resolveExpr(scope, r.tree.Child(n, 0))
 		r.resolveExpr(scope, r.tree.Child(n, 1))
-	case enums.NodeKinds.UnaryExpr, enums.NodeKinds.ParenExpr:
+	case enums.NodeKinds.UnaryExpr, enums.NodeKinds.ParenExpr, enums.NodeKinds.MoveExpr:
 		r.resolveExpr(scope, r.tree.Child(n, 0))
 	case enums.NodeKinds.CallExpr:
 		for _, c := range r.tree.Children(n) {

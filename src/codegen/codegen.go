@@ -65,13 +65,16 @@ type loopCtx struct {
 	// are simply unused (zero-valued) when this is true.
 	returnFromCallback bool
 
-	// destructorBase is len(Generator.destructors) at the point this loop's
-	// own body started generating - see genBreakStmt/genContinueStmt's own
-	// unwindDestructorsTo calls (stmt.go) and LANGUAGE.md's "Destructors"
-	// section: a break/continue only ever unwinds what was declared since
-	// entering the loop, never anything declared in an enclosing scope
-	// outside it (that scope isn't being exited at all).
-	destructorBase int
+	// destructorBase is a destructorScope snapshot (stmt.go) of
+	// Generator.destructors at the point this loop's own body started
+	// generating - see genBreakStmt/genContinueStmt's own
+	// unwindDestructorsToScope calls and LANGUAGE.md's "Destructors" section:
+	// a break/continue only ever unwinds what was declared since entering
+	// the loop, never anything declared in an enclosing scope outside it
+	// (that scope isn't being exited at all). A destructorScope, not a plain
+	// int, since `move` can remove an entry from anywhere in the stack, not
+	// just the top - see destructorScope's own doc comment.
+	destructorBase destructorScope
 }
 
 // matchExprCodegenCtx is one live expression-mode match's own codegen
@@ -82,14 +85,14 @@ type loopCtx struct {
 // pushes its own frame on top, so a nested yield's own incoming pair is
 // recorded against ITS OWN frame, never the enclosing one's.
 type matchExprCodegenCtx struct {
-	// destructorBase is len(Generator.destructors) at the point this match
-	// expression's own arms started generating - see genYieldStmt's own
-	// unwindDestructorsTo call and LANGUAGE.md's "Destructors" section: a
-	// yield only unwinds locals declared since entering the match
-	// expression itself, never anything declared in an enclosing scope
-	// outside it (that scope isn't being exited at all) - exactly loopCtx's
-	// own destructorBase, one construct over.
-	destructorBase int
+	// destructorBase is a destructorScope snapshot (stmt.go) at the point
+	// this match expression's own arms started generating - see
+	// genYieldStmt's own unwindDestructorsToScope call and LANGUAGE.md's
+	// "Destructors" section: a yield only unwinds locals declared since
+	// entering the match expression itself, never anything declared in an
+	// enclosing scope outside it - exactly loopCtx's own destructorBase, one
+	// construct over.
+	destructorBase destructorScope
 
 	// mergeBB is this match expression's own single merge block - every
 	// yield anywhere in any arm (however deeply nested inside an if/for)

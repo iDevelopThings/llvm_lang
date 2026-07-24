@@ -535,6 +535,13 @@ func (g *Generator) genMatchStmt(n ast.NodeIndex, frame *matchExprCodegenCtx) bo
 
 	sw := g.builder.CreateSwitch(tag, defaultBB, len(variantArms))
 
+	// branchResults collects each arm's own final destructor snapshot (see
+	// mergeBranchDestructors's own doc comment) - replacing the blind final
+	// restoreDestructors(preMatch) this used to end on, which would
+	// resurrect any pre-match entry a `move` inside an arm legitimately
+	// removed (see DECISIONS.md's dated entry).
+	branchResults := make([]branchDestructorResult, 0, len(variantArms)+1)
+
 	allTerminated := true
 	for _, arm := range variantArms {
 		pattern := g.tree.MatchArmPattern(arm)
@@ -545,31 +552,45 @@ func (g *Generator) genMatchStmt(n ast.NodeIndex, frame *matchExprCodegenCtx) bo
 
 		g.builder.SetInsertPointAtEnd(caseBB)
 		g.restoreDestructors(preMatch)
+		beforeIncoming := 0
+		if frame != nil {
+			beforeIncoming = len(frame.incomingVals)
+		}
 		terminated := g.genMatchArm(arm, pattern, variant, payload)
 		if !terminated {
 			g.builder.CreateBr(mergeBB)
 		}
+		reachesMerge := armReachesMatchMerge(frame, beforeIncoming, terminated)
+		branchResults = append(branchResults, branchDestructorResult{final: g.snapshotDestructors(), terminated: !reachesMerge})
 		allTerminated = allTerminated && terminated
 	}
 
 	g.builder.SetInsertPointAtEnd(defaultBB)
 	g.restoreDestructors(preMatch)
 	if wildcardArm != ast.InvalidNode {
+		beforeIncoming := 0
+		if frame != nil {
+			beforeIncoming = len(frame.incomingVals)
+		}
 		wildcardTerminated = g.genBlock(g.tree.MatchArmBody(wildcardArm))
 		if !wildcardTerminated {
 			g.builder.CreateBr(mergeBB)
 		}
+		reachesMerge := armReachesMatchMerge(frame, beforeIncoming, wildcardTerminated)
+		branchResults = append(branchResults, branchDestructorResult{final: g.snapshotDestructors(), terminated: !reachesMerge})
 	} else {
 		g.builder.CreateUnreachable()
+		// No wildcard: sema's own exhaustiveness guarantee means this
+		// default path is provably never taken at runtime - contributes
+		// nothing, same as any other branch that never reaches mergeBB.
+		branchResults = append(branchResults, branchDestructorResult{terminated: true})
 	}
 	allTerminated = allTerminated && (wildcardArm == ast.InvalidNode || wildcardTerminated)
 
 	// Whatever follows the match (reached only when at least one arm didn't
-	// terminate) must see exactly the pre-match state too, never a
-	// bookkeeping side effect the last-generated arm happened to leave
-	// behind - the same restore-once-more-afterward step genIfStmt's own
-	// save-restore takes after both branches.
-	g.restoreDestructors(preMatch)
+	// terminate) must see the reconciled post-match state, not a bare
+	// restore back to preMatch - see mergeBranchDestructors.
+	g.destructors = g.mergeBranchDestructors(preMatch, branchResults)
 
 	// mergeBB is unreachable itself only when every arm (including the
 	// wildcard, if any) always terminates AND this is a genuine statement-
@@ -644,7 +665,7 @@ func (g *Generator) matchMergeBB(frame *matchExprCodegenCtx, name string) llvm.B
 // the caller emits next.
 func (g *Generator) genMatchExpr(n ast.NodeIndex) llvm.Value {
 	frame := &matchExprCodegenCtx{
-		destructorBase: len(g.destructors),
+		destructorBase: g.snapshotDestructorScope(),
 		mergeBB:        g.ctx.AddBasicBlock(g.curFn, "match.expr.merge"),
 	}
 	g.matchExprStack = append(g.matchExprStack, frame)
@@ -702,6 +723,11 @@ func (g *Generator) genValueMatchStmt(n ast.NodeIndex, subjType sema.Type, frame
 
 	preMatch := g.snapshotDestructors()
 
+	// branchResults collects each arm's own final destructor snapshot - see
+	// mergeBranchDestructors's own doc comment for why this replaces the
+	// blind final restoreDestructors(preMatch) this used to end on.
+	branchResults := make([]branchDestructorResult, 0, len(valueArms)+1)
+
 	allTerminated := true
 	for _, arm := range valueArms {
 		patterns := g.tree.MatchArmPatterns(arm)
@@ -722,10 +748,16 @@ func (g *Generator) genValueMatchStmt(n ast.NodeIndex, subjType sema.Type, frame
 
 		g.builder.SetInsertPointAtEnd(bodyBB)
 		g.restoreDestructors(preMatch)
+		beforeIncoming := 0
+		if frame != nil {
+			beforeIncoming = len(frame.incomingVals)
+		}
 		terminated := g.genBlock(g.tree.MatchArmBody(arm))
 		if !terminated {
 			g.builder.CreateBr(mergeBB)
 		}
+		reachesMerge := armReachesMatchMerge(frame, beforeIncoming, terminated)
+		branchResults = append(branchResults, branchDestructorResult{final: g.snapshotDestructors(), terminated: !reachesMerge})
 		allTerminated = allTerminated && terminated
 
 		// Generating the arm's own body (just above) moved the builder's
@@ -744,18 +776,22 @@ func (g *Generator) genValueMatchStmt(n ast.NodeIndex, subjType sema.Type, frame
 	// wildcard's own body - sema's own checkValueMatchStmt already
 	// guarantees it's present.
 	g.restoreDestructors(preMatch)
+	wildcardBeforeIncoming := 0
+	if frame != nil {
+		wildcardBeforeIncoming = len(frame.incomingVals)
+	}
 	wildcardTerminated := g.genBlock(g.tree.MatchArmBody(wildcardArm))
 	if !wildcardTerminated {
 		g.builder.CreateBr(mergeBB)
 	}
+	wildcardReachesMerge := armReachesMatchMerge(frame, wildcardBeforeIncoming, wildcardTerminated)
+	branchResults = append(branchResults, branchDestructorResult{final: g.snapshotDestructors(), terminated: !wildcardReachesMerge})
 	allTerminated = allTerminated && wildcardTerminated
 
 	// Whatever follows the match (reached only when at least one arm didn't
-	// terminate) must see exactly the pre-match state too, never a
-	// bookkeeping side effect the last-generated arm happened to leave
-	// behind - the same restore-once-more-afterward step genMatchStmt's own
-	// enum path (and genIfStmt's save-restore) already takes.
-	g.restoreDestructors(preMatch)
+	// terminate) must see the reconciled post-match state, not a bare
+	// restore back to preMatch - see mergeBranchDestructors.
+	g.destructors = g.mergeBranchDestructors(preMatch, branchResults)
 
 	// mergeBB is unreachable itself only when every arm (including the
 	// wildcard) always terminates AND this is a genuine statement-position

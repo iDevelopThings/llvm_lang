@@ -37,7 +37,7 @@ func (Point) sum() int {
 	return this.x + this.y
 }
 
-func (Point) move(dx int, dy int) {
+func (Point) translate(dx int, dy int) {
 	this.x = this.x + dx
 	this.y = this.y + dy
 }
@@ -74,7 +74,7 @@ func sumSlice(s []int) int {
 
 func main() int {
 	p := Point(1, 2)
-	p.move(3, 4)
+	p.translate(3, 4)
 	print(p.sum()) // (1+3)+(2+4) = 10
 
 	total := 0
@@ -133,7 +133,7 @@ func buildLarge(n int) string {
 	var b strings.Builder
 	b.WriteString("struct Point {\n\tx int\n\ty int\n\n\tconstructor(px int, py int) {\n\t\tthis.x = px\n\t\tthis.y = py\n\t}\n}\n\n")
 	b.WriteString("func (Point) sum() int {\n\treturn this.x + this.y\n}\n\n")
-	b.WriteString("func (Point) move(dx int, dy int) {\n\tthis.x = this.x + dx\n\tthis.y = this.y + dy\n}\n\n")
+	b.WriteString("func (Point) translate(dx int, dy int) {\n\tthis.x = this.x + dx\n\tthis.y = this.y + dy\n}\n\n")
 
 	for i := 0; i < n; i++ {
 		b.WriteString(strings.ReplaceAll(`
@@ -173,7 +173,7 @@ func sumSliceNAME(s []int) int {
 	for i := 0; i < n; i++ {
 		name := strconv.Itoa(i)
 		b.WriteString("\tp" + name + " := Point(" + name + ", " + name + ")\n")
-		b.WriteString("\tp" + name + ".move(1, 2)\n")
+		b.WriteString("\tp" + name + ".translate(1, 2)\n")
 		b.WriteString("\tacc += p" + name + ".sum()\n")
 		b.WriteString("\tacc += fib" + name + "(10)\n")
 
