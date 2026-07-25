@@ -2615,7 +2615,14 @@ and `TestRun_JIT_MissingLibrary`.
 (with `-l`/`-L` generators bound once) and reloads the user module when any
 loaded `.llx` file's mtime/size changes:
 
-1. Compile via `loader.LoadProgram` + `compiler.CompileProgram`.
+1. Compile via `loader.LoadProgram` + `compiler.CompileProgramNamed`, naming
+   each reload's module `<entry path>#<reload count>` rather than reusing
+   the entry path verbatim (`compiler.CompileProgram`'s own default) - a
+   package with a non-constant global registers `llvm_lang.global_init` into
+   `@llvm.global_ctors` (see "Global var initializers" above), which LLJIT's
+   default platform support turns into a symbol named after the module's own
+   identifier; reusing the same identifier on a second such reload collided
+   defining that symbol twice.
 2. Add the module under a fresh ORC `ResourceTracker`
    (`AddLLVMIRModuleWithRT`); previous tracker is `Remove`d first so symbol
    names don't clash.
@@ -2641,7 +2648,9 @@ idempotent for anything with that kind of one-time-only OS-level side
 effect (e.g. guard a window-creation call with the library's own
 "already initialized" check) - `-watch` re-running it is not a bug.
 
-Confirmed by `TestBinary_Watch_TickExit`, `TestBinary_Watch_Reload`, and
+Confirmed by `TestBinary_Watch_TickExit`, `TestBinary_Watch_Reload`,
+`TestBinary_Watch_ReloadGlobalBothVersions` (two consecutive reloads that
+each register `@llvm.global_ctors` - the case that used to collide), and
 `TestBinary_Watch_LastGoodOnError`.
 
 ## `-test`: in-language test runner

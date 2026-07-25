@@ -172,6 +172,23 @@ func CompilePackage(files []loader.SourceFile, optimize bool) *Result {
 // optimize threads straight through to finishPipeline's own RunPasses call -
 // see its doc comment for what that actually does.
 func CompileProgram(prog *loader.Program, optimize bool) *Result {
+	// moduleName matches CompilePackage's own convention: the entry
+	// package's first file is as reasonable a choice as any for the whole
+	// program's module name.
+	return CompileProgramNamed(prog, optimize, prog.Entry.Files[0].Name)
+}
+
+// CompileProgramNamed is CompileProgram, but lets the caller choose the
+// resulting LLVM module's own identifier instead of defaulting to the entry
+// package's first file path. cmd/llvmc's `-watch` driver needs this: LLJIT's
+// default platform support derives a synthetic per-module init-function
+// symbol from the module identifier whenever a package has a non-constant
+// global (see CODEGEN.md's "Global var initializers" section on
+// `@llvm.global_ctors`), and reusing the same identifier - the watched
+// file's own path - on every reload collides defining that symbol a second
+// time. Giving each reload a distinct moduleName avoids the collision
+// entirely.
+func CompileProgramNamed(prog *loader.Program, optimize bool, moduleName string) *Result {
 	fe := frontend.RunProgram(prog)
 	if fe.HasErrors {
 		return &Result{
@@ -179,11 +196,6 @@ func CompileProgram(prog *loader.Program, optimize bool) *Result {
 			Diags: fe.Diags,
 		}
 	}
-
-	// moduleName matches CompilePackage's own convention: the entry
-	// package's first file is as reasonable a choice as any for the whole
-	// program's module name.
-	moduleName := prog.Entry.Files[0].Name
 	return finishPipeline(fe.Trees, fe.Diags, fe.Infos, moduleName, optimize)
 }
 

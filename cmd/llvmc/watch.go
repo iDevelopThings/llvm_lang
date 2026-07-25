@@ -70,9 +70,10 @@ func runWatch(cfg watchConfig, stderr io.Writer) int {
 
 	fs := afero.NewOsFs()
 	var (
-		rt     llvm.ResourceTracker
-		hasRT  bool
-		stamps map[string]fileStamp
+		rt      llvm.ResourceTracker
+		hasRT   bool
+		stamps  map[string]fileStamp
+		reloads uint64
 	)
 
 	unload := func() {
@@ -153,7 +154,14 @@ func runWatch(cfg watchConfig, stderr io.Writer) int {
 		if err != nil {
 			return nil, err
 		}
-		res := compiler.CompileProgram(prog, cfg.Optimize)
+		// Each reload gets its own module identifier - see
+		// compiler.CompileProgramNamed's own doc comment for why reusing
+		// cfg.EntryPath verbatim on every reload collides with LLJIT's
+		// per-module ORC static-initializer bookkeeping once the package has
+		// a non-constant global.
+		moduleName := fmt.Sprintf("%s#%d", cfg.EntryPath, reloads)
+		reloads++
+		res := compiler.CompileProgramNamed(prog, cfg.Optimize, moduleName)
 		for _, tree := range res.Trees {
 			b := res.Diags[tree]
 			if b.Len() > 0 {

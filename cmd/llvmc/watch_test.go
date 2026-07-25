@@ -319,6 +319,99 @@ func TestBinary_Watch_Reload(t *testing.T) {
 	}
 }
 
+// TestBinary_Watch_ReloadGlobalBothVersions reloads twice where every
+// version (not just the first) initializes a global var from a function
+// call - unlike TestBinary_Watch_Reload, whose v2 drops its global entirely.
+// A function-call initializer isn't compile-time-foldable, so it actually
+// exercises the `@llvm.global_ctors` path CompileProgramNamed's own doc
+// comment describes (a literal like `var seen int = 0` would not). Neither
+// this test nor any existing -watch reload test previously covered two
+// consecutive reloads that both need that path, which is exactly the shape
+// that used to collide.
+func TestBinary_Watch_ReloadGlobalBothVersions(t *testing.T) {
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "main.llx")
+	v1 := "" +
+		"func startingSeen() int {\n" +
+		"\treturn 0\n" +
+		"}\n" +
+		"var seen int = startingSeen()\n" +
+		"func Init() {\n" +
+		"\tprint(\"init-A\")\n" +
+		"}\n" +
+		"func Frame() int {\n" +
+		"\tif seen == 0 {\n" +
+		"\t\tprint(\"frame-A\")\n" +
+		"\t\tseen = 1\n" +
+		"\t}\n" +
+		"\treturn 0\n" +
+		"}\n"
+	v2 := "" +
+		"func startingSeen() int {\n" +
+		"\treturn 0\n" +
+		"}\n" +
+		"var seen int = startingSeen()\n" +
+		"func Init() {\n" +
+		"\tprint(\"init-B\")\n" +
+		"}\n" +
+		"func Frame() int {\n" +
+		"\tprint(\"frame-B\")\n" +
+		"\treturn 9\n" +
+		"}\n"
+	if err := os.WriteFile(srcPath, []byte(v1), 0o644); err != nil {
+		t.Fatalf("writing source: %v", err)
+	}
+
+	cmd := exec.Command(llvmcPath, "-watch", srcPath)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("StdoutPipe: %v", err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	lines := make(chan string, 64)
+	go scanLines(stdout, lines)
+	waitLine := func(substr string, timeout time.Duration) {
+		t.Helper()
+		waitChan(t, lines, substr, timeout, cmd)
+	}
+
+	waitLine("init-A", 10*time.Second)
+	waitLine("frame-A", 10*time.Second)
+
+	time.Sleep(20 * time.Millisecond)
+	if err := os.WriteFile(srcPath, []byte(v2), 0o644); err != nil {
+		_ = cmd.Process.Kill()
+		t.Fatalf("rewriting source: %v", err)
+	}
+
+	waitLine("init-B", 10*time.Second)
+	waitLine("frame-B", 10*time.Second)
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("llvmc exited 0, want 9")
+		}
+		ee, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("Wait: %v; stderr:\n%s", err, stderr.String())
+		}
+		if ee.ExitCode() != 9 {
+			t.Fatalf("exit code = %d, want 9; stderr:\n%s", ee.ExitCode(), stderr.String())
+		}
+	case <-time.After(10 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatal("timed out waiting for watch process exit")
+	}
+}
+
 // TestBinary_Watch_LastGoodOnError keeps ticking the previous module when a
 // reload compile fails, then picks up a later good edit.
 func TestBinary_Watch_LastGoodOnError(t *testing.T) {
