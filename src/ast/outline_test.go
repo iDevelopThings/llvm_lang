@@ -16,7 +16,7 @@ func TestDeclSymbols_FuncDetail(t *testing.T) {
 }
 `
 	file := lexer.NewFile("t.llx", src)
-	tree, diags := parser.ParseFile(file)
+	tree, diags := parser.ParseFile(file, false)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected parse errors: %v", diags.Sorted())
 	}
@@ -38,7 +38,7 @@ func TestDeclSymbols_StructDetail(t *testing.T) {
 }
 `
 	file := lexer.NewFile("t.llx", src)
-	tree, diags := parser.ParseFile(file)
+	tree, diags := parser.ParseFile(file, false)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected parse errors: %v", diags.Sorted())
 	}
@@ -62,7 +62,7 @@ func TestDeclSymbols_ExternFuncDetail(t *testing.T) {
 	src := `extern func abs(x i32) i32
 `
 	file := lexer.NewFile("t.llx", src)
-	tree, diags := parser.ParseFile(file)
+	tree, diags := parser.ParseFile(file, false)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected parse errors: %v", diags.Sorted())
 	}
@@ -82,7 +82,7 @@ func TestDeclSymbols_FuncNoParamsNoReturn(t *testing.T) {
 }
 `
 	file := lexer.NewFile("t.llx", src)
-	tree, diags := parser.ParseFile(file)
+	tree, diags := parser.ParseFile(file, false)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected parse errors: %v", diags.Sorted())
 	}

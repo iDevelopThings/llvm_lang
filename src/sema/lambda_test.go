@@ -222,7 +222,7 @@ func TestCapturingThisInsideLambdaIsRejected(t *testing.T) {
 		"\t\treturn this.x\n" +
 		"\t}\n" +
 		"}\n"
-	tree, pdiags := parser.ParseFile(lexer.NewFile("t.ll", src))
+	tree, pdiags := parser.ParseFile(lexer.NewFile("t.ll", src), false)
 	if pdiags.HasErrors() {
 		t.Fatalf("unexpected parse errors for %q: %v", src, pdiags.All())
 	}

@@ -18,7 +18,7 @@ func benchmarkParse(b *testing.B, src string) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		file := lexer.NewFile("bench.llx", src)
-		tree, diags := ParseFile(file)
+		tree, diags := ParseFile(file, false)
 		if diags.HasErrors() {
 			b.Fatalf("unexpected parse errors: %v", diags.All())
 		}

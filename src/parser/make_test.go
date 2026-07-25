@@ -136,7 +136,7 @@ func main() int {
 	return make([]int, 2)
 }
 `
-	tree, diags := ParseFile(lexer.NewFile("t.ll", src))
+	tree, diags := ParseFile(lexer.NewFile("t.ll", src), false)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected parse errors: %v", diags.All())
 	}

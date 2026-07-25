@@ -144,7 +144,11 @@ func safeLoadProgram(fs afero.Fs, dir string) (prog *loader.Program, err error) 
 		}
 	}()
 	stdFS, _ := lspStdFS()
-	return loader.LoadProgramWithOptions(fs, dir, loader.Options{StdFS: stdFS})
+	// TestMode is unconditional here: a developer editing code inside a
+	// tests{} block still wants hover/completion/diagnostics for it, same as
+	// gopls treats _test.go files as first-class despite `go build`
+	// excluding them.
+	return loader.LoadProgramWithOptions(fs, dir, loader.Options{StdFS: stdFS, TestMode: true})
 }
 
 // lspStdFS resolves this compiler's own standard library location (next to

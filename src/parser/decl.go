@@ -52,33 +52,43 @@ func (p *Parser) parseImportDecl() ast.NodeIndex {
 	return p.tree.NewNode(enums.NodeKinds.ImportDecl, pathTok, span)
 }
 
-// parseFile parses a whole source file: a sequence of top-level
-// declarations (see parseTopLevelItem) through EOF. Same separator rule as
-// parseBlock (required between declarations, optional right before the
-// terminator - here EOF instead of `}`).
-//
-// Every ImportDecl must come before any other top-level declaration -
-// matching Go's own ordering rule (see LANGUAGE.md's "Imports" section):
-// simplest to parse/read, and there's no real downside to requiring it. A
-// later import is still parsed (so the rest of the file still gets checked
-// normally) but reported as an error at its own position.
-func (p *Parser) parseFile() ast.NodeIndex {
-	start := p.tok.Start
+// parseTopLevelDeclSequence parses a sequence of top-level declarations (see
+// parseTopLevelItem) up to term (EOF for a whole file, `}` for a tests{}
+// block's own body) - the shared "imports first, semicolon required between
+// declarations but optional right before the terminator" rule parseFile and
+// parseTestsBlock both need, so it isn't hand-duplicated in both places (see
+// AGENTS.md's "look for a shared home" convention). A tests{} block is
+// special-cased here (rather than routed through parseTopLevelItem's normal
+// switch) since it can splice MULTIPLE decls into the sequence in test mode,
+// unlike every other single-NodeIndex top-level item.
+func (p *Parser) parseTopLevelDeclSequence(term enums.Lexeme) []ast.NodeIndex {
 	var decls []ast.NodeIndex
 	sawNonImport := false
-	for !p.at(enums.Lexemes.EOF) {
+	for !p.at(term) && !p.at(enums.Lexemes.EOF) {
 		if p.atKeyword(enums.Keywords.Import) && sawNonImport {
 			p.errorAtSpan(p.tok.Start, p.tok.End, "import declarations must come before all other top-level declarations")
 		}
 		if !p.atKeyword(enums.Keywords.Import) {
 			sawNonImport = true
 		}
-		decls = append(decls, p.parseTopLevelItem())
-		if p.at(enums.Lexemes.EOF) {
+		if p.atKeyword(enums.Keywords.Tests) {
+			decls = append(decls, p.parseTestsBlock()...)
+		} else {
+			decls = append(decls, p.parseTopLevelItem())
+		}
+		if p.at(term) || p.at(enums.Lexemes.EOF) {
 			break
 		}
 		p.expect(enums.Lexemes.Semicolon)
 	}
+	return decls
+}
+
+// parseFile parses a whole source file: parseTopLevelDeclSequence through
+// EOF, wrapped in the File root node.
+func (p *Parser) parseFile() ast.NodeIndex {
+	start := p.tok.Start
+	decls := p.parseTopLevelDeclSequence(enums.Lexemes.EOF)
 	span := ast.Span{
 		Start: start,
 		End:   p.tok.End,
@@ -90,12 +100,56 @@ func (p *Parser) parseFile() ast.NodeIndex {
 
 // ParseFile parses an entire source file into a Tree, using Run's bailout
 // recovery so a hopelessly broken file still returns a (possibly partial)
-// tree and every diagnostic collected, rather than panicking.
-func ParseFile(file *lexer.File) (*ast.Tree, *diag.Bag) {
+// tree and every diagnostic collected, rather than panicking. testMode
+// controls how any tests{} block in the file is attached - see
+// parseTestsBlock.
+func ParseFile(file *lexer.File, testMode bool) (*ast.Tree, *diag.Bag) {
 	return Run(file, func(p *Parser) *ast.Tree {
+		p.testMode = testMode
 		p.parseFile()
 		return p.tree
 	})
+}
+
+// parseTestsBlock parses `tests { <decl>* }` (see LANGUAGE.md's "tests{}"
+// section) - legal anywhere a top-level declaration is, in any file. Its
+// body is always fully parsed regardless of p.testMode, so a syntax error
+// inside is always caught; only how the result attaches to the enclosing
+// decl sequence differs:
+//   - testMode: the block's own parsed decls are returned unwrapped, to be
+//     spliced directly into the caller's sequence as ordinary top-level
+//     declarations.
+//   - otherwise: the decls are wrapped in one TestBlockDecl node, invisible
+//     to every downstream pass since nothing queries
+//     TopLevelDeclsOfKind(TestBlockDecl) - see DECISIONS.md.
+//
+// Nesting a tests{} block inside another is rejected with a diagnostic, but
+// still parsed/recovered rather than bailing the whole file.
+func (p *Parser) parseTestsBlock() []ast.NodeIndex {
+	kwTok := p.expectKeyword(enums.Keywords.Tests)
+
+	if p.inTestBlock {
+		p.errorAtSpan(kwTok.Start, kwTok.End, "tests blocks cannot be nested")
+	}
+	wasInTestBlock := p.inTestBlock
+	p.inTestBlock = true
+
+	p.expect(enums.Lexemes.LeftBrace)
+	inner := p.parseTopLevelDeclSequence(enums.Lexemes.RightBrace)
+	closeTok := p.expect(enums.Lexemes.RightBrace)
+
+	p.inTestBlock = wasInTestBlock
+
+	if p.testMode {
+		return inner
+	}
+
+	span := ast.Span{
+		Start: kwTok.Start,
+		End:   closeTok.End,
+	}
+	block := p.tree.NewNode(enums.NodeKinds.TestBlockDecl, kwTok, span, inner...)
+	return []ast.NodeIndex{block}
 }
 
 // parseFuncDecl parses `func name(params) ReturnType { body }`, or, with a

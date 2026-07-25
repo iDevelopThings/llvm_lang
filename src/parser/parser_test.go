@@ -114,7 +114,7 @@ func TestParseFile_BailoutReturnsUsableTreeNotNil(t *testing.T) {
 	// same maxErrors path a genuinely broken source file hits.
 	src := strings.Repeat("func f() !bad\n", maxErrors+2)
 	file := lexer.NewFile("t.ll", src)
-	tree, diags := ParseFile(file)
+	tree, diags := ParseFile(file, false)
 
 	if tree == nil {
 		t.Fatal("ParseFile returned a nil *ast.Tree on bailout - unsafe for any caller to touch")

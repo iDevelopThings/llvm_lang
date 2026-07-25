@@ -104,4 +104,7 @@ Try:
 - [`strings_demo.llx`](../examples/strings_demo/strings_demo.llx)
 - [`slices_demo.llx`](../examples/slices_demo/slices_demo.llx)
 - [`collections_demo.llx`](../examples/collections_demo/collections_demo.llx)
-- [`collections_test.llx`](../examples/collections_test/collections_test.llx) - `llvmc -test` assertions covering the full `SlotMap` API
+- `SlotMap`'s own `llvmc -test` assertions live in a `tests{}` block at the
+  end of [`std/collections/collections.llx`](../std/collections/collections.llx)
+  itself - see [`compiler.md`](compiler.md#run-language-tests) for the
+  `tests{}` construct.

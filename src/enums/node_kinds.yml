@@ -69,3 +69,4 @@ values:
   - name: MoveExpr
   - name: TypeParamList
   - name: TypeArgList
+  - name: TestBlockDecl

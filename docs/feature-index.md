@@ -71,6 +71,7 @@ short; this index makes the less-common features easy to find.
 | Standalone executables | [Build an executable](compiler.md#build-an-executable) |
 | Optimized or unoptimized LLVM IR | [Inspect LLVM IR](compiler.md#inspect-llvm-ir) |
 | Language-level tests | [Run language tests](compiler.md#run-language-tests) |
+| Same-file `tests{}` blocks | [Run language tests](compiler.md#run-language-tests) |
 | Hot reload | [Watch and reload](compiler.md#watch-and-reload) |
 | External libraries | [Link libraries](compiler.md#link-libraries) |
 | Process exit behavior | [Exit codes](compiler.md#exit-codes) |

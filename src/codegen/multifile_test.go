@@ -21,7 +21,7 @@ func compilePackageSrc(t *testing.T, files [][2]string) *Module {
 	trees := make([]*ast.Tree, len(files))
 	for i, f := range files {
 		name, src := f[0], f[1]
-		tree, pdiags := parser.ParseFile(lexer.NewFile(name, src))
+		tree, pdiags := parser.ParseFile(lexer.NewFile(name, src), false)
 		if pdiags.HasErrors() {
 			t.Fatalf("unexpected parse errors in %s: %v", name, pdiags.All())
 		}

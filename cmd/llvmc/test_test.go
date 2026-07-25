@@ -254,6 +254,48 @@ func TestRun_TestMode_StdRootNotConfigured(t *testing.T) {
 	}
 }
 
+// TestBinary_TestMode_InlineTestsBlock covers a tests{} block living in the
+// same file as ordinary package code (see LANGUAGE.md's "tests{}" section):
+// -test discovers and runs TestAdd exactly as if it were a real top-level
+// FuncDecl.
+func TestBinary_TestMode_InlineTestsBlock(t *testing.T) {
+	dir := filepath.Join("testdata", "testmode", "inline_block")
+	out, err := exec.Command(llvmcPath, "-test", dir).CombinedOutput()
+	if err != nil {
+		t.Fatalf("llvmc -test: %v\nout:\n%s", err, out)
+	}
+	got := string(out)
+	if !strings.Contains(got, "--- PASS: TestAdd") {
+		t.Errorf("missing PASS TestAdd; out:\n%s", got)
+	}
+	lines := strings.Split(strings.TrimRight(got, "\r\n"), "\n")
+	if !slices.Contains(lines, "PASS") {
+		t.Errorf("missing overall PASS summary line; out:\n%s", got)
+	}
+}
+
+// TestBinary_InlineTestsBlockInvisibleOutsideTestMode is the actual
+// regression test for the leak tests{} exists to prevent: the exact same
+// file compiled WITHOUT -test must never need "std:test" to resolve (there
+// is no -test std/ overlay on this path at all) and must never emit a
+// TestAdd symbol into the module.
+func TestBinary_InlineTestsBlockInvisibleOutsideTestMode(t *testing.T) {
+	src := filepath.Join("testdata", "testmode", "inline_block", "inline_block.llx")
+	out, err := exec.Command(llvmcPath, "-emit-llvm", src).CombinedOutput()
+	if err != nil {
+		t.Fatalf("llvmc -emit-llvm (plain path): %v\nout:\n%s", err, out)
+	}
+	ir := string(out)
+	if !strings.Contains(ir, "@add") {
+		t.Fatalf("expected the ordinary @add function in the IR, got:\n%s", ir)
+	}
+	for _, absent := range []string{"TestAdd", "Runner", "std:test", "test.Runner"} {
+		if strings.Contains(ir, absent) {
+			t.Errorf("plain (non -test) IR mentions %q, want the tests{} block completely invisible:\n%s", absent, ir)
+		}
+	}
+}
+
 // TestBinary_TestMode_EmitLLVM confirms -test composes with -emit-llvm (the
 // synthesized driver's own IR, not an execution) - claimed in CODEGEN.md/
 // main.go's doc comment but, until now, never actually exercised.

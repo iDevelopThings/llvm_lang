@@ -11,7 +11,7 @@ The language is supposed to be similar to go's syntax.
 
 ## Top level
 
-File scope is Go-style, not script-style: only `import`, `var`, `func`, `struct`, and `enum` declarations are legal directly at the top level - no bare `if`/`for`/`:=`/expression-statements there. This isn't an arbitrary restriction: LLVM has no notion of "just run a statement at global scope," only static data initializers, so a top-level `var` is a real global (no function needed to "run" it) while anything actually executable needs a real entry point, same as Go/C/Rust - `func main()` is required for that. See "Imports" below for `import`'s own rules (it must come first in a file, before any other declaration).
+File scope is Go-style, not script-style: only `import`, `var`, `func`, `struct`, `enum`, and `tests{}` declarations are legal directly at the top level - no bare `if`/`for`/`:=`/expression-statements there. This isn't an arbitrary restriction: LLVM has no notion of "just run a statement at global scope," only static data initializers, so a top-level `var` is a real global (no function needed to "run" it) while anything actually executable needs a real entry point, same as Go/C/Rust - `func main()` is required for that. See "Imports" below for `import`'s own rules (it must come first in a file, before any other declaration), and "`tests{}`" below for that construct's own rules.
 
 ```go
 
@@ -2201,6 +2201,46 @@ A package-qualified name can also appear in **type position**
 same-package visibility (see the "Multi-file packages" section above) -
 `Exported`/export enforcement only ever applies to a name reached through an
 actual package qualifier.
+
+## `tests{}`
+
+A `tests { ... }` block lets test code live in the same file as the code it
+tests, legal anywhere a top-level declaration is (same position as
+`import`/`struct`/`func`/`var`/`enum`/`extern func`), in any file:
+
+```go
+func add(a int, b int) int {
+    return a + b
+}
+
+tests {
+    import "std:test"
+
+    func TestAdd(t *test.Runner) {
+        t.AssertEqual(add(1, 1), 2, "1+1")
+    }
+}
+```
+
+Its body may hold any top-level declaration - `import`, `struct`, `enum`,
+`func`, `var`, or `extern func` - under the same rules as an ordinary file
+body (imports must come first).
+
+**Its contents are only visible to a `-test` build.** Run with `llvmc -test`
+(see `compiler.md`'s "Run language tests" section) and everything inside a
+`tests{}` block behaves like ordinary top-level code: its own `import`
+resolves normally, and `TestXxx` functions are discovered exactly like a
+standalone test file's (that convention - a separate test package/file - is
+unaffected and still fully supported; `tests{}` is additive, not a
+replacement). Compiled any other way (a plain run, `-emit-llvm`, `-o`,
+`-watch`), a `tests{}` block and everything inside it is completely inert:
+no compile cost, no exported symbols, and its own imports (`std:test`
+included) never need to resolve at all.
+
+**Nesting a `tests{}` block inside another is a compile error.**
+
+See `DECISIONS.md` for why this is a parse-time decision rather than a mode
+flag threaded through later compiler stages.
 
 ## Generics
 

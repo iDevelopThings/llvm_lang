@@ -13,7 +13,7 @@ import (
 // broken, not the resolver under test.
 func resolveSrc(t *testing.T, src string) (*ast.Tree, *Info) {
 	t.Helper()
-	tree, pdiags := parser.ParseFile(lexer.NewFile("t.ll", src))
+	tree, pdiags := parser.ParseFile(lexer.NewFile("t.ll", src), false)
 	if pdiags.HasErrors() {
 		t.Fatalf("unexpected parse errors for %q: %v", src, pdiags.All())
 	}
@@ -38,7 +38,7 @@ func TestBasicVarResolves(t *testing.T) {
 }
 
 func TestUndefinedVariable(t *testing.T) {
-	tree, pdiags := parser.ParseFile(lexer.NewFile("t.ll", "var a = b\n"))
+	tree, pdiags := parser.ParseFile(lexer.NewFile("t.ll", "var a = b\n"), false)
 	if pdiags.HasErrors() {
 		t.Fatalf("unexpected parse errors: %v", pdiags.All())
 	}
@@ -60,7 +60,7 @@ func TestBlockShadowingIsNotRedeclaration(t *testing.T) {
 }
 
 func TestRedeclarationInSameScope(t *testing.T) {
-	tree, pdiags := parser.ParseFile(lexer.NewFile("t.ll", "func f() {\n\tvar x int = 1\n\tvar x int = 2\n}\n"))
+	tree, pdiags := parser.ParseFile(lexer.NewFile("t.ll", "func f() {\n\tvar x int = 1\n\tvar x int = 2\n}\n"), false)
 	if pdiags.HasErrors() {
 		t.Fatalf("unexpected parse errors: %v", pdiags.All())
 	}
@@ -135,7 +135,7 @@ func TestMethodAndThisResolve(t *testing.T) {
 }
 
 func TestThisOutsideMethodIsAnError(t *testing.T) {
-	tree, pdiags := parser.ParseFile(lexer.NewFile("t.ll", "func f() {\n\tvar a = this\n}\n"))
+	tree, pdiags := parser.ParseFile(lexer.NewFile("t.ll", "func f() {\n\tvar a = this\n}\n"), false)
 	if pdiags.HasErrors() {
 		t.Fatalf("unexpected parse errors: %v", pdiags.All())
 	}
@@ -146,7 +146,7 @@ func TestThisOutsideMethodIsAnError(t *testing.T) {
 }
 
 func TestMethodReceiverMustBeDeclaredStruct(t *testing.T) {
-	tree, pdiags := parser.ParseFile(lexer.NewFile("t.ll", "func (Nope) m() { }\n"))
+	tree, pdiags := parser.ParseFile(lexer.NewFile("t.ll", "func (Nope) m() { }\n"), false)
 	if pdiags.HasErrors() {
 		t.Fatalf("unexpected parse errors: %v", pdiags.All())
 	}
@@ -157,7 +157,7 @@ func TestMethodReceiverMustBeDeclaredStruct(t *testing.T) {
 }
 
 func TestRedeclaredTopLevelName(t *testing.T) {
-	tree, pdiags := parser.ParseFile(lexer.NewFile("t.ll", "var a int = 1\nvar a int = 2\n"))
+	tree, pdiags := parser.ParseFile(lexer.NewFile("t.ll", "var a int = 1\nvar a int = 2\n"), false)
 	if pdiags.HasErrors() {
 		t.Fatalf("unexpected parse errors: %v", pdiags.All())
 	}
@@ -168,7 +168,7 @@ func TestRedeclaredTopLevelName(t *testing.T) {
 }
 
 func TestVariableUsedAsTypeIsRejected(t *testing.T) {
-	tree, pdiags := parser.ParseFile(lexer.NewFile("t.ll", "var a int = 1\nvar b a\n"))
+	tree, pdiags := parser.ParseFile(lexer.NewFile("t.ll", "var a int = 1\nvar b a\n"), false)
 	if pdiags.HasErrors() {
 		t.Fatalf("unexpected parse errors: %v", pdiags.All())
 	}

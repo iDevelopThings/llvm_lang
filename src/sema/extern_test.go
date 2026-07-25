@@ -280,7 +280,7 @@ func TestExternFuncRedeclaredIsError(t *testing.T) {
 		"func abs(x i32) i32 {\n" +
 		"\treturn x\n" +
 		"}\n"
-	tree, pdiags := parser.ParseFile(lexer.NewFile("t.ll", src))
+	tree, pdiags := parser.ParseFile(lexer.NewFile("t.ll", src), false)
 	if pdiags.HasErrors() {
 		t.Fatalf("unexpected parse errors: %v", pdiags.All())
 	}

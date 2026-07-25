@@ -26,6 +26,7 @@ type discoveredTest struct {
 func runTest(path string, optimize bool, output string, emitLLVM bool, linkLibs, linkDirs []string, stderr io.Writer) int {
 	base := afero.NewOsFs()
 	opts := loaderOptionsFunc()
+	opts.TestMode = true
 	prog, err := loader.LoadProgramWithOptions(base, path, opts)
 	if err != nil {
 		fmt.Fprintf(stderr, "llvmc: %v\n", err)

@@ -18,7 +18,7 @@ import (
 // b.N times over.
 func benchmarkResolveCheck(b *testing.B, src string) {
 	b.Helper()
-	tree, pdiags := parser.ParseFile(lexer.NewFile("bench.llx", src))
+	tree, pdiags := parser.ParseFile(lexer.NewFile("bench.llx", src), false)
 	if pdiags.HasErrors() {
 		b.Fatalf("unexpected parse errors: %v", pdiags.All())
 	}

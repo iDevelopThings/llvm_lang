@@ -92,7 +92,7 @@ func TestExternFuncDeclEndToEnd(t *testing.T) {
 		"func main() int {\n" +
 		"\treturn 0\n" +
 		"}\n"
-	tree, diags := ParseFile(lexer.NewFile("t.ll", src))
+	tree, diags := ParseFile(lexer.NewFile("t.ll", src), false)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected parse errors: %v", diags.All())
 	}
@@ -118,7 +118,7 @@ func TestExternFuncDeclNoReturnTypeEndToEnd(t *testing.T) {
 		"func main() int {\n" +
 		"\treturn 0\n" +
 		"}\n"
-	tree, diags := ParseFile(lexer.NewFile("t.ll", src))
+	tree, diags := ParseFile(lexer.NewFile("t.ll", src), false)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected parse errors: %v", diags.All())
 	}

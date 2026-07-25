@@ -22,9 +22,13 @@ func singleFileWorkspace(t *testing.T, src string) (w *Workspace, path string) {
 	if err := afero.WriteFile(fs, path, []byte(src), 0o644); err != nil {
 		t.Fatalf("writing %s: %v", path, err)
 	}
-	prog, err := loader.LoadProgram(fs, dir)
+	// TestMode: true mirrors safeLoadProgram's own real production behavior
+	// (workspace.go) - a tests{} block's contents must be visible to every
+	// LSP capability exactly like ordinary code (see LANGUAGE.md's "tests{}"
+	// section); no-op for a fixture with no such block.
+	prog, err := loader.LoadProgramWithOptions(fs, dir, loader.Options{TestMode: true})
 	if err != nil {
-		t.Fatalf("LoadProgram: %v", err)
+		t.Fatalf("LoadProgramWithOptions: %v", err)
 	}
 	result := analyzeProgram(prog, 1)
 	fa, ok := result[path]

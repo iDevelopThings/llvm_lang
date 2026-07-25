@@ -14,7 +14,7 @@ import (
 // a Check-phase diagnostic.
 func expectErrorAnywhere(t *testing.T, src string) {
 	t.Helper()
-	tree, pdiags := parser.ParseFile(lexer.NewFile("t.ll", src))
+	tree, pdiags := parser.ParseFile(lexer.NewFile("t.ll", src), false)
 	if pdiags.HasErrors() {
 		return
 	}

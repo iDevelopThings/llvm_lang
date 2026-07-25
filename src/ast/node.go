@@ -45,9 +45,10 @@ type Span struct {
 //   - VarDecl, FuncDecl, StructDecl, IfStmt, ForStmt, ReturnStmt, BreakStmt,
 //     ContinueStmt, FuncType, ConstructorDecl, DestructorDecl, FuncLit,
 //     NewExpr, DeleteStmt, ExternFuncDecl, EnumDecl, MatchStmt, YieldStmt,
-//     AwaitStmt: the leading keyword token (EnumDecl's is `enum`, MatchStmt's
-//     is `match`, YieldStmt's is `yield` - see LANGUAGE.md's "Enums"/"match"
-//     sections). FuncDecl's is normally `func`, but is `async` instead for an
+//     AwaitStmt, TestBlockDecl: the leading keyword token (EnumDecl's is
+//     `enum`, MatchStmt's is `match`, YieldStmt's is `yield`, TestBlockDecl's
+//     is `tests` - see LANGUAGE.md's "Enums"/"match"/"tests{}" sections).
+//     FuncDecl's is normally `func`, but is `async` instead for an
 //     `async func` (see LANGUAGE.md's "Coroutines" section) - the same "same
 //     shape, different flag" convention as YieldReturnType below, just
 //     carried in Tok rather than a child node, since async is a whole-
@@ -421,6 +422,15 @@ type Span struct {
 //     IndexExpr. Whether a given IndexExpr is an instantiation at all, rather
 //     than ordinary array/map indexing, is decided entirely by sema - see
 //     Tree.TypeArgNodes.
+//   - TestBlockDecl: [decl0, decl1, ...] - variable arity, the exact same
+//     shape as File's own children (see LANGUAGE.md's "tests{}" section) -
+//     only ever produced parsing a `tests { ... }` block outside test mode
+//     (parser.parseTestsBlock); in test mode its contents are spliced
+//     directly into the enclosing decl sequence instead, and this node never
+//     appears at all. Deliberately invisible to every downstream pass: none
+//     of them ever call TopLevelDeclsOfKind(TestBlockDecl), so its contents
+//     are inert outside a -test build with no special-casing needed anywhere
+//     else - see DECISIONS.md.
 //   - a fixed-arity kind may reserve a positional slot as InvalidNode for an
 //     omitted optional child (e.g. VarDecl's type annotation); a
 //     variable-arity kind (Block's statements, CallExpr's arguments) is
