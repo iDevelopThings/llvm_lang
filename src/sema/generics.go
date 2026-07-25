@@ -342,8 +342,12 @@ func (c *checker) drainPending() {
 // guards is the genuinely unbounded case C++ has the same problem with - a
 // generic whose body instantiates itself at a strictly *larger* type
 // (`F[T]` calling `F[Box[T]]`), which has no finite fixed point at all. Better
-// a loud diagnostic than a compiler that never returns.
-const maxInstantiations = 2000
+// a loud diagnostic than a compiler that never returns. Kept low (rather
+// than a large "just in case" number): a legitimate program recurses over
+// *values*, not ever-deeper *types*, so nothing real should ever approach
+// this - a high budget only means a much slower failure and an unreadable
+// error naming a type nested hundreds of levels deep.
+const maxInstantiations = 64
 
 // budgetExhausted reports (once) whether this Check run has already created as
 // many specializations as it is allowed to.
