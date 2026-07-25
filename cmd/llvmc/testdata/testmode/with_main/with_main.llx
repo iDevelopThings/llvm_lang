@@ -1,0 +1,9 @@
+import "../../../../../std/test"
+
+func main() {
+    print("app main")
+}
+
+func TestOne(t *test.Runner) {
+    t.Assert(true, "ok")
+}

@@ -1,0 +1,76 @@
+// test.llx - std/test: soft-fail assertions for llvmc -test.
+// Discovery looks for free funcs named TestXxx taking *test.Runner.
+// Assert* records failure and returns bool (no unwind/panic in this language);
+// use `if !t.Assert(...) { return }` to stop a test early.
+// Values are never auto-formatted into messages - pass any detail in msg.
+
+struct Runner {
+    name   string
+    failed bool
+}
+
+func NewRunner(name string) *Runner {
+    return new Runner{name, false}
+}
+
+func (Runner) Name() string {
+    return this.name
+}
+
+func (Runner) Failed() bool {
+    return this.failed
+}
+
+func (Runner) Assert(cond bool, msg string) bool {
+    if !cond {
+        this.failed = true
+        print("    FAIL: " + msg)
+    }
+    return cond
+}
+
+func (Runner) AssertFalse(cond bool, msg string) bool {
+    return this.Assert(!cond, msg)
+}
+
+func (Runner) AssertEqual[T](got T, want T, msg string) bool {
+    return this.Assert(got == want, msg)
+}
+
+func (Runner) AssertNotEqual[T](got T, want T, msg string) bool {
+    return this.Assert(got != want, msg)
+}
+
+func (Runner) AssertNil[T](p *T, msg string) bool {
+    return this.Assert(p == nil, msg)
+}
+
+func (Runner) AssertNotNil[T](p *T, msg string) bool {
+    return this.Assert(p != nil, msg)
+}
+
+// AssertSliceEqual compares two slices element-wise ([]T is not ==-comparable).
+func (Runner) AssertSliceEqual[T](got []T, want []T, msg string) bool {
+    if len(got) != len(want) {
+        return this.Assert(false, msg)
+    }
+    i := 0
+    for i < len(got) {
+        if got[i] != want[i] {
+            return this.Assert(false, msg)
+        }
+        i++
+    }
+    return this.Assert(true, msg)
+}
+
+// AssertApprox is a simple absolute-difference epsilon check (|got-want|<=eps),
+// not a relative/ULP-based comparison - eps needs scaling to the values'
+// own magnitude for anything far from 1.0.
+func (Runner) AssertApprox(got f64, want f64, eps f64, msg string) bool {
+    d := got - want
+    if d < 0.0 {
+        d = -d
+    }
+    return this.Assert(d <= eps, msg)
+}

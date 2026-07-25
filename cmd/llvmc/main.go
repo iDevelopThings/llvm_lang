@@ -25,6 +25,7 @@
 //	llvmc [-l <lib>]... [-L <dir>]... <file.llx or directory>
 //	llvmc -o <output> [-l <lib>]... [-L <dir>]... <file.llx or directory>
 //	llvmc -watch [-init Name] [-tick Name] [-l <lib>]... [-L <dir>]... <file.llx or directory>
+//	llvmc -test [-o <output>] [-emit-llvm] [-l <lib>]... [-L <dir>]... <file.llx or directory>
 //	llvmc -no-opt <file.llx or directory>
 //
 // The -emit-llvm flag runs the exact same pipeline (including LLVM's own
@@ -64,6 +65,11 @@
 // after each successful load, then loops on Tick (default Frame) which must
 // return int: 0 continues, non-zero stops the process with that exit code.
 // main is unused. Mutually exclusive with -o / -emit-llvm. See CODEGEN.md.
+//
+// -test discovers entry-package funcs matching
+// `func TestXxx(t *test.Runner)`, overlays a synthesized main driver, then
+// uses the ordinary compile/JIT/AOT path (composes with -o / -emit-llvm).
+// Mutually exclusive with -watch. See CODEGEN.md.
 //
 // Source file extension: this project picks ".llx" for llvm_lang source
 // files - ".ll" is already LLVM's own textual IR format's extension, and
@@ -144,7 +150,7 @@ func main() {
 // usage is the short usage message printed on any usage error, and also
 // documents the -emit-llvm/-o/-no-opt flags (see the package doc comment
 // for the full exit-code writeup).
-const usage = "usage: llvmc [-emit-llvm | -o <output> | -watch] [-init Name] [-tick Name] [-no-opt] [-l <lib>]... [-L <dir>]... <file.llx | directory>"
+const usage = "usage: llvmc [-emit-llvm | -o <output> | -watch | -test] [-init Name] [-tick Name] [-no-opt] [-l <lib>]... [-L <dir>]... <file.llx | directory>"
 
 // run is main's testable body: it never calls os.Exit itself, so a test can
 // invoke it directly and just inspect the returned code plus whatever was
@@ -170,6 +176,11 @@ func run(args []string, stderr io.Writer) int {
 		"watch",
 		false,
 		"hot-reload JIT: persistent LLJIT, call Init then loop on Tick (default Frame); reload on source change",
+	)
+	testMode := fs.Bool(
+		"test",
+		false,
+		"discover TestXxx(t *test.Runner) in the entry package, synthesize a driver main, run the suite",
 	)
 	initName := fs.String(
 		"init",
@@ -223,6 +234,10 @@ func run(args []string, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "llvmc: -watch cannot be used with -emit-llvm or -o")
 		return exitUsage
 	}
+	if *watch && *testMode {
+		fmt.Fprintln(stderr, "llvmc: -watch and -test are mutually exclusive")
+		return exitUsage
+	}
 	if (initSet || tickSet) && !*watch {
 		fmt.Fprintln(stderr, "llvmc: -init and -tick require -watch")
 		return exitUsage
@@ -252,6 +267,10 @@ func run(args []string, stderr io.Writer) int {
 			TickName:     *tickName,
 			InitRequired: initSet && *initName != "",
 		}, stderr)
+	}
+
+	if *testMode {
+		return runTest(path, !*noOpt, *output, *emitLLVM, linkLibs, linkDirs, stderr)
 	}
 
 	prog, err := loader.LoadProgram(afero.NewOsFs(), path)
