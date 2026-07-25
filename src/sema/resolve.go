@@ -382,7 +382,7 @@ func (r *resolver) declareLocal(scope *Scope, n, nameNode ast.NodeIndex, kind Sy
 }
 
 func (r *resolver) declareStruct(pkg *Scope, decl ast.NodeIndex) {
-	nameNode := r.tree.Child(decl, 0)
+	nameNode := r.tree.StructName(decl)
 	sym := r.declareLocal(pkg, decl, nameNode, SymStruct)
 
 	// A generic struct declares no StructInfo of its own: it has no concrete

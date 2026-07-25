@@ -212,15 +212,12 @@ programs that don't use it:
 ns/op is omitted deliberately - every stage's before/after landed inside
 run-to-run noise at this benchtime, with no consistent direction.
 
-- **Flat, as designed.** A program with no generic declarations creates no
-  specializations, so the whole instantiation pass never runs; what's left is
-  one extra `InvalidNode` child slot per `FuncDecl`/`StructDecl` (the +7/+8
-  B/op in the parser rows, exactly the two fixtures' declaration counts) plus
-  the resolver's own two new package-level maps (the +2 allocs/op in sema,
-  constant per package, which is why Large's +2 matches Small's).
-- **A program that DOES use generics pays per specialization**, not per use:
-  each distinct `(template, type arguments)` pair is resolved and checked
-  exactly once, memoized, and thereafter costs a map lookup. That cost is the
-  same as having hand-written the specialized declaration, which is precisely
-  what monomorphization means - not measured here, since neither shared
-  fixture uses generics.
+- **Flat, as designed.** Neither fixture declares a generic, so no
+  specialization is ever created and the instantiation pass never runs.
+- Parser and codegen move by single-digit B/op with no allocation change at
+  either fixture size - within noise, not an attributable cost.
+- Sema is the only consistently-directional change: +2 allocs/op on both
+  fixtures (constant per package, so it doesn't scale with program size) and
+  ~+1.3% / ~+0.5% B/op on Small / Large. The B/op delta isn't traced to a
+  specific allocation site here; what the numbers do support is that it
+  doesn't grow with the program.

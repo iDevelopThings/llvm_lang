@@ -34,6 +34,11 @@ func (t *Tree) TopLevelDeclsOfKind(kind enums.NodeKind) iter.Seq[NodeIndex] {
 // member0, ...] - see Node's own StructDecl doc comment).
 const structMemberStart = 2
 
+// StructName returns decl's (a StructDecl's) name child.
+func (t *Tree) StructName(decl NodeIndex) NodeIndex {
+	return t.Child(decl, 0)
+}
+
 // StructTypeParamList returns decl's (a StructDecl's) TypeParamList child -
 // InvalidNode for a non-generic struct (see LANGUAGE.md's "Generics"
 // section).

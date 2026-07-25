@@ -185,6 +185,60 @@ func TestGenericInstantiationExprShape(t *testing.T) {
 	}
 }
 
+// TestCompositeLitKeyedIndexingUnaffected pins the case atTypeOnlyStart has
+// to get right in the other direction: an index that *starts* type-only but
+// carries a composite-literal body is an ordinary key, not a type argument.
+func TestCompositeLitKeyedIndexingUnaffected(t *testing.T) {
+	tests := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{
+			name: "array-literal map key",
+			src:  "m[[3]int{1, 2, 3}] = 7",
+			want: "" +
+				"AssignStmt \"=\"\n" +
+				"  IndexExpr\n" +
+				"    Ident \"m\"\n" +
+				"    CompositeLit\n" +
+				"      ArrayType\n" +
+				"        NumberLit \"3\"\n" +
+				"        Ident \"int\"\n" +
+				"      NumberLit \"1\"\n" +
+				"      NumberLit \"2\"\n" +
+				"      NumberLit \"3\"\n" +
+				"  NumberLit \"7\"\n",
+		},
+		{
+			name: "slice-literal indexed inside the key",
+			src:  "x := m[[]int{1, 2}[0]]",
+			want: "" +
+				"ShortVarDecl \":=\"\n" +
+				"  Ident \"x\"\n" +
+				"  IndexExpr\n" +
+				"    Ident \"m\"\n" +
+				"    IndexExpr\n" +
+				"      CompositeLit\n" +
+				"        ArrayType\n" +
+				"          <missing>\n" +
+				"          Ident \"int\"\n" +
+				"        NumberLit \"1\"\n" +
+				"        NumberLit \"2\"\n" +
+				"      NumberLit \"0\"\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tree, n := parseStmtSrc(t, tt.src)
+			if got := tree.Dump(n); got != tt.want {
+				t.Errorf("Dump(%q):\n got:\n%s\nwant:\n%s", tt.src, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestGenericTypePositionShape covers `Name[args]` reached through
 // parseTypeExpr (a var's annotation, a field's type, an element type) rather
 // than through the Pratt loop - both produce the identical IndexExpr shape.

@@ -873,7 +873,7 @@ func (g *Generator) declareStructType(decl ast.NodeIndex) {
 // instantiation of a generic struct is a clone of the same declaration, so
 // they all share the same name text (see sema's generics.go).
 func (g *Generator) structInfoOf(decl ast.NodeIndex) *sema.StructInfo {
-	return g.info.Refs[g.tree.Child(decl, 0)].StructInfo
+	return g.info.Refs[g.tree.StructName(decl)].StructInfo
 }
 
 // defineStructBody fills in decl's struct type body, once every struct's

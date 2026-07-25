@@ -1,6 +1,7 @@
 package sema
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -197,7 +198,45 @@ func TestUnboundedGenericRecursionIsRejected(t *testing.T) {
 	if !diags.HasErrors() {
 		t.Fatal("expected a diagnostic for unbounded generic recursion")
 	}
-	wantDiagAmong(t, diags.All(), "too many generic instantiations")
+	wantDiagAmong(t, diags.All(), "type arguments nest more than")
+}
+
+// checkGenericCall asks resolveMember whether a method callee is generic
+// before the ordinary call path does - a failed lookup must still be reported
+// exactly once, for non-generic code too (see resolveMember's memoization).
+func TestFailedMethodCallReportedOnce(t *testing.T) {
+	diags := expectCheckErrors(t, "struct P {\n\tx int\n}\n"+
+		"func main() {\n\tp := P{1}\n\tp.nope()\n}\n", 1)
+	wantDiag(t, diags.All()[0].Msg, "P has no field or method nope")
+}
+
+func TestUnexportedMethodCallReportedOnce(t *testing.T) {
+	libTree := mustParseFile(t, "lib/p.llx", "struct P {\n\tX int\n}\n"+
+		"func (P) get() int {\n\treturn this.X\n}\n")
+	mainTree := mustParseFile(t, "app/main.llx", "import \"./lib\"\n\n"+
+		"func main() {\n\tp := lib.P{1}\n\tprint(p.get())\n}\n")
+
+	units := []*PackageUnit{
+		{Key: "lib", Name: "lib", Trees: []*ast.Tree{libTree}},
+		{
+			Key:   "app",
+			Name:  "app",
+			Trees: []*ast.Tree{mainTree},
+			FileImports: map[*ast.Tree][]FileImport{
+				mainTree: {{LocalName: "lib", TargetKey: "lib"}},
+			},
+		},
+	}
+	msgs := resolveAndCheckProgram(t, units)
+	if len(msgs) != 1 {
+		t.Fatalf("got %d diagnostics, want exactly 1: %v", len(msgs), msgs)
+	}
+	wantDiag(t, msgs[0], "get is not exported")
+}
+
+func TestGenericMainRejected(t *testing.T) {
+	diags := expectCheckErrors(t, "func main[T]() {\n\tprint(1)\n}\n", 1)
+	wantDiag(t, diags.All()[0].Msg, "main must not be generic")
 }
 
 func TestGenericInconsistentUnificationRejected(t *testing.T) {
@@ -277,14 +316,28 @@ func TestGenericInstantiationAsValueRejected(t *testing.T) {
 }
 
 // Explicit type arguments on a METHOD call have no supported spelling (see
-// BLOCKERS.md) - what matters here is that it's a clean diagnostic, not a
-// crash or something silently surprising.
+// BLOCKERS.md) - the diagnostic must say that, not something about `()`.
 func TestExplicitTypeArgsOnMethodCallRejected(t *testing.T) {
-	_, _, diags := checkSrcAllowErrors(t, "struct Entity {\n\tid int\n}\n"+
+	diags := expectCheckErrors(t, "struct Entity {\n\tid int\n}\n"+
 		"func (Entity) Tag[T](v T) T {\n\treturn v\n}\n"+
-		"func main() {\n\te := Entity{1}\n\tprint(e.Tag[int](5))\n}\n")
-	if !diags.HasErrors() {
-		t.Fatal("expected a diagnostic for explicit type arguments on a method call")
+		"func main() {\n\te := Entity{1}\n\tprint(e.Tag[int](5))\n}\n", 1)
+	wantDiag(t, diags.All()[0].Msg, "explicit type arguments are not supported on a method call")
+}
+
+func TestTypeArgsOnNonGenericMethodRejected(t *testing.T) {
+	diags := expectCheckErrors(t, "struct Entity {\n\tid int\n}\n"+
+		"func (Entity) Id() int {\n\treturn this.id\n}\n"+
+		"func main() {\n\te := Entity{1}\n\tprint(e.Id[int]())\n}\n", 1)
+	wantDiag(t, diags.All()[0].Msg, "Id is not generic and takes no type arguments")
+}
+
+// Arity is the same for every specialization, so an obvious mismatch must win
+// over the inference failure it would otherwise cause.
+func TestGenericCallWrongArityReportsArity(t *testing.T) {
+	for _, callArgs := range []string{"", "1", "1, 2, 3"} {
+		diags := expectCheckErrors(t, "func Sum[T](a T, b T) T {\n\treturn a + b\n}\n"+
+			"func main() {\n\tprint(Sum("+callArgs+"))\n}\n", 1)
+		wantDiag(t, diags.All()[0].Msg, "wrong number of arguments in call")
 	}
 }
 
@@ -298,6 +351,41 @@ func TestOrdinaryIndexingStillWorks(t *testing.T) {
 // likeliest thing to be mistaken for an instantiation.
 func TestMapIndexingStillWorks(t *testing.T) {
 	checkSrc(t, "func main() {\n\tm := make(map[string]int)\n\tm[\"a\"] = 1\n\tprint(m[\"a\"])\n}\n")
+}
+
+// Ordinary breadth - a container's methods each cost one instantiation per
+// element type - is not unbounded recursion, and must not be capped like it.
+func TestManyDistinctInstantiationsAccepted(t *testing.T) {
+	const elemTypes = 20
+
+	var src strings.Builder
+	src.WriteString("struct Store[T] {\n\titems []T\n}\n" +
+		"func NewStore[T]() Store[T] {\n\treturn Store[T]{make([]T, 0)}\n}\n" +
+		"func (Store[T]) Add(v T) {\n\tthis.items = append(this.items, v)\n}\n" +
+		"func (Store[T]) At(i int) T {\n\treturn this.items[i]\n}\n" +
+		"func (Store[T]) Len() int {\n\treturn len(this.items)\n}\n" +
+		"func (Store[T]) Clear() {\n\tthis.items = make([]T, 0)\n}\n")
+	for i := range elemTypes {
+		fmt.Fprintf(&src, "struct E%d {\n\tx int\n}\n", i)
+	}
+	src.WriteString("func main() {\n")
+	for i := range elemTypes {
+		fmt.Fprintf(&src, "\ts%d := NewStore[E%d]()\n\ts%d.Add(E%d{%d})\n\tprint(s%d.At(0).x)\n\tprint(s%d.Len())\n\ts%d.Clear()\n",
+			i, i, i, i, i, i, i, i)
+	}
+	src.WriteString("}\n")
+
+	_, info := checkSrc(t, src.String())
+	// One Store[Ei] plus its four methods plus NewStore[Ei], per element type.
+	if want := elemTypes * 6; len(info.Specializations) != want {
+		t.Fatalf("created %d specializations, want %d", len(info.Specializations), want)
+	}
+}
+
+// An array-literal map key starts with the very `[` that also starts an
+// explicit instantiation's type argument - see the parser's atTypeOnlyStart.
+func TestArrayLiteralKeyedMapIndexingStillWorks(t *testing.T) {
+	checkSrc(t, "func main() {\n\tm := make(map[[3]int]int)\n\tm[[3]int{1, 2, 3}] = 7\n\tprint(m[[3]int{1, 2, 3}])\n}\n")
 }
 
 // A generic struct's own constructor/destructor are cloned and checked per

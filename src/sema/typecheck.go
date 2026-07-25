@@ -247,6 +247,11 @@ type checker struct {
 	// against maxInstantiations.
 	pending        []func()
 	instantiations int
+
+	// memberFailed records the MemberExpr nodes resolveMember already
+	// rejected - Info.Refs only memoizes a success, so without this a second
+	// caller asking about the same node re-reports the identical diagnostic.
+	memberFailed map[nodeRef]bool
 }
 
 // enter switches the checker's current-file bookkeeping to tree
@@ -346,6 +351,7 @@ func CheckProgram(trees []*ast.Tree, infos map[*ast.Tree]*Info, treePackage map[
 		funcSigs:              make(map[nodeRef]funcSignature),
 		computingCopyable:     make(map[*StructInfo]bool),
 		computingEnumCopyable: make(map[*EnumInfo]bool),
+		memberFailed:          make(map[nodeRef]bool),
 	}
 	for _, tree := range trees {
 		c.allDiags[tree] = diag.NewBag()
@@ -415,6 +421,7 @@ func (c *checker) checkPackage(trees []*ast.Tree) {
 			// A generic template is never checked as written - only its
 			// specializations are (see generics.go).
 			if isGenericDecl(tree, c.info.Generics, decl) {
+				c.checkMainNotGeneric(decl)
 				continue
 			}
 			switch tree.Nodes[decl].Kind {
@@ -712,6 +719,23 @@ func (c *checker) checkMainReturnType(decl ast.NodeIndex, sig funcSignature) {
 		return
 	}
 	c.errorAt(c.tree.FuncReturnType(decl), "main must return either nothing or int, got %s", sig.Return)
+}
+
+// checkMainNotGeneric is checkMainReturnType's counterpart for the one shape
+// that never reaches it: a template is skipped by checkPackage, so without
+// this `func main[T]()` produces no diagnostic at all and the driver only
+// reports an unpositioned "no main function found in module".
+func (c *checker) checkMainNotGeneric(decl ast.NodeIndex) {
+	if c.tree.Nodes[decl].Kind != enums.NodeKinds.FuncDecl {
+		return
+	}
+	if c.tree.FuncReceiver(decl) != ast.InvalidNode {
+		return
+	}
+	if c.tree.Text(c.tree.FuncName(decl)) != "main" {
+		return
+	}
+	c.errorAt(c.tree.FuncTypeParamList(decl), "main must not be generic")
 }
 
 // funcSigForDecl returns decl's signature, computing and caching it on first
@@ -4431,17 +4455,27 @@ func (c *checker) memberObjectIsPackage(n ast.NodeIndex) bool {
 // all) - so this just reads back whatever Info.Refs[n] already holds
 // instead of doing any struct-value lookup of its own.
 //
-// Memoized on Info.Refs[n] itself (rather than a separate cache map) - a
-// given MemberExpr node's resolution never changes between calls, and two
-// call sites can now legitimately ask about the same callee node in one
-// Check pass (methodSigForCallee's own struct-field fallback, then
-// funcSigForCall's indirect-call check re-deriving the same node's Type via
-// checkExpr/checkMemberExpr) - without this, the second call would redo
-// checkValueExpr(object) and checkExportedAccess from scratch.
+// Memoized on Info.Refs[n] for a success and on checker.memberFailed for a
+// failure - several call sites can legitimately ask about the same callee
+// node in one Check pass (checkGenericCall's own is-this-generic test,
+// methodSigForCallee's struct-field fallback, funcSigForCall's indirect-call
+// check), and each must see the same answer reported exactly once.
 func (c *checker) resolveMember(n ast.NodeIndex) (*Symbol, bool) {
 	if sym, ok := c.info.Refs[n]; ok {
 		return sym, true
 	}
+	key := nodeRef{c.tree, n}
+	if c.memberFailed[key] {
+		return nil, false
+	}
+	sym, ok := c.resolveMemberUncached(n)
+	if !ok {
+		c.memberFailed[key] = true
+	}
+	return sym, ok
+}
+
+func (c *checker) resolveMemberUncached(n ast.NodeIndex) (*Symbol, bool) {
 	if c.memberObjectIsPackage(n) {
 		// Resolve already fully resolved this - Info.Refs[n] would have
 		// already hit the memoization check above if it had succeeded, so

@@ -9,6 +9,7 @@ package sema
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"llvm_lang/src/ast"
@@ -21,9 +22,7 @@ import (
 // A method's template also carries the receiver side: OwnerSym is the concrete
 // struct/enum it is a method of, and OuterParams/OuterArgs its receiver
 // clause's own type parameters, already bound (empty for a method on a
-// non-generic type). That's what makes one instantiation routine serve all
-// three shapes - the only difference is how much of the substitution is
-// already known before inference runs.
+// non-generic type).
 type GenericInfo struct {
 	Symbol *Symbol
 	Decl   ast.NodeIndex
@@ -120,27 +119,16 @@ func (r *resolver) typeParamNames(list ast.NodeIndex, outer []string) []string {
 	for _, nameNode := range children {
 		name := r.tree.Text(nameNode)
 		switch {
-		case containsName(outer, name):
-			// Shadowing the receiver's own parameter is always a mistake: the
-			// method body would have no way to name the outer one, and the two
-			// are genuinely different types.
+		case slices.Contains(outer, name):
+			// Never shadowing - see LANGUAGE.md's "Generics" section.
 			r.errorAt(nameNode, "type parameter %s is already bound by the receiver clause", name)
-		case containsName(names, name):
+		case slices.Contains(names, name):
 			r.errorAt(nameNode, "type parameter %s redeclared", name)
 		default:
 			names = append(names, name)
 		}
 	}
 	return names
-}
-
-func containsName(names []string, name string) bool {
-	for _, n := range names {
-		if n == name {
-			return true
-		}
-	}
-	return false
 }
 
 // addGenericStructMethod attaches a method declared against generic struct gi
@@ -211,6 +199,11 @@ func isGenericDecl(tree *ast.Tree, generics map[string]*GenericInfo, decl ast.No
 // so a specialization goes through the exact same name-resolution code a
 // hand-written declaration did. Resolve keeps no state between declarations,
 // so a fresh one per instantiation is both correct and cheap.
+//
+// generics/fileImports/fileScopes are deliberately left nil: they only matter
+// to the declaration-cataloguing passes, and every caller here starts from an
+// explicit scope (typeParamScope over Info.FileScope) instead. Anything that
+// makes body resolution read them has to populate them here too.
 func (c *checker) resolverFor(tree *ast.Tree) *resolver {
 	info := c.infos[tree]
 	return &resolver{
@@ -310,12 +303,9 @@ func (c *checker) enqueueBody(tree *ast.Tree, check func()) {
 	})
 }
 
-// pushPackage is pushTree plus the "who is doing the accessing" package
-// identity export checks read (checker.curPkgScope) - the right switch for
-// running a whole declaration body belonging to tree, as opposed to
-// pushTree's own borrow-one-declaration-node-mid-lookup semantics. A
-// specialization's body belongs to the package that DECLARED the generic, not
-// to whichever package's call site happened to trigger the instantiation.
+// pushPackage is pushTree plus the accessing-package identity export checks
+// read (checker.curPkgScope) - a specialization's body belongs to the package
+// that DECLARED the generic, not to whichever call site triggered it.
 func (c *checker) pushPackage(tree *ast.Tree) (restore func()) {
 	prev := c.curPkgScope
 	restoreTree := c.pushTree(tree)
@@ -336,42 +326,75 @@ func (c *checker) drainPending() {
 	}
 }
 
-// maxInstantiations caps how many specializations one Check run may create.
-// Every instantiation is memoized by (template, type arguments), so a
-// recursive or mutually-recursive generic terminates on its own; what this
-// guards is the genuinely unbounded case C++ has the same problem with - a
-// generic whose body instantiates itself at a strictly *larger* type
-// (`F[T]` calling `F[Box[T]]`), which has no finite fixed point at all. Better
-// a loud diagnostic than a compiler that never returns. Kept low (rather
-// than a large "just in case" number): a legitimate program recurses over
-// *values*, not ever-deeper *types*, so nothing real should ever approach
-// this - a high budget only means a much slower failure and an unreadable
-// error naming a type nested hundreds of levels deep.
-const maxInstantiations = 64
+// maxTypeArgDepth bounds how deeply one instantiation's type arguments may
+// nest - the only genuinely unbounded case (`F[T]` instantiating `F[Box[T]]`,
+// which has no fixed point). Real generics recurse over values, not types.
+const maxTypeArgDepth = 32
 
-// budgetExhausted reports (once) whether this Check run has already created as
-// many specializations as it is allowed to.
-func (c *checker) budgetExhausted(at ast.NodeIndex, name string) bool {
+// maxInstantiations is a whole-program safety net for a runaway that somehow
+// widens without nesting - deliberately far above anything a real program
+// reaches (a generic container's methods each cost one per element type).
+const maxInstantiations = 5000
+
+// refuseInstantiation reports whether gi may not be instantiated for args,
+// diagnosing why - the two failure modes are genuinely different and say so.
+func (c *checker) refuseInstantiation(gi *GenericInfo, args []Type, at ast.NodeIndex) bool {
+	if typeListDepth(args) > maxTypeArgDepth {
+		c.errorAt(at, "%s's type arguments nest more than %d levels deep - a generic that instantiates itself at an ever-larger type never terminates",
+			gi.Symbol.Name, maxTypeArgDepth)
+		return true
+	}
 	if c.instantiations < maxInstantiations {
 		return false
 	}
 	if c.instantiations == maxInstantiations {
 		c.instantiations++ // report exactly once, however many sites follow
-		c.errorAt(at, "too many generic instantiations while instantiating %s - a generic that instantiates itself at an ever-larger type never terminates", name)
+		c.errorAt(at, "too many generic instantiations in one program (limit %d)", maxInstantiations)
 	}
 	return true
+}
+
+// typeListDepth is the deepest of args, or 0 for none.
+func typeListDepth(args []Type) int {
+	depth := 0
+	for _, a := range args {
+		depth = max(depth, typeDepth(a))
+	}
+	return depth
+}
+
+// typeDepth is how many levels of type nesting t has: 1 for a scalar, one
+// more per pointer/array/map/func layer and per generic type argument.
+func typeDepth(t Type) int {
+	inner := 0
+	if t.Elem != nil {
+		inner = max(inner, typeDepth(*t.Elem))
+	}
+	if t.Key != nil {
+		inner = max(inner, typeDepth(*t.Key))
+	}
+	if t.Return != nil {
+		inner = max(inner, typeDepth(*t.Return))
+	}
+	for _, p := range t.Params {
+		inner = max(inner, typeDepth(p))
+	}
+	if t.Struct != nil {
+		inner = max(inner, typeListDepth(t.Struct.TypeArgs))
+	}
+	return inner + 1
 }
 
 // instantiateFunc specializes gi (a generic function or method template) for
 // args, returning the specialization's own Symbol - the symbol every call site
 // records into Info.Refs, so codegen sees an ordinary direct call to an
-// ordinary function. nil once the instantiation budget is exhausted.
+// ordinary function. nil when refuseInstantiation turns it down.
 func (c *checker) instantiateFunc(gi *GenericInfo, args []Type, at ast.NodeIndex) *Symbol {
 	key := gi.instanceKey(args)
 	if inst, ok := gi.instances[key]; ok {
 		return inst.sym
 	}
-	if c.budgetExhausted(at, key) {
+	if c.refuseInstantiation(gi, args, at) {
 		return nil
 	}
 	c.instantiations++
@@ -419,14 +442,14 @@ func (c *checker) instantiateFunc(gi *GenericInfo, args []Type, at ast.NodeIndex
 // returning the concrete StructInfo every type position naming
 // `Name[args...]` resolves to. Every method the template declares is
 // instantiated alongside it - a method with type parameters of its own stays a
-// template on the result, instantiated per call. nil once the instantiation
-// budget is exhausted.
+// template on the result, instantiated per call. nil when refuseInstantiation
+// turns it down.
 func (c *checker) instantiateStruct(gi *GenericInfo, args []Type, at ast.NodeIndex) *StructInfo {
 	key := gi.instanceKey(args)
 	if inst, ok := gi.instances[key]; ok {
 		return inst.structInfo
 	}
-	if c.budgetExhausted(at, key) {
+	if c.refuseInstantiation(gi, args, at) {
 		return nil
 	}
 	c.instantiations++
@@ -455,7 +478,7 @@ func (c *checker) instantiateStruct(gi *GenericInfo, args []Type, at ast.NodeInd
 		StructInfo: si,
 	}
 	info.Structs[key] = si
-	info.Refs[tree.Child(clone, 0)] = si.Symbol
+	info.Refs[tree.StructName(clone)] = si.Symbol
 	// Registered before anything below runs, so a self-referential generic
 	// (a field or method mentioning its own instantiated type) terminates.
 	gi.instances[key] = &genericInstance{
@@ -639,6 +662,9 @@ func (c *checker) resolveGenericStructCallee(callee ast.NodeIndex) (ok, isGeneri
 // point at the specialization - after which the call is an ordinary direct
 // call in every later pass. Returns false when the callee isn't generic.
 func (c *checker) checkGenericCall(n, callee ast.NodeIndex, args []ast.NodeIndex) (Type, bool) {
+	if c.rejectMethodTypeArgs(callee) {
+		return invalidType, true
+	}
 	gi, explicit, ok := c.genericCallee(callee)
 	if !ok {
 		return invalidType, false
@@ -647,6 +673,13 @@ func (c *checker) checkGenericCall(n, callee ast.NodeIndex, args []ast.NodeIndex
 	argTypes := make([]Type, len(args))
 	for i, a := range args {
 		argTypes[i] = c.checkValueExpr(a)
+	}
+
+	// Arity first: it's the same for every specialization, and a wrong count
+	// is a far more useful answer than the inference failure it would cause.
+	if want := len(gi.Tree.Children(gi.Tree.FuncParamList(gi.Decl))); len(args) != want {
+		c.errorAtNodes(args, n, "wrong number of arguments in call: got %d, want %d", len(args), want)
+		return invalidType, true
 	}
 
 	var typeArgs []Type
@@ -673,12 +706,38 @@ func (c *checker) checkGenericCall(n, callee ast.NodeIndex, args []ast.NodeIndex
 	return sig.Return, true
 }
 
+// rejectMethodTypeArgs reports `p.m[int](x)` - explicit type arguments on a
+// method call have no supported spelling (see BLOCKERS.md). Without this, the
+// ordinary index-expression path reports "m is a method, not a field (call it
+// with ())" about a call that already has its `()`.
+func (c *checker) rejectMethodTypeArgs(callee ast.NodeIndex) bool {
+	if c.tree.Nodes[callee].Kind != enums.NodeKinds.IndexExpr {
+		return false
+	}
+	// A package-qualified generic function (`lib.Id[int](x)`) wears the same
+	// shape but is an ordinary explicit instantiation.
+	target := c.tree.Child(callee, 0)
+	if c.tree.Nodes[target].Kind != enums.NodeKinds.MemberExpr || c.memberObjectIsPackage(target) {
+		return false
+	}
+	sym, ok := c.resolveMember(target)
+	if !ok || sym.Kind != SymFunc {
+		return false
+	}
+	if sym.Generic != nil {
+		c.errorAt(callee, "explicit type arguments are not supported on a method call - %s's type parameters are inferred from its arguments", sym.Name)
+	} else {
+		c.errorAt(callee, "%s is not generic and takes no type arguments", sym.Name)
+	}
+	return true
+}
+
 // genericCallee classifies a call's callee: the template it names, and the
 // IndexExpr carrying explicit type arguments (InvalidNode when the call
 // relies on inference). Only a generic *function/method* template counts - a
 // generic struct's own `Box[int](args)` is a constructor call, already claimed
 // by checkConstructorCall before this ever runs. A method callee is never
-// explicit either: `p.m[int](x)` has no supported spelling (see BLOCKERS.md).
+// explicit either - see rejectMethodTypeArgs.
 func (c *checker) genericCallee(callee ast.NodeIndex) (gi *GenericInfo, explicit ast.NodeIndex, ok bool) {
 	switch c.tree.Nodes[callee].Kind {
 	case enums.NodeKinds.Ident:
@@ -709,18 +768,13 @@ func (c *checker) inferTypeArgs(gi *GenericInfo, argTypes []Type, at ast.NodeInd
 		tree:   gi.Tree,
 		info:   c.infos[gi.Tree],
 		params: make(map[string]bool, len(gi.Params)),
-		bound:  make(map[string]Type, len(gi.Params)+len(gi.OuterParams)),
+		bound:  make(map[string]Type, len(gi.Params)),
 	}
+	// Only gi's OWN parameters are solvable - the receiver's are already fixed
+	// by the receiver's type, so `func (SlotMap[T]) Put[U](a T, b U)` solves U
+	// and leaves T alone (unify skips any name not in params).
 	for _, p := range gi.Params {
 		u.params[p] = true
-	}
-	// The receiver's parameters are already fixed by the receiver's own type -
-	// pre-bound (and not inferable) so `func (SlotMap[T]) Put[U](a T, b U)`
-	// only ever solves U.
-	for i, p := range gi.OuterParams {
-		if i < len(gi.OuterArgs) {
-			u.bound[p] = gi.OuterArgs[i]
-		}
 	}
 
 	paramNodes := gi.Tree.Children(gi.Tree.FuncParamList(gi.Decl))

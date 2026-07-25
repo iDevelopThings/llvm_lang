@@ -3,6 +3,8 @@ package codegen
 import (
 	"strings"
 	"testing"
+
+	"llvm_lang/src/sema"
 )
 
 // TestGenericFuncTwoInstantiationsProduceIndependentResults is this round's
@@ -117,6 +119,36 @@ func main() {
 	}
 }
 
+// One generic calling another, with the type parameter flowing through: the
+// outer specialization's own body triggers the inner instantiation.
+func TestGenericCallingGenericLowers(t *testing.T) {
+	jm := compileAndJIT(t, `
+func Inner[T](x T) T {
+	return x
+}
+
+func Outer[T](x T) T {
+	return Inner(x)
+}
+
+func main() {
+	print(Outer(4))
+	print(Outer("z"))
+}
+`)
+	out := captureStdout(t, func() {
+		jm.runInt32(t, "main")
+	})
+	if want := "4\nz\n"; out != want {
+		t.Fatalf("captured stdout = %q, want %q", out, want)
+	}
+	for _, name := range []string{`@"Outer[int]"`, `@"Inner[int]"`, `@"Outer[string]"`, `@"Inner[string]"`} {
+		if !hasDefine(jm.ir, name) {
+			t.Fatalf("generated IR defines no %s:\n%s", name, jm.ir)
+		}
+	}
+}
+
 func TestGenericExplicitInstantiationLowers(t *testing.T) {
 	jm := compileAndJIT(t, `
 func Zeros[T](n int) []T {
@@ -139,8 +171,8 @@ func main() {
 }
 
 // Every specialization gets its own LLVM function, named after the mangled
-// specialization rather than the shared template - two same-named functions
-// would otherwise be indistinguishable in the IR.
+// specialization rather than the shared template - and the template itself is
+// never emitted at all.
 func TestSpecializationsGetDistinctLLVMNames(t *testing.T) {
 	jm := compileAndJIT(t, `
 func Id[T](a T) T {
@@ -152,10 +184,108 @@ func main() {
 	print(Id(1.5))
 }
 `)
-	for _, want := range []string{"@\"Id[int]\"", "@\"Id[f64]\""} {
-		if !strings.Contains(jm.ir, want) {
-			t.Fatalf("generated IR has no %s function:\n%s", want, jm.ir)
+	for _, want := range []string{`@"Id[int]"`, `@"Id[f64]"`} {
+		if !hasDefine(jm.ir, want) {
+			t.Fatalf("generated IR defines no %s:\n%s", want, jm.ir)
 		}
+	}
+	if strings.Contains(jm.ir, "@Id(") {
+		t.Fatalf("generated IR mentions the un-substituted template @Id:\n%s", jm.ir)
+	}
+}
+
+// hasDefine reports whether ir carries a real body for the LLVM symbol name -
+// a mere call site mentioning it doesn't count.
+func hasDefine(ir, name string) bool {
+	for line := range strings.Lines(ir) {
+		if strings.HasPrefix(line, "define") && strings.Contains(line, name+"(") {
+			return true
+		}
+	}
+	return false
+}
+
+// Two same-named structs from different packages render identically via
+// Type.String(), so one shared generic instantiated at both produces the same
+// mangled name twice - sema's instanceKey disambiguates with a `#N` suffix.
+// Without that, the second instantiation would silently alias onto the first
+// and compute the wrong answer (not crash).
+func TestSameNamedTypeArgsFromDifferentPackages(t *testing.T) {
+	jm := compileProgramAndJIT(t, []programPackage{
+		{
+			key: "gen",
+			files: []packageFile{
+				{"gen/total.llx", `
+func Total[T](v T) int {
+	return v.Sum()
+}
+`},
+			},
+		},
+		{
+			key: "a",
+			files: []packageFile{
+				{"a/point.llx", `
+struct Point {
+	X int
+}
+
+func (Point) Sum() int {
+	return this.X
+}
+`},
+			},
+		},
+		{
+			key: "b",
+			files: []packageFile{
+				{"b/point.llx", `
+struct Point {
+	X int
+	Y int
+}
+
+func (Point) Sum() int {
+	return this.X + this.Y
+}
+`},
+			},
+		},
+		{
+			key: "app",
+			files: []packageFile{
+				{"app/main.llx", `
+import "./gen"
+import "./a"
+import "./b"
+
+func main() {
+	print(gen.Total(a.Point{10}))
+	print(gen.Total(b.Point{10, 5}))
+}
+`},
+			},
+			imports: map[int][]sema.FileImport{
+				0: {
+					{LocalName: "gen", TargetKey: "gen"},
+					{LocalName: "a", TargetKey: "a"},
+					{LocalName: "b", TargetKey: "b"},
+				},
+			},
+		},
+	})
+
+	for _, want := range []string{`@"Total[Point]"`, `@"Total[Point]#1"`} {
+		if !hasDefine(jm.ir, want) {
+			t.Fatalf("generated IR defines no %s:\n%s", want, jm.ir)
+		}
+	}
+
+	out := captureStdout(t, func() {
+		jm.runInt32(t, "main")
+	})
+	if want := "10\n15\n"; out != want {
+		t.Fatalf("captured stdout = %q, want %q", out, want)
 	}
 }
 

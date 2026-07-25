@@ -2260,7 +2260,9 @@ different types.
 inference-only), and using a generic name as a value without instantiating it
 (`f := Id`). A generic that instantiates itself at an ever-larger type
 (`F[T]` calling `F[Box[T]]`) has no finite set of instantiations and is
-rejected with a "too many generic instantiations" diagnostic.
+rejected once its type arguments nest past a fixed depth. Ordinary breadth -
+however many distinct instantiations a program legitimately reaches - is not
+capped in any way a real program can hit.
 
 ## External functions (FFI)
 

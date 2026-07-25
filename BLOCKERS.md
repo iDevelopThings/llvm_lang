@@ -99,6 +99,7 @@ this yet - and it's not obvious whether the right spelling is
 a thing.
 
 **Current default:** method type parameters are inference-only, and
-`p.m[int](x)` reports an ordinary "not a value here" diagnostic rather than
-silently doing something surprising. Revisit if a real program hits a method
-type parameter that inference genuinely can't reach.
+`p.m[int](x)` is rejected by name ("explicit type arguments are not supported
+on a method call - m's type parameters are inferred from its arguments" - see
+sema's `rejectMethodTypeArgs`). Revisit if a real program hits a method type
+parameter that inference genuinely can't reach.

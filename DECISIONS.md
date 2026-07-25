@@ -33,23 +33,16 @@ matters for a compiler that already pays cgo/LLVM costs.
 
 The cost is the C++ cost, accepted knowingly: an error inside a generic body
 is reported at the instantiation that triggered it rather than at the
-declaration, and a generic nobody instantiates is never checked at all. In
-exchange, `T + T`, `T == T`, `T.field` and anything else simply work whenever
-the concrete type supports them, with no constraint vocabulary to invent.
+declaration, and a generic nobody instantiates is never checked at all.
 
-**How, concretely:** sema deep-copies the template's AST subtree per
-instantiation and resolves/checks the copy in a scope binding each type
-parameter to a real `Type` - no source-text rewriting, no substitution
-environment threaded through the checker, and no per-instantiation type
-tables. Codegen then lowers those copies as ordinary declarations and never
-learns generics exist. This was chosen over the alternative (keep one shared
-AST, thread a substitution map through every type lookup in sema *and*
-codegen) specifically because that alternative would have put per-instantiation
-awareness into thousands of lines of codegen, against this project's
-"sema decides, codegen consumes `Info`" rule.
+**Rejected alternative:** keep one shared AST and thread a substitution map
+through every type lookup in sema *and* codegen. Cloning the template's
+subtree per instantiation (the mechanism, see `CODEGEN.md`'s "Generics"
+section) keeps per-instantiation awareness out of codegen entirely, which the
+substitution-map approach would have spread across thousands of lines of it -
+against this project's "sema decides, codegen consumes `Info`" rule.
 
-**Status:** shipped. See `LANGUAGE.md`'s "Generics" section for the rules and
-`CODEGEN.md`'s for the lowering.
+**Status:** shipped. See `LANGUAGE.md`'s "Generics" section for the rules.
 
 ---
 
