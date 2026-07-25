@@ -1,6 +1,11 @@
 package sema
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"llvm_lang/src/lexer"
+)
 
 // TestScopeVisible_ShadowingNearerWins covers Scope.Visible()'s core
 // contract: a name declared in a nearer scope must shadow the same name
@@ -70,5 +75,65 @@ func TestEnclosingScope_WalksPastNonOwningNodes(t *testing.T) {
 	}
 	if !found {
 		t.Error("Visible() did not yield y")
+	}
+}
+
+func TestFuncSignatureText_PlainFunc(t *testing.T) {
+	tree, info := checkSrc(t, "func Insert(v int, n int) int {\n\treturn v + n\n}\n")
+	decl := tree.Children(tree.Root)[0]
+
+	if got, want := FuncSignatureText(tree, info, decl), "(v int, n int) int"; got != want {
+		t.Errorf("FuncSignatureText = %q, want %q", got, want)
+	}
+}
+
+func TestStructFieldsText_PlainStruct(t *testing.T) {
+	tree, info := checkSrc(t, "struct Point {\n\tx int\n\ty int\n}\n"+
+		"func f() int {\n\tp := Point{1, 2}\n\treturn p.x\n}\n")
+	decl := tree.Children(tree.Root)[0]
+
+	if got, want := StructFieldsText(tree, info, decl), "{ x int, y int }"; got != want {
+		t.Errorf("StructFieldsText = %q, want %q", got, want)
+	}
+}
+
+// TestFuncSignatureText_GenericMethod_ShowsInstantiatedTypes covers the
+// Type-first half of FuncSignatureText's own contract: an instantiated
+// generic method's own clone gets separately-checked Info.Types entries
+// with the real substituted types, not the template's own literal "T".
+func TestFuncSignatureText_GenericMethod_ShowsInstantiatedTypes(t *testing.T) {
+	src := "struct Box[T] {\n\tvalue T\n}\n" +
+		"func (Box[T]) Get() T {\n\treturn this.value\n}\n" +
+		"func f() int {\n\tb := Box[int]{7}\n\treturn b.Get()\n}\n"
+	tree, info := checkSrc(t, src)
+
+	// The instantiated Get's own Symbol, reached via the call site's Refs
+	// entry - not the template's, which never gets a Types entry at all.
+	// "Get" lives in the MemberExpr's own Tok, not a child Ident node (see
+	// ast.Node's own doc comment), so NodeAt on its offset is how to reach
+	// it - not a name search.
+	offset := strings.Index(src, "b.Get()") + len("b.")
+	memberExpr := tree.NodeAt(lexer.Pos(offset))
+	sym, ok := info.Refs[memberExpr]
+	if !ok || sym == nil {
+		t.Fatal("no symbol resolved for the b.Get() call site")
+	}
+
+	if got, want := FuncSignatureText(sym.Tree, info, sym.Decl), "() int"; got != want {
+		t.Errorf("FuncSignatureText = %q, want %q (the instantiated Box[int]'s own substituted return type)", got, want)
+	}
+}
+
+// TestFuncSignatureText_UnresolvedGenericTemplate_FallsBackToSourceText
+// covers the raw-text fallback: a generic template is never checked (see
+// ResolveTemplateForTooling's own doc comment - it populates Refs/Scopes
+// only, never Types), so its own signature must still render something
+// useful - exactly what was written, type parameter names included.
+func TestFuncSignatureText_UnresolvedGenericTemplate_FallsBackToSourceText(t *testing.T) {
+	tree, info := checkSrc(t, "func Sum[T](a T, b T) T {\n\treturn a + b\n}\n")
+	decl := tree.Children(tree.Root)[0]
+
+	if got, want := FuncSignatureText(tree, info, decl), "(a T, b T) T"; got != want {
+		t.Errorf("FuncSignatureText = %q, want %q", got, want)
 	}
 }
