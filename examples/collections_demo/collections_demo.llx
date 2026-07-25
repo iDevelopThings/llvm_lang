@@ -1,3 +1,6 @@
+import "std:collections"
+
+
 // collections_demo.llx - exercises every operation std/collections's
 // SlotMap[T] exports, instantiated with two different element types (int and
 // a struct) side by side - proving two independent generic instantiations of
@@ -22,7 +25,6 @@
 // Run with:
 //   .\llvmc.exe examples\collections_demo\collections_demo.llx
 
-import "../../std/collections"
 
 struct Item {
     name  string

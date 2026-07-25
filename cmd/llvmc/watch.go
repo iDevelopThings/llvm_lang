@@ -145,7 +145,7 @@ func runWatch(cfg watchConfig, stderr io.Writer) int {
 	}
 
 	tryCompile := func() (map[string]fileStamp, error) {
-		prog, err := loader.LoadProgram(fs, cfg.EntryPath)
+		prog, err := loader.LoadProgramWithOptions(fs, cfg.EntryPath, loaderOptionsFunc())
 		if err != nil {
 			return nil, err
 		}

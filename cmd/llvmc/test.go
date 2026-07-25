@@ -25,7 +25,8 @@ type discoveredTest struct {
 // synthesized main driver, and runs the normal compile/JIT/AOT finish path.
 func runTest(path string, optimize bool, output string, emitLLVM bool, linkLibs, linkDirs []string, stderr io.Writer) int {
 	base := afero.NewOsFs()
-	prog, err := loader.LoadProgram(base, path)
+	opts := loaderOptionsFunc()
+	prog, err := loader.LoadProgramWithOptions(base, path, opts)
 	if err != nil {
 		fmt.Fprintf(stderr, "llvmc: %v\n", err)
 		return exitUsage
@@ -37,13 +38,7 @@ func runTest(path string, optimize bool, output string, emitLLVM bool, linkLibs,
 		return exitUsage
 	}
 
-	stdImport, err := stdTestImportPath(prog.Entry.Dir, base)
-	if err != nil {
-		fmt.Fprintf(stderr, "llvmc: -test: %v\n", err)
-		return exitUsage
-	}
-
-	driver := synthesizeTestDriver(stdImport, tests)
+	driver := synthesizeTestDriver(tests)
 	overlay := afero.NewMemMapFs()
 	fs := afero.NewCopyOnWriteFs(base, overlay)
 	driverPath := filepath.Join(prog.Entry.Dir, testDriverFileName)
@@ -52,7 +47,7 @@ func runTest(path string, optimize bool, output string, emitLLVM bool, linkLibs,
 		return exitCompile
 	}
 
-	prog2, err := loader.LoadProgram(fs, path)
+	prog2, err := loader.LoadProgramWithOptions(fs, path, opts)
 	if err != nil {
 		fmt.Fprintf(stderr, "llvmc: %v\n", err)
 		return exitUsage
@@ -78,42 +73,14 @@ func discoverTests(pkg *loader.Package) []discoveredTest {
 	return out
 }
 
-// stdTestImportPath walks up from entryDir looking for std/test, then returns
-// a slash-separated path relative to entryDir for use in `import "..."`.
-func stdTestImportPath(entryDir string, fs afero.Fs) (string, error) {
-	absEntry, err := filepath.Abs(entryDir)
-	if err != nil {
-		return "", err
-	}
-	dir := absEntry
-	for {
-		candidate := filepath.Join(dir, "std", "test")
-		info, err := fs.Stat(candidate)
-		if err == nil && info.IsDir() {
-			rel, err := filepath.Rel(absEntry, candidate)
-			if err != nil {
-				return "", err
-			}
-			if rel == "." {
-				// entryDir is itself std/test - importing yourself makes
-				// no sense as a driver import (only matters if std/test
-				// ever grows its own TestXxx functions).
-				return "", fmt.Errorf("cannot run -test on std/test itself (nothing to import it as)")
-			}
-			return filepath.ToSlash(rel), nil
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-	return "", fmt.Errorf("could not find std/test above %s", entryDir)
-}
-
-func synthesizeTestDriver(stdImport string, tests []discoveredTest) string {
+// synthesizeTestDriver builds the driver program's own source: a fixed
+// "std:test" import (this compiler's own bundled test.Runner - see
+// DECISIONS.md's "std:/lib: import schemes" entry, resolved independent of
+// where the entry package itself lives, unlike the relative-path walk this
+// used to need) plus one call per discovered TestXxx.
+func synthesizeTestDriver(tests []discoveredTest) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "import %q\n\n", stdImport)
+	b.WriteString("import \"std:test\"\n\n")
 	b.WriteString("func main() int {\n")
 	b.WriteString("    failed := 0\n\n")
 	for i, t := range tests {

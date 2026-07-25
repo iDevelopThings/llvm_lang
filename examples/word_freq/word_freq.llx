@@ -14,7 +14,7 @@
 //   .\llvmc.exe examples\word_freq\word_freq.llx
 //   echo $LASTEXITCODE   # (PowerShell) -> 5  (counts["the"] [3] + foxCount [2])
 
-import "../../std/strings"
+import "std:strings"
 
 func main() int {
     text := "the quick brown fox jumps over the lazy dog the fox runs"

@@ -137,6 +137,15 @@ func TestMain(m *testing.M) {
 		panic("building llvmc for tests: " + err.Error() + "\n" + string(out))
 	}
 
+	// The real llvmc.exe expects its own std/ directory right next to it
+	// (see loader.StdlibFS) - mirror that here so the black-box
+	// TestBinary_TestMode_* tests (which shell out to this exact binary,
+	// unlike every in-process test in this package) can resolve "std:test"
+	// exactly like a real install would.
+	if err := os.CopyFS(filepath.Join(dir, "std"), os.DirFS(filepath.Join("..", "..", "std"))); err != nil {
+		panic("copying std/ next to the test llvmc.exe: " + err.Error())
+	}
+
 	os.Exit(m.Run())
 }
 

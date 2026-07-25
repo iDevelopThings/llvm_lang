@@ -6,7 +6,7 @@ import "testing"
 // std/scheduler/scheduler.llx) inlined directly into each test source -
 // this package's compileSrc/compileAndJITOptimized harness compiles one
 // bare tree with no import resolution, so there is no way to `import
-// "../../std/scheduler"` from here (see std/time's own real import-based
+// "std:scheduler"` from here (see std/time's own real import-based
 // usage instead, examples/time_demo). The worked example under
 // examples/scheduler_demo is what actually exercises the real package
 // through a genuine import.

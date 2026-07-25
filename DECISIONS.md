@@ -2102,3 +2102,99 @@ composing correctly with an enclosing loop's own break) all covered.
 `std/scheduler` itself was NOT migrated
 to the now-legal `Schedule(h coroutine, ...)` shape this round - the
 `*Entry` design from the prior entry still stands, left as a follow-up.
+
+## 2026-07-25 - `std:`/`lib:` import schemes: a distinguished prefix, resolved against a sibling `std/` directory next to the running executable
+
+Motivating problem: import resolution (see the "Cross-package imports"
+entry above) is purely relative to the importing file's own directory, with
+no module-root/manifest concept at all - fine for a project's own local
+packages, but it meant reaching this compiler's own standard library from a
+project living anywhere outside this repo's checkout required a literal
+`../../../path/to/llvm_lang/std/mathutil`-style walk, breaking outright for
+a project on a different drive or with no `../`-reachable path back to the
+compiler at all. Every mainstream language distinguishes "a path to a
+sibling file" from "a name in a known root" (Go's `import "fmt"` vs a
+relative import, Python's absolute vs dot-prefixed relative imports) -
+confirmed with the user this project should too.
+
+**Syntax: a `scheme:path` prefix, not a bare (unprefixed) path.** A bare
+path (no `./`/`../` at all) was the first design considered - "no dot
+prefix" resolving against a root - but rejected: it silently reinterprets
+whatever a project's own local subdirectory named `std` already means
+today, with no visible marker at the import site that anything unusual is
+happening. A `scheme:` prefix (`std:mathutil`, not `std/mathutil`) is
+unambiguous by construction instead - a colon before a path's first `/` is
+illegal in a Windows path outright, and this project only targets
+Windows/mingw64 (no second platform to worry about yet - see this same
+file's own "No non-Windows platform consideration" entry), so a real
+relative path on this project's one supported platform can never
+legitimately contain one there, matching why
+Python deprecated implicit relative imports (PEP 328) for the identical
+reason. Needs zero lexer/parser changes: an import path is already a plain
+string literal, so the whole feature lives in `src/loader`'s own
+string-to-directory resolution (`splitScheme`/`resolveImportPath`).
+
+**`std` is the only scheme backed by anything; `lib` is reserved.** The
+user explicitly asked for `lib:` to be recognized now (so a typo like
+`ilb:x` gets a real "unknown import scheme" error, not a silent collision)
+even though third-party package support - a registry, versioning, a
+manifest file - doesn't exist and isn't being designed yet; that's a
+substantially bigger, separate feature deliberately left for well after
+this round.
+
+**Where `std/` actually lives: on disk, next to the running executable -
+not embedded in the binary.** Embedding the whole standard library into
+`llvmc`/`llvmc-lsp` via `go:embed` was the first implementation attempted
+(a single self-contained binary, zero install-location assumptions at
+all) - reverted on the user's own direction before landing: assume instead
+that however an end user gets this compiler, they end up with the
+executable(s) and the `std/` source sitting in the same folder on disk,
+mirroring this repo's own layout (`std/` a plain sibling of `examples/` at
+the repo root, exactly where `build.ps1` already puts `llvmc.exe`/
+`llvmc-lsp.exe`). `loader.StdlibFS` locates it via
+`os.Executable`/`filepath.EvalSymlinks` plus a `"std"` subdirectory check,
+wrapped as an ordinary `afero.Fs` (`afero.NewBasePathFs`) - the one
+justified exception to this project's own afero-only disk-I/O convention,
+since there is no afero equivalent for "where is my own running binary" at
+all (process introspection, not file content access); the actual
+directory-exists check and every subsequent file read still go through
+afero normally.
+
+**`LoadProgram` itself stays scheme-free by design; `LoadProgramWithOptions`
+is the one that resolves anything.** `loader.LoadProgram(fs, root)` keeps
+its original signature and behavior unchanged, with both `std:`/`lib:`
+simply unavailable ("no standard library location was configured for this
+run") unless a caller goes through the new `LoadProgramWithOptions(fs,
+root, Options{StdFS: ...})` instead - keeping the base entry point
+deterministic and fully unit-testable with no hidden dependency on the
+calling process's own binary location. Real production entry points
+(`cmd/llvmc`, `cmd/llvmc-lsp`) resolve `loader.StdlibFS()` once and pass it
+through; `cmd/llvmc`'s own resolver is a package-level var
+(`loaderOptionsFunc`), not a plain function, specifically so its own tests
+can substitute a fake std root instead of depending on `os.Executable()`
+returning something meaningful for a `go test`-compiled binary (which,
+correctly, it never does).
+
+**A real, concrete simplification this enabled:** `cmd/llvmc -test`'s
+synthesized test driver used to locate `std/test` via `stdTestImportPath`,
+walking upward from the entry package's own directory looking for a
+`std/test` sibling *anywhere* above it, then computing a relative path back
+down to it - exactly the same fragile, checkout-relative mechanism this
+whole entry replaces, just duplicated for one specific caller. Deleted
+entirely in favor of the driver simply writing a literal `import
+"std:test"` - shorter, and correct regardless of where the entry package or
+the compiler itself live, which the old walk-up mechanism was not.
+
+**Status:** shipped (`src/loader` scheme resolution + `StdlibFS`,
+`cmd/llvmc`/`cmd/llvmc-lsp` wiring, every example and `std/scheduler`'s own
+doc comment migrated off the old relative-path form, `LANGUAGE.md`/
+`docs/packages-and-stdlib.md`/`docs/compiler.md`/`docs/examples.md`
+updated). Verified hands-on, not just via the test suite: built the real
+`llvmc.exe`, copied it plus `std/` into a directory wholly outside this
+repo's checkout, and ran a project living in a *third*, unrelated directory
+importing `std:mathutil` from there - resolved and ran correctly. Not done
+this round, left as a known follow-up: `src/lsp`'s own auto-import
+completion (`completion_import.go`) still only ever suggests a relative
+path for a project's own local packages (via `Workspace.PackageIndex`,
+which only scans the current project's own tree) - it does not yet offer
+`std:` packages as completion candidates at all.

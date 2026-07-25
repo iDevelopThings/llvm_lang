@@ -58,7 +58,7 @@ Add `-no-opt` to see the unoptimized IR. Coroutines cannot use `-no-opt`.
 Tests are free functions named `TestXxx` with this exact shape:
 
 ```go
-import "../../std/test"
+import "std:test"
 
 func TestAdd(t *test.Runner) {
     t.AssertEqual(2 + 3, 5, "addition")

@@ -32,8 +32,13 @@ func main() int {
 }
 ```
 
+A path with no `./`/`../` prefix but a colon before its first `/`
+(`std:mathutil`) is the one exception: it resolves against that scheme's
+own root instead, independent of the importing file's location - see
+"Standard library" below.
+
 Imports must appear before other declarations. Their local name is the last
-directory in the path; import aliases are not supported.
+path segment (after the scheme, if any); import aliases are not supported.
 
 Imports are file-scoped. Two files using the same package must each import
 it.
@@ -60,27 +65,33 @@ fields; use a keyed literal naming only exported fields.
 ## Standard library
 
 The standard library is ordinary llvm_lang code under `std/`. Import it with
-a relative path.
+the `std:` scheme, not a relative path - it resolves against a `std/`
+directory expected to sit right next to the running `llvmc`/`llvmc-lsp`
+executable, so it works the same way regardless of where your own project
+lives on disk.
 
 | Package | Main features |
 | --- | --- |
-| `std/mathutil` | `Sqrt`, `Pow`, `Floor`, `Ceil`, `Fabs`, `Abs`, `Min`, `Max` |
-| `std/strings` | Search, prefix/suffix, trim, split, ASCII case conversion, number formatting |
-| `std/slices` | `Contains`, `IndexOf`, `Reverse`, `Map`, `Filter`, `Reduce` |
-| `std/collections` | Generic `SlotMap` with generation-checked handles |
-| `std/time` | Performance-counter timing |
-| `std/scheduler` | Timer scheduler for coroutines |
-| `std/test` | Assertions used by `llvmc -test` |
+| `std:mathutil` | `Sqrt`, `Pow`, `Floor`, `Ceil`, `Fabs`, `Abs`, `Min`, `Max` |
+| `std:strings` | Search, prefix/suffix, trim, split, ASCII case conversion, number formatting |
+| `std:slices` | `Contains`, `IndexOf`, `Reverse`, `Map`, `Filter`, `Reduce` |
+| `std:collections` | Generic `SlotMap` with generation-checked handles |
+| `std:time` | Performance-counter timing |
+| `std:scheduler` | Timer scheduler for coroutines |
+| `std:test` | Assertions used by `llvmc -test` |
 
 Example:
 
 ```go
-import "../../std/strings"
+import "std:strings"
 
 func main() {
     print(strings.ToUpper("hello"))
 }
 ```
+
+Third-party packages (`lib:name`) are reserved for future use but not
+implemented yet - importing one is a compile error today.
 
 String helpers currently operate on ASCII bytes rather than Unicode text.
 `F64ToString` uses four decimal places rather than a shortest round-tripping

@@ -8,7 +8,53 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"llvm_lang/src/loader"
+
+	"github.com/spf13/afero"
 )
+
+// fakeTestRunnerSrc is a minimal stand-in for the real std/test/test.llx -
+// just enough of Runner's own shape (NewRunner/Failed, both called by the
+// synthesized driver itself - see synthesizeTestDriver - plus Assert, called
+// by whichever testdata file's own TestXxx body happens to use it) for a
+// -test in-process test to compile past its own "std:test" import without
+// depending on the real, much larger standard library implementation.
+const fakeTestRunnerSrc = `struct Runner {
+	name string
+}
+func NewRunner(name string) *Runner {
+	return &Runner{name}
+}
+func (Runner) Failed() bool {
+	return false
+}
+func (Runner) Assert(cond bool, msg string) bool {
+	return cond
+}
+`
+
+// withFakeStdFS temporarily swaps loaderOptionsFunc for one returning a
+// fake std root backed by stdFiles (path -> content, relative to "std/"
+// itself, e.g. "test/test.llx") - so -test mode's own in-process tests
+// (which run inside this go test binary, whose own os.Executable() has no
+// real std/ sibling - see loader.StdlibFS) can resolve "std:test"
+// deterministically instead of hitting the real per-machine lookup.
+// Restored automatically via t.Cleanup.
+func withFakeStdFS(t *testing.T, stdFiles map[string]string) {
+	t.Helper()
+	fs := afero.NewMemMapFs()
+	for path, content := range stdFiles {
+		if err := afero.WriteFile(fs, path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	orig := loaderOptionsFunc
+	loaderOptionsFunc = func() loader.Options {
+		return loader.Options{StdFS: fs}
+	}
+	t.Cleanup(func() { loaderOptionsFunc = orig })
+}
 
 func TestRun_TestMode_ExclusiveWithWatch(t *testing.T) {
 	var stderr bytes.Buffer
@@ -21,18 +67,15 @@ func TestRun_TestMode_ExclusiveWithWatch(t *testing.T) {
 	}
 }
 
+// TestRun_TestMode_ZeroTests and TestRun_TestMode_WrongSignatureIgnored both
+// exit on the "no Test* functions found" path, which returns before the
+// synthesized driver (the only place "std:test" ever gets imported) is even
+// built - so unlike every other -test test below, neither needs
+// withFakeStdFS at all.
 func TestRun_TestMode_ZeroTests(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "empty.llx")
 	if err := os.WriteFile(src, []byte("func helper() {}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// Place a fake std/test so import discovery isn't the failure mode.
-	stdTest := filepath.Join(dir, "std", "test")
-	if err := os.MkdirAll(stdTest, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(stdTest, "test.llx"), []byte("struct Runner {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -54,13 +97,6 @@ func TestRun_TestMode_WrongSignatureIgnored(t *testing.T) {
 	if err := os.WriteFile(src, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	stdTest := filepath.Join(dir, "std", "test")
-	if err := os.MkdirAll(stdTest, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(stdTest, "test.llx"), []byte("struct Runner {}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 
 	var stderr bytes.Buffer
 	code := run([]string{"-test", src}, &stderr)
@@ -73,6 +109,8 @@ func TestRun_TestMode_WrongSignatureIgnored(t *testing.T) {
 }
 
 func TestRun_TestMode_MainCollision(t *testing.T) {
+	withFakeStdFS(t, map[string]string{"test/test.llx": fakeTestRunnerSrc})
+
 	dir := filepath.Join("testdata", "testmode", "with_main")
 	var stderr bytes.Buffer
 	code := run([]string{"-test", dir}, &stderr)
@@ -196,29 +234,23 @@ func TestBinary_TestMode_AssertCoverage(t *testing.T) {
 	}
 }
 
-// TestRun_TestMode_StdTestNotFound confirms a clean error (not a panic) when
-// std/test genuinely can't be found above the entry package - stdTestImportPath's
-// own not-found return path, untested until now (every other -test test
-// deliberately places a fake std/test to avoid hitting this path at all).
-func TestRun_TestMode_StdTestNotFound(t *testing.T) {
-	dir := t.TempDir()
-	src := filepath.Join(dir, "main.llx")
-	// A syntactically valid TestXxx signature referencing a package named
-	// "test" that doesn't actually exist anywhere above dir - so discovery
-	// itself can't even resolve the import, exactly the case
-	// stdTestImportPath's walk-up-and-fail path exists for.
-	body := "func TestFoo(t *test.Runner) {}\n"
-	if err := os.WriteFile(src, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
+// TestRun_TestMode_StdRootNotConfigured confirms a clean error (not a
+// panic) when no standard library location is available at all - the
+// synthesized driver's own "std:test" import (see synthesizeTestDriver)
+// resolving via loaderOptionsFunc's real, unfaked implementation, which -
+// like every in-process test in this file - finds no genuine std/ sibling
+// next to this go-test-compiled binary (see loader.StdlibFS). Every other
+// -test test in this file deliberately calls withFakeStdFS specifically to
+// avoid hitting this path.
+func TestRun_TestMode_StdRootNotConfigured(t *testing.T) {
+	dir := filepath.Join("testdata", "testmode", "all_pass")
 	var stderr bytes.Buffer
-	code := run([]string{"-test", src}, &stderr)
+	code := run([]string{"-test", dir}, &stderr)
 	if code != exitUsage {
 		t.Fatalf("exit = %d, want %d; stderr:\n%s", code, exitUsage, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "could not find std/test") {
-		t.Fatalf("stderr = %q, want a clean std/test-not-found message", stderr.String())
+	if !strings.Contains(stderr.String(), "no standard library location was configured") {
+		t.Fatalf("stderr = %q, want a clean std-root-not-configured message", stderr.String())
 	}
 }
 

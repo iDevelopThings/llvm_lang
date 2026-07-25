@@ -22,7 +22,7 @@
 //
 // Usage:
 //
-//   import "../../std/scheduler"
+//   import "std:scheduler"
 //
 //   async func Countdown(nextWait *f64) {
 //       print(3)

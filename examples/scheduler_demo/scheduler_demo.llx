@@ -20,7 +20,7 @@
 // -no-opt - llvm.coro.* intrinsics only lower via the optimization
 // pipeline's own coroutine passes (see CODEGEN.md's "Coroutines" section).
 
-import "../../std/scheduler"
+import "std:scheduler"
 
 async func Countdown(nextWait *f64) {
     print(3)

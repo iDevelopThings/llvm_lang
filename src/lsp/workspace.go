@@ -143,8 +143,21 @@ func safeLoadProgram(fs afero.Fs, dir string) (prog *loader.Program, err error) 
 			err = fmt.Errorf("lsp: load panicked (likely a parser/loader bug against in-progress source): %v", r)
 		}
 	}()
-	return loader.LoadProgram(fs, dir)
+	stdFS, _ := lspStdFS()
+	return loader.LoadProgramWithOptions(fs, dir, loader.Options{StdFS: stdFS})
 }
+
+// lspStdFS resolves this compiler's own standard library location (next to
+// the running llvmc-lsp executable - see loader.StdlibFS) once, memoized for
+// the process lifetime: it's purely a function of where this binary itself
+// is installed, never changes between requests, and every OpenOrChange call
+// (one per edit) would otherwise re-resolve it needlessly. A missing std/
+// sibling isn't a hard failure here - a program that never imports
+// "std:..." doesn't need one - so a lookup failure just leaves it unset,
+// same as loaderOptions in cmd/llvmc.
+var lspStdFS = sync.OnceValues(func() (afero.Fs, error) {
+	return loader.StdlibFS()
+})
 
 // Analysis returns the most recently computed FileAnalysis for path, if any
 // recompute has ever touched it.

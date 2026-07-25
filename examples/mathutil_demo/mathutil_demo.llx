@@ -20,7 +20,7 @@
 //   .\llvmc.exe examples\mathutil_demo\mathutil_demo.llx
 //   echo $LASTEXITCODE   # (PowerShell) -> 19  (Abs(-7) + Min(3,9) + Max(3,9) == 7+3+9)
 
-import "../../std/mathutil"
+import "std:mathutil"
 
 func main() int {
     print(mathutil.Sqrt(16.0))         // 4.000000

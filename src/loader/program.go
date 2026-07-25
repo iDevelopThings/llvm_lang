@@ -2,6 +2,7 @@ package loader
 
 import (
 	"fmt"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -77,70 +78,204 @@ type Program struct {
 // "loader: import cycle: a -> b -> a") rather than looping forever or
 // overflowing the stack.
 //
-// An import path is resolved relative to the *importing file's own
+// An ordinary import path is resolved relative to the *importing file's own
 // directory* - not the entry package's directory, and not any notion of a
 // module root/manifest - matching this project's confirmed design (see
-// DECISIONS.md).
+// DECISIONS.md). A "scheme:path" import (e.g. "std:mathutil") is the one
+// exception: it resolves against that scheme's own registered root instead,
+// completely independent of the importing file's location - see
+// resolveImportPath and DECISIONS.md's "std:/lib: import schemes" entry.
+//
+// Neither scheme is backed by anything here - a "std:"/"lib:" import fails
+// with a clear "not available" error unless the caller uses
+// LoadProgramWithOptions instead, supplying a real StdFS (see StdlibFS).
+// Keeping LoadProgram itself scheme-free means it stays deterministic and
+// fully testable with no dependency on the running process's own binary
+// location - only real production entry points (cmd/llvmc, cmd/llvmc-lsp)
+// need that.
 func LoadProgram(fs afero.Fs, root string) (*Program, error) {
+	return LoadProgramWithOptions(fs, root, Options{})
+}
+
+// Options configures LoadProgramWithOptions' scheme-qualified import roots.
+type Options struct {
+	// StdFS is where a "std:" import resolves against - nil (the zero
+	// value) means "std:" isn't available, same as the still-unimplemented
+	// "lib:" scheme. Real callers get one from StdlibFS.
+	StdFS afero.Fs
+}
+
+// LoadProgramWithOptions is LoadProgram with its scheme-qualified import
+// roots (see LANGUAGE.md's "Imports" section) explicitly supplied, rather
+// than left unbacked - see LoadProgram's own doc comment for why the two
+// are separate entry points.
+func LoadProgramWithOptions(fs afero.Fs, root string, opts Options) (*Program, error) {
 	dir, err := resolvePackageDir(fs, root)
 	if err != nil {
 		return nil, err
 	}
 
+	schemes := map[string]schemeRoot{
+		"lib": {Reason: "third-party package imports aren't implemented yet"},
+	}
+	if opts.StdFS != nil {
+		schemes["std"] = schemeRoot{FS: opts.StdFS}
+	} else {
+		schemes["std"] = schemeRoot{Reason: "no standard library location was configured for this run"}
+	}
+
 	l := &programLoader{
 		fs:      fs,
+		schemes: schemes,
 		loaded:  make(map[string]*Package),
 		loading: make(map[string]bool),
 	}
-	entry, err := l.loadPackage(dir)
+	entry, err := l.loadPackage(resolvedImport{fs: fs, dir: dir, key: dir})
 	if err != nil {
 		return nil, err
 	}
 	return &Program{Entry: entry, Order: l.order}, nil
 }
 
+// StdlibFS locates this compiler's own standard library on disk: a "std"
+// directory expected to sit right next to the running executable (see
+// DECISIONS.md's "std:/lib: import schemes" entry - the compiler ships as a
+// plain executable plus a sibling std/ directory, not a single
+// self-contained binary, exactly like this repo's own layout: llvmc.exe/
+// llvmc-lsp.exe build to the repo root, right next to std/ itself). Uses
+// os.Executable/os.Stat directly rather than going through an afero.Fs (see
+// AGENTS.md's standing afero convention) because there is no afero
+// equivalent for "where is my own running binary" - it's process
+// introspection, not file content access; the actual std/ directory check
+// and every subsequent read of it still go through afero (via the returned
+// afero.Fs, a real OS filesystem rooted at std/).
+func StdlibFS() (afero.Fs, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("loader: cannot locate this executable's own path: %w", err)
+	}
+	exe, err = filepath.EvalSymlinks(exe)
+	if err != nil {
+		return nil, fmt.Errorf("loader: cannot resolve this executable's real path: %w", err)
+	}
+	return stdlibFSNextTo(exe)
+}
+
+// stdlibFSNextTo is StdlibFS' own real logic, split out so a test can drive
+// it against a real temp-directory path instead of the actual running
+// test binary's own location (which never has a real std/ sibling) -
+// StdlibFS itself is just this plus the os.Executable/EvalSymlinks lookup.
+func stdlibFSNextTo(exePath string) (afero.Fs, error) {
+	stdDir := filepath.Join(filepath.Dir(exePath), "std")
+
+	fs := afero.NewOsFs()
+	info, err := fs.Stat(stdDir)
+	if err != nil || !info.IsDir() {
+		return nil, fmt.Errorf("loader: no std/ directory found next to this executable (%s)", stdDir)
+	}
+	return afero.NewBasePathFs(fs, stdDir), nil
+}
+
+// schemeRoot is one registered "scheme:" import root - see
+// resolveImportPath. FS is nil when this scheme isn't available for this
+// run (a genuinely unimplemented scheme like "lib", or "std" when no
+// StdFS was supplied) - Reason explains why, surfaced verbatim in the
+// resulting diagnostic rather than a generic "unknown import scheme"
+// (reserved for a scheme name this project doesn't recognize at all).
+type schemeRoot struct {
+	FS     afero.Fs
+	Reason string
+}
+
 // programLoader carries LoadProgram's recursive-discovery state: loaded
-// dedups a fully-loaded package by directory; loading/stack together detect
-// a real import cycle (loading alone can't tell a cycle apart from a
-// harmless diamond re-visit - a dir already fully in loaded is a diamond, a
-// dir still marked loading when revisited is a genuine cycle).
+// dedups a fully-loaded package by key; loading/stack together detect a
+// real import cycle (loading alone can't tell a cycle apart from a harmless
+// diamond re-visit - a key already fully in loaded is a diamond, a key still
+// marked loading when revisited is a genuine cycle).
 type programLoader struct {
 	fs      afero.Fs
+	schemes map[string]schemeRoot
 	loaded  map[string]*Package
 	loading map[string]bool
 	stack   []string
 	order   []*Package
 }
 
-// loadPackage loads dir's package (recursively resolving/loading every
-// import it or its own dependencies declare) and returns it, reusing an
-// already-loaded package by directory identity rather than reloading it -
-// see LoadProgram's own doc comment.
-func (l *programLoader) loadPackage(dir string) (*Package, error) {
-	dir = filepath.Clean(dir)
+// resolvedImport is one import's own already-resolved location: which
+// filesystem to read it from, the directory within that filesystem, and a
+// dedup/cycle-detection key that can never collide across two different
+// filesystems even if their directory strings happen to look identical
+// (e.g. a project-local "std/mathutil" vs the compiler's own bundled
+// "std/mathutil") - see resolveImportPath.
+type resolvedImport struct {
+	fs  afero.Fs
+	dir string
+	key string
+}
 
-	if pkg, ok := l.loaded[dir]; ok {
+// resolveImportPath resolves importPath (as written in fileDir's own
+// source) to a concrete location. A "scheme:rest" path (see LANGUAGE.md's
+// "Imports" section) resolves against that scheme's own registered root,
+// completely independent of fileDir; anything else resolves the original
+// way, relative to fileDir.
+func (l *programLoader) resolveImportPath(fileDir, importPath string) (resolvedImport, error) {
+	if scheme, rest, ok := splitScheme(importPath); ok {
+		root, known := l.schemes[scheme]
+		if !known {
+			return resolvedImport{}, fmt.Errorf("loader: unknown import scheme %q in %q", scheme, importPath)
+		}
+		if root.FS == nil {
+			return resolvedImport{}, fmt.Errorf("loader: %q: %s", importPath, root.Reason)
+		}
+		dir := filepath.Clean(filepath.FromSlash(rest))
+		return resolvedImport{fs: root.FS, dir: dir, key: scheme + ":" + dir}, nil
+	}
+	dir := filepath.Clean(filepath.Join(fileDir, filepath.FromSlash(importPath)))
+	return resolvedImport{fs: l.fs, dir: dir, key: dir}, nil
+}
+
+// splitScheme reports whether importPath starts with a "scheme:" prefix - a
+// colon appearing before any '/' in the path - splitting it into the scheme
+// name and the remainder. A colon appearing after the first '/' (or not at
+// all) is never a scheme prefix, just an ordinary relative path: a colon
+// there is illegal in a Windows path outright, and this project only
+// targets Windows/mingw64 (see DECISIONS.md), so a real relative path can
+// never legitimately need one there.
+func splitScheme(importPath string) (scheme, rest string, ok bool) {
+	i := strings.IndexAny(importPath, ":/")
+	if i < 0 || importPath[i] != ':' {
+		return "", "", false
+	}
+	return importPath[:i], importPath[i+1:], true
+}
+
+// loadPackage loads loc's package (recursively resolving/loading every
+// import it or its own dependencies declare) and returns it, reusing an
+// already-loaded package by loc.key rather than reloading it - see
+// LoadProgram's own doc comment.
+func (l *programLoader) loadPackage(loc resolvedImport) (*Package, error) {
+	if pkg, ok := l.loaded[loc.key]; ok {
 		return pkg, nil // diamond dependency - already fully loaded once
 	}
-	if l.loading[dir] {
-		return nil, fmt.Errorf("loader: import cycle: %s", formatCycle(l.stack, dir))
+	if l.loading[loc.key] {
+		return nil, fmt.Errorf("loader: import cycle: %s", formatCycle(l.stack, loc.dir))
 	}
 
-	l.loading[dir] = true
-	l.stack = append(l.stack, dir)
+	l.loading[loc.key] = true
+	l.stack = append(l.stack, loc.dir)
 	defer func() {
 		l.stack = l.stack[:len(l.stack)-1]
-		delete(l.loading, dir)
+		delete(l.loading, loc.key)
 	}()
 
-	srcFiles, err := Load(l.fs, dir)
+	srcFiles, err := Load(loc.fs, loc.dir)
 	if err != nil {
 		return nil, err
 	}
 
 	pkg := &Package{
-		Dir:  dir,
-		Name: filepath.Base(dir),
+		Dir:  loc.dir,
+		Name: filepath.Base(loc.dir),
 	}
 
 	for _, sf := range srcFiles {
@@ -158,9 +293,12 @@ func (l *programLoader) loadPackage(dir string) (*Package, error) {
 				continue
 			}
 			importPath := tree.File.StringValue(tree.Nodes[decl].Tok)
-			targetDir := filepath.Clean(filepath.Join(fileDir, filepath.FromSlash(importPath)))
+			targetLoc, err := l.resolveImportPath(fileDir, importPath)
+			if err != nil {
+				return nil, err
+			}
 
-			targetPkg, err := l.loadPackage(targetDir)
+			targetPkg, err := l.loadPackage(targetLoc)
 			if err != nil {
 				return nil, err
 			}
@@ -173,20 +311,24 @@ func (l *programLoader) loadPackage(dir string) (*Package, error) {
 		pkg.Files = append(pkg.Files, file)
 	}
 
-	l.loaded[dir] = pkg
+	l.loaded[loc.key] = pkg
 	l.order = append(l.order, pkg)
 	return pkg, nil
 }
 
 // importLocalName is an import path's own local name - its last path
 // segment (e.g. "mathutils" for "./mathutils", "util" for
-// "../shared/util") - Go's own convention (see LANGUAGE.md's "Imports"
-// section: no aliasing yet). Uses the "path" package (forward-slash only),
-// not "path/filepath", since an import path is written with forward
-// slashes regardless of the host OS, exactly like a Go import path - only
-// the *filesystem* resolution (loadPackage's targetDir) needs to be
-// OS-separator-aware.
+// "../shared/util", "mathutil" for "std:mathutil") - Go's own convention
+// (see LANGUAGE.md's "Imports" section: no aliasing yet). Uses the "path"
+// package (forward-slash only), not "path/filepath", since an import path
+// is written with forward slashes regardless of the host OS, exactly like a
+// Go import path - only the *filesystem* resolution (resolveImportPath)
+// needs to be OS-separator-aware. A "scheme:" prefix is stripped first, so
+// it's never mistaken for part of the name.
 func importLocalName(importPath string) string {
+	if _, rest, ok := splitScheme(importPath); ok {
+		return path.Base(rest)
+	}
 	return path.Base(importPath)
 }
 

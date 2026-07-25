@@ -144,8 +144,12 @@ func isExportedDeclName(name string) bool {
 // `import "<relative path>"` for targetDir, relative to fa's own directory
 // (LANGUAGE.md's "Imports" section: a path is always relative to the
 // importing file, forward-slashed, `./`-prefixed if it doesn't already
-// start with a dot - matching every example there, e.g. "./mathutils",
-// "../../std/mathutil"). Inserted right after the last existing top-level
+// start with a dot - e.g. "./mathutils", "../shared/util"). Candidates come
+// from w.PackageIndex, which only ever scans the current project's own
+// directory tree (see Workspace.SetRoot) - never this compiler's own
+// bundled std/, which is reached via the "std:" scheme instead (see
+// LANGUAGE.md's "Imports" section) and isn't offered as an auto-import
+// suggestion here yet. Inserted right after the last existing top-level
 // ImportDecl if any, else at the very start of the file - imports must
 // precede every other top-level declaration.
 func importEdit(fa *FileAnalysis, targetDir string) protocol.TextEdit {

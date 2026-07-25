@@ -19,7 +19,7 @@
 //   .\llvmc.exe examples\time_demo\time_demo.llx
 //   echo $LASTEXITCODE   # (PowerShell) -> 3  (all three sanity checks passed)
 
-import "../../std/time"
+import "std:time"
 
 // busyWork just needs to burn a measurable amount of wall-clock time - its
 // own accumulator is i64, not int/i32, specifically because the true sum of

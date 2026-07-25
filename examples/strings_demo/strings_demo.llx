@@ -12,7 +12,7 @@
 //   .\llvmc.exe examples\strings_demo\strings_demo.llx
 //   echo $LASTEXITCODE   # (PowerShell) -> 13  (len(Split("a,b,c", ",")) [3] + IndexOf("hello world", "d") [10])
 
-import "../../std/strings"
+import "std:strings"
 
 func main() int {
     // --- Contains / IndexOf ---

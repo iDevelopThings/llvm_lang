@@ -28,7 +28,7 @@
 // Run with:
 //   .\llvmc.exe examples\slices_demo\slices_demo.llx
 
-import "../../std/slices"
+import "std:slices"
 
 func double(x int) int {
     return x * 2

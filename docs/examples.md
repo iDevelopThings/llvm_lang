@@ -59,13 +59,13 @@ Run a multi-file example by passing its directory:
 | --- | --- |
 | [`multifile/main.llx`](../examples/multifile/main.llx), [`shapes.llx`](../examples/multifile/shapes.llx), [`util.llx`](../examples/multifile/util.llx) | One package split across three files |
 | [`imports/app`](../examples/imports/app/main.llx), [`imports/mathutils`](../examples/imports/mathutils/mathutils.llx) | Relative imports and exported names |
-| [`mathutil_demo`](../examples/mathutil_demo/mathutil_demo.llx) | `std/mathutil` |
-| [`strings_demo`](../examples/strings_demo/strings_demo.llx) | `std/strings` |
-| [`slices_demo`](../examples/slices_demo/slices_demo.llx) | `std/slices` |
-| [`collections_demo`](../examples/collections_demo/collections_demo.llx) | `std/collections` |
-| [`time_demo`](../examples/time_demo/time_demo.llx) | `std/time` |
-| [`scheduler_demo`](../examples/scheduler_demo/scheduler_demo.llx) | `std/scheduler` and coroutines |
-| [`test_demo`](../examples/test_demo/test_demo.llx) | `std/test` and `llvmc -test`; intentionally fails |
+| [`mathutil_demo`](../examples/mathutil_demo/mathutil_demo.llx) | `std:mathutil` |
+| [`strings_demo`](../examples/strings_demo/strings_demo.llx) | `std:strings` |
+| [`slices_demo`](../examples/slices_demo/slices_demo.llx) | `std:slices` |
+| [`collections_demo`](../examples/collections_demo/collections_demo.llx) | `std:collections` |
+| [`time_demo`](../examples/time_demo/time_demo.llx) | `std:time` |
+| [`scheduler_demo`](../examples/scheduler_demo/scheduler_demo.llx) | `std:scheduler` and coroutines |
+| [`test_demo`](../examples/test_demo/test_demo.llx) | `std:test` and `llvmc -test`; intentionally fails |
 
 ## C interop
 

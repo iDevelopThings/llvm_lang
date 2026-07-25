@@ -2085,6 +2085,36 @@ directory identity so it's only ever loaded once, and rejecting a real
 import cycle with a clear error naming it (e.g.
 `import cycle: a -> b -> a`) rather than looping forever.
 
+**A `scheme:path` import is the one exception** - a path with no `./`/`../`
+prefix, but with a colon before its first `/` (`std:mathutil`, not
+`./std/mathutil`), resolves against that scheme's own root instead,
+completely independent of the importing file's location:
+
+```go
+import "std:mathutil"
+
+func main() f64 {
+    return mathutil.Sqrt(16.0)
+}
+```
+
+- **`std:`** reaches this compiler's own bundled standard library - see
+  "Standard library" below. `std:collections/slotmap` (a nested package)
+  works the same way as `std:mathutil` (a flat one): everything after the
+  colon is just an ordinary path within that root.
+- **`lib:`** is reserved for third-party packages, but isn't implemented
+  yet - importing under it is a clear compile error for now, not a silent
+  no-op or a fallback to some other resolution.
+
+A colon appearing anywhere *after* the path's first `/` (or not at all) is
+never treated as a scheme - `foo/bar:baz` is an ordinary relative path. A
+colon *before* the first `/` is illegal in a Windows path outright, and this
+project currently only targets Windows/mingw64 (see `DECISIONS.md` - no
+second platform to worry about yet), so `std:mathutil` could never
+legitimately be a real relative path on this project's one supported
+platform - there's no ambiguity with a project's own local package happening
+to be named `std` or `lib`.
+
 **An import's local name** defaults to its path's own last segment -
 `mathutils` for `./mathutils`, `util` for `../shared/util` - Go's own
 convention. **There is no aliasing syntax yet** (`import m "./mathutils"`) -
@@ -2488,21 +2518,27 @@ type as `i32` instead and compare against zero explicitly at the call site.
 ## Standard library
 
 A "standard library" in this project is nothing more than ordinary `.llx`
-packages living under a top-level `std/` directory, imported the exact same
-way as any other package (see "Imports" above) - there is no separate
-"builtin module" concept, no special resolution rule for `std/`, and no
-compiler change involved in any of it. `std/` is a plain sibling of
-`examples/` at the repo root; a program reaches into it with an ordinary
-relative `import` path, exactly like reaching into any other project's own
-helper package:
+packages living under a `std/` directory - reached via the `std:` import
+scheme (see "Imports" above), not a relative path, so it works identically
+regardless of where the importing project or the compiler itself are
+installed:
 
 ```go
-import "../../std/mathutil"
-import "../../std/strings"
-import "../../std/time"
-import "../../std/slices"
-import "../../std/collections"
+import "std:mathutil"
+import "std:strings"
+import "std:time"
+import "std:slices"
+import "std:collections"
 ```
+
+At compile time, `std:` resolves against a `std/` directory expected to sit
+right next to the running `llvmc`/`llvmc-lsp` executable - this repo's own
+`std/` is a plain sibling of `examples/` at the repo root, exactly where
+`build.ps1` puts `llvmc.exe`/`llvmc-lsp.exe`, so this repo's own examples
+work the same way any other installed copy of the compiler would. A missing
+`std/` sibling isn't a hard failure on its own (a program that never imports
+`std:...` doesn't need one) - only an actual `std:` import surfaces a clear
+error if it can't be found.
 
 **What's available so far:**
 
@@ -2512,11 +2548,8 @@ import "../../std/collections"
   (see "Generics" above) pure-`.llx` helpers needing no libc call at all:
   `Abs[T]`, `Min[T]`, `Max[T]` (comparison-based; `Min`/`Max` are exercised
   at both `int` and `f64` in this project's own examples, `Abs` at `int`
-  only so far). Named "mathutil", not
-  "mathutils", to read distinctly from `examples/imports`'s own unrelated
-  same-named demo fixture - not that a real collision was ever possible,
-  since imports here resolve by relative path, not a global package
-  registry.
+  only so far). Named "mathutil", not "mathutils", to read distinctly from
+  `examples/imports`'s own unrelated same-named demo fixture.
 - **`std/strings`** - `Contains`, `IndexOf` (mirroring Go's own
   `strings.Index`, `-1` when not found), `HasPrefix`, `HasSuffix`,
   `TrimSpace` (ASCII space, `0x20`, only - not full Unicode whitespace),

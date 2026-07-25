@@ -1,4 +1,4 @@
-import "../../../../../std/test"
+import "std:test"
 
 func main() {
     print("app main")

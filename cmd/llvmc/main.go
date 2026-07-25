@@ -273,7 +273,7 @@ func run(args []string, stderr io.Writer) int {
 		return runTest(path, !*noOpt, *output, *emitLLVM, linkLibs, linkDirs, stderr)
 	}
 
-	prog, err := loader.LoadProgram(afero.NewOsFs(), path)
+	prog, err := loader.LoadProgramWithOptions(afero.NewOsFs(), path, loaderOptionsFunc())
 	if err != nil {
 		fmt.Fprintf(stderr, "llvmc: %v\n", err)
 		return exitUsage
@@ -285,6 +285,31 @@ func run(args []string, stderr io.Writer) int {
 	// compileAndRun/compileAndRunPackage/compileAndRunProgram exactly as
 	// before, always with outputPath "" and optimization on.
 	return finish(compiler.CompileProgram(prog, !*noOpt), stderr, *output, *emitLLVM, linkLibs, linkDirs)
+}
+
+// resolveStdFS resolves this executable's own standard library location
+// (loader.StdlibFS) once, memoized for the process lifetime: it's purely a
+// function of where this binary itself is installed, never changes between
+// calls, and -watch's own reload loop would otherwise repeat the
+// os.Executable/EvalSymlinks/Stat lookup on every single source-file save.
+var resolveStdFS = sync.OnceValues(func() (afero.Fs, error) {
+	return loader.StdlibFS()
+})
+
+// loaderOptionsFunc builds this run's loader.Options, resolving the real
+// standard library location next to this executable - a missing std/
+// sibling isn't a hard failure here (a program that never imports
+// "std:..." doesn't need one), so a lookup failure just leaves StdFS unset,
+// deferred to loader's own "no standard library location was configured"
+// error only if the program actually tries to use one.
+//
+// A package-level var, not a plain function, specifically so this
+// package's own tests can substitute a fake std root (see test_test.go's
+// withFakeStdFS) - the real os.Executable()-based lookup only makes sense
+// against a real installed binary, never a `go test`-compiled one.
+var loaderOptionsFunc = func() loader.Options {
+	stdFS, _ := resolveStdFS()
+	return loader.Options{StdFS: stdFS}
 }
 
 // compileAndRun drives the full pipeline for a single source file - the
