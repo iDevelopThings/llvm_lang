@@ -119,6 +119,9 @@ func TestCompletion_UnimportedPackageMember(t *testing.T) {
 	}
 
 	item := items[0]
+	if item.Detail == nil || *item.Detail != "(a int, b int) int" {
+		t.Errorf("Join's Detail = %v, want \"(a int, b int) int\" (raw source text - no sema.Info for a not-yet-imported candidate)", item.Detail)
+	}
 	if len(item.AdditionalTextEdits) != 1 {
 		t.Fatalf("len(AdditionalTextEdits) = %d, want 1", len(item.AdditionalTextEdits))
 	}

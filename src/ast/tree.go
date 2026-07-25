@@ -139,6 +139,17 @@ func (t *Tree) Text(n NodeIndex) string {
 	return t.File.Lexeme(t.Nodes[n].Tok)
 }
 
+// SourceText returns the exact source text spanning n's own full extent
+// (its Span - every token n covers, not just its own leading one; contrast
+// Text) - the "render this node exactly as written" fallback wherever a
+// resolved sema.Type isn't available to render from instead (an unchecked
+// generic template, or a not-yet-imported package candidate with no
+// sema.Info at all - see src/lsp's symbolDetail).
+func (t *Tree) SourceText(n NodeIndex) string {
+	span := t.SpanOf(n)
+	return t.File.Src[span.Start:span.End]
+}
+
 // Dump renders the tree as an indented outline, for tests and debugging -
 // not a stable/parseable format.
 func (t *Tree) Dump(root NodeIndex) string {
