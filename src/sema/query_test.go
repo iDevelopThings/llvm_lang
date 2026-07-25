@@ -157,3 +157,44 @@ func TestFuncSignatureText_ExternFunc(t *testing.T) {
 		t.Errorf("FuncSignatureText = %q, want %q", got, want)
 	}
 }
+
+// TestSignatureText_MatchesASTShapeWalk ties this package's Type-aware
+// rendering to ast's own source-text one: both go through the same shape
+// walk (ast.Tree.FuncSignatureText/StructFieldsText), so with no Info to
+// resolve types from they must agree exactly. Without this, a shape fix on
+// one side can silently skip the other - which is precisely how the
+// ExternFuncDecl child-layout bug above shipped in one copy only.
+func TestSignatureText_MatchesASTShapeWalk(t *testing.T) {
+	tree, _ := checkSrc(t, "extern func abs(x i32) i32\n"+
+		"struct Point {\n\tx int\n\ty int\n}\n"+
+		"func Insert(v int, n int) int {\n\treturn v + n\n}\n")
+	decls := tree.Children(tree.Root)
+
+	for _, tc := range []struct {
+		name string
+		sema func() string
+		ast  func() string
+	}{
+		{
+			name: "extern func",
+			sema: func() string { return FuncSignatureText(tree, nil, decls[0]) },
+			ast:  func() string { return tree.FuncSignatureText(decls[0], tree.SourceText) },
+		},
+		{
+			name: "struct",
+			sema: func() string { return StructFieldsText(tree, nil, decls[1]) },
+			ast:  func() string { return tree.StructFieldsText(decls[1], tree.SourceText) },
+		},
+		{
+			name: "func",
+			sema: func() string { return FuncSignatureText(tree, nil, decls[2]) },
+			ast:  func() string { return tree.FuncSignatureText(decls[2], tree.SourceText) },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, want := tc.sema(), tc.ast(); got != want {
+				t.Errorf("sema rendering = %q, ast rendering = %q - the two shape walks have drifted", got, want)
+			}
+		})
+	}
+}

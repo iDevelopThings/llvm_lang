@@ -56,5 +56,6 @@ This is a quick list of deliberate limits, not a roadmap.
 - FFI has no external variables, variadic functions, or symbol aliases.
 - JIT-run programs see an empty `args()` array; standalone executables receive
   real command-line arguments.
-- The language server has no completion or incremental parsing yet.
+- The language server re-analyzes a whole package per edit - no incremental
+  parsing yet.
 

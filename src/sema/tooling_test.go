@@ -86,3 +86,44 @@ func TestResolveTemplateForTooling_DoesNotMutateSharedState(t *testing.T) {
 		t.Error("Info.PkgScope pointer changed - the tooling pass must never replace the real package scope")
 	}
 }
+
+// TestResolveTemplateForTooling_StructPath_DoesNotMutateSharedState is the
+// struct-side counterpart: the struct path is the one handed the real
+// PkgScope/Structs map while calling declareStructMembers, so it's where an
+// accidental write into shared state would actually manifest.
+func TestResolveTemplateForTooling_StructPath_DoesNotMutateSharedState(t *testing.T) {
+	tree, info := checkSrc(t, "struct Box[T] {\n\tvalue T\n}\n"+
+		"func (Box[T]) Get() T {\n\treturn this.value\n}\n"+
+		"func main() {\n\tb := Box[int]{7}\n\tprint(b.Get())\n}\n")
+	structDecl := tree.Children(tree.Root)[0]
+
+	structsBefore := len(info.Structs)
+	boxBefore := info.Structs["Box"]
+	specializationsBefore := len(info.Specializations)
+	pkgNamesBefore := countLocal(info.PkgScope)
+
+	ResolveTemplateForTooling(tree, info, structDecl)
+
+	if len(info.Structs) != structsBefore {
+		t.Errorf("Info.Structs changed: %d -> %d - the tooling pass must never add to the real struct catalog",
+			structsBefore, len(info.Structs))
+	}
+	if info.Structs["Box"] != boxBefore {
+		t.Error("Info.Structs[\"Box\"] was replaced - the tooling pass builds its own throwaway StructInfo, it must never publish it")
+	}
+	if len(info.Specializations) != specializationsBefore {
+		t.Errorf("Info.Specializations changed: %d -> %d - the tooling pass must never instantiate/clone",
+			specializationsBefore, len(info.Specializations))
+	}
+	if got := countLocal(info.PkgScope); got != pkgNamesBefore {
+		t.Errorf("the real package scope gained %d name(s) - the tooling pass must never declare into it", got-pkgNamesBefore)
+	}
+}
+
+func countLocal(s *Scope) int {
+	n := 0
+	for range s.Local() {
+		n++
+	}
+	return n
+}

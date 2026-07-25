@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"llvm_lang/src/ast"
+	"llvm_lang/src/diag"
 	"llvm_lang/src/enums"
 )
 
@@ -42,14 +43,13 @@ type GenericInfo struct {
 	OuterParams []string
 	OuterArgs   []Type
 
-	// Method is set only when this GenericInfo is one specific receiver
-	// struct's own per-instantiation template for a method (built by
-	// GenericMethod.templateFor) - the GenericMethod it came from, letting
-	// instantiateFunc route Symbol.GenericTemplate to the method's real
-	// declaring Symbol (GenericMethod.Sym) instead of this GenericInfo's
-	// own synthetic, per-instantiation Symbol. nil for a free generic
-	// func/struct template, where Symbol above already IS the real
-	// declaring Symbol.
+	// Method is set only when this GenericInfo is one receiver struct's own
+	// per-instantiation method template (built by GenericMethod.templateFor)
+	// - the GenericMethod it came from, so instantiateFunc can point
+	// Symbol.GenericTemplate at the method's real declaring Symbol rather
+	// than this template's synthetic one (see Symbol.GenericMethod). nil for
+	// a free generic func/struct template, where Symbol above already IS the
+	// real declaring Symbol.
 	Method *GenericMethod
 
 	instances map[string]*genericInstance
@@ -208,27 +208,49 @@ func isGenericDecl(tree *ast.Tree, generics map[string]*GenericInfo, decl ast.No
 // Check side: instantiation.
 // ---------------------------------------------------------------------------
 
-// resolverFor builds a resolver over tree's already-built package/file scopes,
-// so a specialization goes through the exact same name-resolution code a
-// hand-written declaration did. Resolve keeps no state between declarations,
-// so a fresh one per instantiation is both correct and cheap.
+// newBodyResolver builds a resolver over tree's already-built package/file
+// scopes (read from src), writing its own Refs/Scopes into dst and its
+// diagnostics into bag - the single place listing the fields every
+// body-resolution path needs, shared by resolverFor and newToolingResolver
+// below so a field added for one is visibly missing from neither.
 //
 // generics/fileImports/fileScopes are deliberately left nil: they only matter
 // to the declaration-cataloguing passes, and every caller here starts from an
 // explicit scope (typeParamScope over Info.FileScope) instead. Anything that
 // makes body resolution read them has to populate them here too.
+func newBodyResolver(tree *ast.Tree, src, dst *Info, bag *diag.Bag) *resolver {
+	return &resolver{
+		pkg:     src.PkgScope,
+		structs: src.Structs,
+		enums:   src.Enums,
+		tree:    tree,
+		info:    dst,
+		bag:     bag,
+	}
+}
+
+// resolverFor builds an instantiation's resolver, so a specialization goes
+// through the exact same name-resolution code a hand-written declaration did.
+// Resolve keeps no state between declarations, so a fresh one per
+// instantiation is both correct and cheap.
 func (c *checker) resolverFor(tree *ast.Tree) *resolver {
 	info := c.infos[tree]
-	return &resolver{
-		infos:   c.infos,
-		bags:    c.allDiags,
-		pkg:     info.PkgScope,
-		structs: info.Structs,
-		enums:   info.Enums,
-		tree:    tree,
-		info:    info,
-		bag:     c.allDiags[tree],
+	r := newBodyResolver(tree, info, info, c.allDiags[tree])
+	r.infos = c.infos
+	r.bags = c.allDiags
+	return r
+}
+
+// newToolingResolver builds ResolveTemplateForTooling's own resolver: the
+// same shape resolverFor uses, but writing into a throwaway Info (returned
+// as r.info) and a discarded diagnostic bag, so a tooling query can never
+// touch what the real pipeline reads. See tooling.go.
+func newToolingResolver(real *Info, tree *ast.Tree) *resolver {
+	shadow := &Info{
+		Refs:   make(map[ast.NodeIndex]*Symbol),
+		Scopes: make(map[ast.NodeIndex]*Scope),
 	}
+	return newBodyResolver(tree, real, shadow, diag.NewBag())
 }
 
 // typeParamScope binds each of names to the corresponding concrete type,
@@ -275,14 +297,12 @@ func (gi *GenericInfo) Instances() iter.Seq[*Symbol] {
 	}
 }
 
-// GenericInstances yields every already-created instantiation of s - s may
-// be a free generic func/struct template's own declaring Symbol (Generic
-// set), or a generic struct method's own declaring Symbol (GenericMethod
-// set, see Symbol.GenericMethod's own doc comment for why methods need
-// their own separate case here rather than sharing Generic). Empty for any
-// other Symbol, including an already-instantiated one - a caller with a
-// specialization's own Symbol in hand should follow GenericTemplate to
-// find the real declaring Symbol this method actually needs.
+// GenericInstances yields every already-created instantiation of s - a free
+// generic func/struct template's own declaring Symbol (Generic set), or a
+// generic struct method's (GenericMethod set - see Symbol.GenericMethod for
+// why methods need their own case). Empty for any other Symbol, including an
+// already-instantiated one: follow GenericTemplate first, or just use
+// GenericFamily.
 func (s *Symbol) GenericInstances() iter.Seq[*Symbol] {
 	switch {
 	case s.Generic != nil:
@@ -294,15 +314,33 @@ func (s *Symbol) GenericInstances() iter.Seq[*Symbol] {
 	}
 }
 
-// Instances yields every already-created specialization of gm, across
-// every receiver struct instantiation it's ever been reached through (see
-// gm.templates - SlotMap[int].Get and SlotMap[f64].Get are separate
-// per-struct templates, each with their own instance cache) - the method
-// counterpart to GenericInfo.Instances above, needed because a method's
-// own per-struct-instantiation template is a distinct GenericInfo, not
-// something a consumer holding only gm.Sym (the method's real declaring
-// Symbol - see Symbol.GenericMethod) can reach a single GenericInfo.Instances
-// call from.
+// GenericFamily returns every Symbol a consumer should treat as one and the
+// same declaration as s - s's own declaring template and every already-
+// created instantiation of it - plus that declaring Symbol itself, the one
+// DeclaringNameNode/Tree are meaningful against (s itself unless s is a
+// specialization, see Symbol.GenericTemplate). An ordinary symbol yields
+// just itself. A set, not an iter.Seq: every caller tests membership per
+// entry while scanning a whole Info.Refs map.
+func (s *Symbol) GenericFamily() (decl *Symbol, family map[*Symbol]bool) {
+	decl = s
+	if s.GenericTemplate != nil {
+		decl = s.GenericTemplate
+	}
+	family = map[*Symbol]bool{
+		s:    true,
+		decl: true,
+	}
+	for inst := range decl.GenericInstances() {
+		family[inst] = true
+	}
+	return decl, family
+}
+
+// Instances yields every already-created specialization of gm, across every
+// receiver struct instantiation it's been reached through - SlotMap[int].Get
+// and SlotMap[f64].Get are separate per-struct templates (gm.templates), each
+// with their own instance cache, so this can't be one GenericInfo.Instances
+// call (see Symbol.GenericMethod).
 func (gm *GenericMethod) Instances() iter.Seq[*Symbol] {
 	return func(yield func(*Symbol) bool) {
 		for _, mt := range gm.templates {
@@ -480,13 +518,9 @@ func (c *checker) instantiateFunc(gi *GenericInfo, args []Type, at ast.NodeIndex
 	info := c.info
 	firstNode := len(tree.Nodes)
 
-	// gi.Symbol is a real, Refs-anchored declaring Symbol for a free
-	// generic func/struct template - but for a generic struct's own
-	// method, gi (here) is one specific receiver instantiation's own
-	// per-struct template (built by GenericMethod.templateFor), whose own
-	// Symbol is synthetic bookkeeping, never itself the target of any real
-	// Refs entry. gi.Method.Sym is the method's actual declaring Symbol in
-	// that case - see Symbol.GenericTemplate's own doc comment.
+	// For a method, gi is one receiver instantiation's own per-struct
+	// template, whose Symbol is synthetic - gi.Method.Sym is the real
+	// declaring Symbol (see Symbol.GenericMethod).
 	templateSym := gi.Symbol
 	if gi.Method != nil {
 		templateSym = gi.Method.Sym

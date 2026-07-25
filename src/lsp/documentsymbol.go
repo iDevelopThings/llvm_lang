@@ -9,7 +9,9 @@ import (
 
 // DocumentSymbols answers a textDocument/documentSymbol request: path's own
 // hierarchical outline (ast.Tree.DeclSymbols), translated into LSP's wire
-// format. nil when path has no analysis yet.
+// format - including each declaration's own signature/field-list summary as
+// DocumentSymbol.Detail, rendered from source rather than resolved types
+// (see ast.DeclSymbol.Detail). nil when path has no analysis yet.
 func (w *Workspace) DocumentSymbols(path string) []protocol.DocumentSymbol {
 	fa, ok := w.Analysis(path)
 	if !ok || fa.Tree == nil {
@@ -30,6 +32,10 @@ func toProtocolSymbols(file *lexer.File, syms []ast.DeclSymbol) []protocol.Docum
 			Range:          spanToRange(file, s.Span),
 			SelectionRange: spanToRange(file, s.NameSpan),
 			Children:       toProtocolSymbols(file, s.Children),
+		}
+		if s.Detail != "" {
+			detail := s.Detail
+			out[i].Detail = &detail
 		}
 	}
 	return out

@@ -6,32 +6,17 @@ package sema
 
 import (
 	"llvm_lang/src/ast"
-	"llvm_lang/src/diag"
 	"llvm_lang/src/enums"
 )
 
-// ResolveTemplateForTooling resolves decl - a generic declaration's own
-// template (see IsGenericTemplate) - against its own type parameters, bound
-// to a throwaway placeholder, purely so hover/completion/semantic-tokens
-// have real Refs/Scopes to read for source the real pipeline leaves
-// entirely unresolved until instantiated. Resolve-only: never runs Check,
-// never clones decl (contrast instantiateFunc/instantiateStruct), and
-// never writes into real, shared state (real.Structs/real.Enums are read
-// via the bare *resolver below the same way resolverFor's own callers do,
-// never written to) - so this cannot affect the real compile pipeline no
-// matter what a caller does with its result. The placeholder type
-// parameter is never actually dereferenced: Resolve (unlike Check's
-// typeFromNode) never reads Symbol.TypeParamBound, so a zero Type is fine.
-//
 // ResolveTemplatesForTooling enriches info in place with real Refs/Scopes
 // entries for every one of tree's own top-level generic declarations - see
-// ResolveTemplateForTooling for what/why. Safe to call unconditionally; a
-// tree with no generic declarations at all does nothing. Merged directly
-// into info's own maps rather than kept as a separate overlay - every
-// existing Info.Refs[n]/Info.Scopes[n] read site (a checker, an LSP
-// feature) picks this up for free, with zero key-collision risk (a real
-// resolve/check pass never writes an entry for a template's own nodes in
-// the first place).
+// ResolveTemplateForTooling for what that resolves and why. Safe to call
+// unconditionally; a tree with no generic declarations does nothing. Merged
+// directly into info's own maps rather than kept as a separate overlay, so
+// every existing Info.Refs[n]/Info.Scopes[n] read site picks it up for free
+// - a real resolve/check pass never writes an entry for a template's own
+// nodes, so there's no key collision to worry about.
 func ResolveTemplatesForTooling(tree *ast.Tree, info *Info) {
 	if info == nil {
 		return
@@ -50,24 +35,26 @@ func ResolveTemplatesForTooling(tree *ast.Tree, info *Info) {
 	}
 }
 
-// nil if decl isn't a generic template at all - nothing to resolve.
+// ResolveTemplateForTooling resolves decl - a generic declaration's own
+// template (see IsGenericTemplate) - against its own type parameters, bound
+// to a throwaway placeholder, purely so hover/completion/semantic-tokens
+// have real Refs/Scopes to read for source the real pipeline leaves
+// unresolved until instantiated. Returns those entries as a throwaway Info,
+// or nil if decl isn't a generic template at all.
+//
+// Resolve-only: never runs Check, never clones decl (contrast
+// instantiateFunc/instantiateStruct), and never writes into real, shared
+// state - so it cannot affect the real compile pipeline no matter what a
+// caller does with the result. The placeholder type parameter is never
+// dereferenced: Resolve (unlike Check's typeFromNode) never reads
+// Symbol.TypeParamBound, so a zero Type is fine.
 func ResolveTemplateForTooling(tree *ast.Tree, real *Info, decl ast.NodeIndex) *Info {
 	if !real.IsGenericTemplate(tree, decl) {
 		return nil
 	}
 
-	shadow := &Info{
-		Refs:   make(map[ast.NodeIndex]*Symbol),
-		Scopes: make(map[ast.NodeIndex]*Scope),
-	}
-	r := &resolver{
-		tree:    tree,
-		info:    shadow,
-		bag:     diag.NewBag(), // discarded - see doc comment above
-		pkg:     real.PkgScope,
-		structs: real.Structs,
-		enums:   real.Enums,
-	}
+	r := newToolingResolver(real, tree)
+	shadow := r.info
 
 	switch tree.Nodes[decl].Kind {
 	case enums.NodeKinds.StructDecl:

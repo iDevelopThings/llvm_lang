@@ -3,14 +3,21 @@
 ## Editor support
 
 `llvmc-lsp.exe` provides live diagnostics, hover information, go to
-definition, and semantic highlighting for `.llx` files.
+definition, find references, occurrence highlighting, a document outline,
+folding ranges, completion, and semantic highlighting for `.llx` files.
 
 - JetBrains IDEs: import the included
   [LSP4IJ template](../cmd/llvmc-lsp/lsp4ij-template/README.md).
 - VS Code: use the included
   [development extension](../cmd/llvmc-lsp/vscode-extension/README.md).
 
-Completion and incremental parsing are not implemented yet.
+Every instantiation of a generic counts as the same declaration: find
+references and occurrence highlighting on `Sum[T]`'s declaration find every
+`Sum(...)` call, and vice versa. The outline shows each declaration's own
+signature or field list beside its name.
+
+Incremental parsing is not implemented yet - each edit re-analyzes the whole
+package.
 
 ## Run with the JIT
 

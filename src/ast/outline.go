@@ -1,8 +1,6 @@
 package ast
 
 import (
-	"strings"
-
 	"llvm_lang/src/enums"
 )
 
@@ -86,10 +84,12 @@ func (t *Tree) declSymbol(decl NodeIndex) (sym DeclSymbol, ok bool) {
 			kind = SymbolOutlineMethod
 		}
 		sym := t.namedSymbol(decl, t.FuncName(decl), kind, nil)
-		sym.Detail = t.funcSignatureSourceText(decl)
+		sym.Detail = t.FuncSignatureText(decl, t.SourceText)
 		return sym, true
 	case enums.NodeKinds.ExternFuncDecl:
-		return t.namedSymbol(decl, t.ExternFuncName(decl), SymbolOutlineFunction, nil), true
+		sym := t.namedSymbol(decl, t.ExternFuncName(decl), SymbolOutlineFunction, nil)
+		sym.Detail = t.FuncSignatureText(decl, t.SourceText)
+		return sym, true
 	case enums.NodeKinds.StructDecl:
 		return t.structSymbol(decl), true
 	case enums.NodeKinds.EnumDecl:
@@ -111,33 +111,8 @@ func (t *Tree) structSymbol(decl NodeIndex) DeclSymbol {
 		children = append(children, t.keywordSymbol(dtor, SymbolOutlineDestructor))
 	}
 	sym := t.namedSymbol(decl, t.StructName(decl), SymbolOutlineStruct, children)
-	sym.Detail = t.structFieldsSourceText(decl)
+	sym.Detail = t.StructFieldsText(decl, t.SourceText)
 	return sym
-}
-
-// funcSignatureSourceText renders decl's own parameter list and return
-// type exactly as written - "(v T, n int) int" - via SourceText, not a
-// resolved Type (this package has none to resolve with).
-func (t *Tree) funcSignatureSourceText(decl NodeIndex) string {
-	var params []string
-	for _, p := range t.Children(t.FuncParamList(decl)) {
-		params = append(params, t.Text(t.Child(p, 0))+" "+t.SourceText(t.Child(p, 1)))
-	}
-	sig := "(" + strings.Join(params, ", ") + ")"
-	if ret := t.FuncReturnType(decl); ret != InvalidNode {
-		sig += " " + t.SourceText(ret)
-	}
-	return sig
-}
-
-// structFieldsSourceText renders decl's own fields, in declaration order,
-// as a compact "{ x int, y int }" summary, exactly as written.
-func (t *Tree) structFieldsSourceText(decl NodeIndex) string {
-	var fields []string
-	for _, f := range t.StructFields(decl) {
-		fields = append(fields, t.Text(t.Child(f, 0))+" "+t.SourceText(t.Child(f, 1)))
-	}
-	return "{ " + strings.Join(fields, ", ") + " }"
 }
 
 func (t *Tree) enumSymbol(decl NodeIndex) DeclSymbol {

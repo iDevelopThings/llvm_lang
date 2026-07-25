@@ -25,21 +25,24 @@ func (w *Workspace) DocumentHighlight(path string, pos protocol.Position) []prot
 		return nil
 	}
 
-	// sym.DeclaringNameNode(sym.Tree) is only comparable against this
-	// file's own Refs keys when sym is actually declared in this same file
-	// - a NodeIndex is meaningless compared across two different Trees
-	// (see ast.NodeIndex's own doc comment). A symbol declared elsewhere
-	// (an imported function, say) simply has no declaring occurrence to
-	// match within path, which declNode's InvalidNode zero value already
-	// expresses correctly (no real refNode ever equals it).
+	// Every instantiation of a generic counts as the same occurrence set as
+	// its template, exactly as References treats them (see
+	// sema.Symbol.GenericFamily).
+	declSym, targets := sym.GenericFamily()
+
+	// DeclaringNameNode is only comparable against this file's own Refs keys
+	// when declSym is declared in this same file - a NodeIndex is meaningless
+	// across two Trees (see ast.NodeIndex's own doc comment). A symbol
+	// declared elsewhere has no declaring occurrence within path at all,
+	// which declNode's InvalidNode zero value already expresses.
 	var declNode ast.NodeIndex
-	if sym.Tree == fa.Tree {
-		declNode = sym.DeclaringNameNode(fa.Tree)
+	if declSym.Tree == fa.Tree {
+		declNode = declSym.DeclaringNameNode(fa.Tree)
 	}
 
 	var out []protocol.DocumentHighlight
 	for refNode, refSym := range fa.Info.Refs {
-		if refSym != sym {
+		if !targets[refSym] {
 			continue
 		}
 		if fa.Tree.RootAncestor(refNode) != fa.Tree.Root {

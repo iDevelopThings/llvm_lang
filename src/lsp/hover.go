@@ -26,7 +26,7 @@ func (w *Workspace) Hover(path string, pos protocol.Position) *protocol.Hover {
 	if s, ok := fa.Info.Refs[n]; ok && s != nil {
 		sym = s
 		lines = append(lines, fmt.Sprintf("**%s** `%s`", sym.Kind, sym.Name))
-		if detail := symbolDetail(w, sym); detail != "" {
+		if detail := symbolDetail(w.infoForTree(sym.Tree), sym); detail != "" {
 			lines = append(lines, fmt.Sprintf("`%s`", detail))
 		}
 	}
