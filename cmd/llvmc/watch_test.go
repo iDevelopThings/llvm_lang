@@ -216,6 +216,56 @@ func TestBinary_Watch_TickExit(t *testing.T) {
 	}
 }
 
+// TestBinary_Watch_LargeStackFrameInit is the regression case for a real
+// bug: an Init (or Frame) whose own stack frame crosses the ~4KB threshold
+// where the x86_64-w64-windows-gnu backend auto-inserts a stack-probe call
+// failed to materialize at all under -watch - "JIT session error: Symbols
+// not found: [ ___chkstk_ms ]" - since that helper is an internal symbol
+// statically linked into llvmc.exe itself, never a DLL export the JIT's
+// generic process-symbol generator can find (see bindMinGWMainThunk's own
+// doc comment, main.go). QueryPerformanceCounter forces the array to
+// actually exist as real stack memory rather than being optimized away
+// entirely (an array only ever read back via compile-time-constant indices
+// would otherwise fold to nothing, never reaching codegen as a real alloca).
+func TestBinary_Watch_LargeStackFrameInit(t *testing.T) {
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "main.llx")
+	src := "" +
+		"extern func QueryPerformanceCounter(counter *i64) bool\n" +
+		"func Init() {\n" +
+		"\tvar big [4000]i64\n" +
+		"\tQueryPerformanceCounter(&big[0])\n" +
+		"\tQueryPerformanceCounter(&big[3999])\n" +
+		"\tprint(\"init\")\n" +
+		"}\n" +
+		"func Frame() int {\n" +
+		"\treturn 7\n" +
+		"}\n"
+	if err := os.WriteFile(srcPath, []byte(src), 0o644); err != nil {
+		t.Fatalf("writing source: %v", err)
+	}
+
+	cmd := exec.Command(llvmcPath, "-watch", srcPath)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("llvmc exited 0, want 7; output:\n%s", out)
+	}
+	ee, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("running llvmc: %v\n%s", err, out)
+	}
+	if ee.ExitCode() != 7 {
+		t.Fatalf("llvmc exit code = %d, want 7\noutput:\n%s", ee.ExitCode(), out)
+	}
+	got := string(out)
+	if !strings.Contains(got, "init") {
+		t.Errorf("Init never ran (stdout has no \"init\"); output:\n%s", got)
+	}
+	if strings.Contains(got, "chkstk") {
+		t.Errorf("chkstk symbol resolution regressed; output:\n%s", got)
+	}
+}
+
 // TestBinary_Watch_Reload swaps in a new Frame that exits with a different code.
 func TestBinary_Watch_Reload(t *testing.T) {
 	dir := t.TempDir()

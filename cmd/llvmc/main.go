@@ -576,6 +576,22 @@ func initJIT() {
 // assumption is never put to the test in the first place - args_init's own
 // body simply never runs, so whatever jitArgcSink/jitArgvSink actually
 // contain is never read by anything.
+//
+// Also binds `___chkstk_ms` - found empirically the same way, this time
+// under -watch against a real game (raylib) once a JIT'd function's own
+// stack frame grew past the ~4KB threshold where the x86_64-w64-windows-gnu
+// backend's prologue lowering auto-inserts a stack-probe call: "JIT session
+// error: Symbols not found: [ ___chkstk_ms ]", surfaced as that function
+// failing to materialize at all. Unlike __main (any harmless callable
+// address will do), this one has to be the *real* implementation - it's
+// what safely touches each intervening guard page so Windows' stack growth
+// doesn't fault - so it's bound to chkstkMsAddr() (chkstk.go), which takes
+// the address of the genuine ___chkstk_ms already statically linked into
+// this very binary from libgcc, rather than the process-symbol generator's
+// DLL-export-only search (___chkstk_ms is an internal helper baked directly
+// into the executable, never a DLL export, so that generator can never find
+// it - the exact same reason __main/__argc/__argv need this same manual
+// binding instead of the generator above).
 func bindMinGWMainThunk(jit llvm.LLJIT) error {
 	dg, err := llvm.NewDynamicLibrarySearchGeneratorForProcess(jit.GlobalPrefix())
 	if err != nil {
@@ -594,6 +610,8 @@ func bindMinGWMainThunk(jit llvm.LLJIT) error {
 	defer argcName.Release()
 	argvName := jit.ExecutionSession().Intern("__argv")
 	defer argvName.Release()
+	chkstkName := jit.ExecutionSession().Intern("___chkstk_ms")
+	defer chkstkName.Release()
 
 	mu := llvm.AbsoluteSymbols([]llvm.AbsoluteSymbol{
 		{
@@ -615,6 +633,13 @@ func bindMinGWMainThunk(jit llvm.LLJIT) error {
 			Value: llvm.EvaluatedSymbol{
 				Address: uint64(uintptr(unsafe.Pointer(&jitArgvSink))),
 				Flags:   llvm.SymbolFlags{Generic: llvm.SymbolFlagExported},
+			},
+		},
+		{
+			Name: chkstkName,
+			Value: llvm.EvaluatedSymbol{
+				Address: uint64(chkstkMsAddr()),
+				Flags:   llvm.SymbolFlags{Generic: llvm.SymbolFlagExported | llvm.SymbolFlagCallable},
 			},
 		},
 	})
