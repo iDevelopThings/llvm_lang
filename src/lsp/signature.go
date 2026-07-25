@@ -14,17 +14,16 @@ import (
 // "(v Entity) int" for a Box[Entity] method, not the template's own
 // "(v T) T" - see sema.FuncSignatureText's own doc comment for why).
 //
-// infos is Workspace.declaringInfos' own snapshot, taken once per request:
-// the Info to render against is the *declaring* file's, which needn't be the
-// file the request came from.
+// info is sym's own declaring file's Info (Workspace.declaringInfos'/
+// infoForTree's lookup, done by the caller) - the Info to render against is
+// the *declaring* file's, which needn't be the file the request came from.
 //
 // "" for any symbol kind this doesn't know how to render (unchanged
 // behavior for everything but SymFunc and SymStruct).
-func symbolDetail(infos map[*ast.Tree]*sema.Info, sym *sema.Symbol) string {
+func symbolDetail(info *sema.Info, sym *sema.Symbol) string {
 	if sym == nil || sym.Tree == nil || sym.Decl == ast.InvalidNode {
 		return ""
 	}
-	info := infos[sym.Tree]
 
 	switch sym.Kind {
 	case sema.SymFunc:

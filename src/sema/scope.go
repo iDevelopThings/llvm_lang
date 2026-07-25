@@ -365,18 +365,12 @@ type Symbol struct {
 	GenericTemplate *Symbol
 
 	// GenericMethod is set only on a generic struct method's own real
-	// declaring Symbol (see addGenericStructMethod) - the record tracking
-	// every instantiation of it, across every instantiated receiver struct.
-	//
-	// This is deliberately its own field rather than reusing Generic above,
-	// and the reason every consumer unifying a method across instantiations
-	// has to know about both: each instantiated receiver struct gets a
-	// separate per-struct method template, whose own Symbol
-	// (GenericMethod.templateFor's mt.Symbol) is synthetic bookkeeping -
-	// a distinct object per receiver instantiation, never the target of a
-	// real Refs entry, and load-bearing for call-time dispatch, which reads
-	// Generic off *that* Symbol (genericCallee). Aliasing this Symbol's own
-	// Generic onto it would break that dispatch.
+	// declaring Symbol - tracks every instantiation across every receiver
+	// struct. Kept separate from Generic (not reused) because each
+	// receiver's own per-struct method template has its own distinct,
+	// synthetic Symbol that real call-time dispatch depends on (genericCallee
+	// reads Generic off that Symbol, not this one) - aliasing them would
+	// break dispatch.
 	GenericMethod *GenericMethod
 
 	// TypeParamBound is set only for a SymTypeParam symbol - the concrete type

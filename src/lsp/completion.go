@@ -167,7 +167,7 @@ func symbolCompletionItem(infos map[*ast.Tree]*sema.Info, label string, kind pro
 		if doc := sym.Tree.DocComment(sym.Decl); doc != "" {
 			item.Documentation = doc
 		}
-		if detail := symbolDetail(infos, sym); detail != "" {
+		if detail := symbolDetail(infos[sym.Tree], sym); detail != "" {
 			item.Detail = &detail
 		}
 	}

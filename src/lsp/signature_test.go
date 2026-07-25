@@ -41,10 +41,10 @@ func TestSymbolDetail_UsesDeclaringFilesInfo(t *testing.T) {
 `)
 	sym := symbolAt(t, w, path, "Insert")
 
-	if got, want := symbolDetail(w.declaringInfos(), sym), "(v int, n int) int"; got != want {
+	if got, want := symbolDetail(w.infoForTree(sym.Tree), sym), "(v int, n int) int"; got != want {
 		t.Errorf("symbolDetail = %q, want %q", got, want)
 	}
-	if got, want := symbolDetail(map[*ast.Tree]*sema.Info{}, sym), "(v int, n int) int"; got != want {
+	if got, want := symbolDetail(nil, sym), "(v int, n int) int"; got != want {
 		t.Errorf("symbolDetail with no declaring Info = %q, want %q (the source-text fallback)", got, want)
 	}
 }
@@ -63,11 +63,9 @@ func f(n int) int {
 	return total + n
 }
 `)
-	infos := w.declaringInfos()
-
 	for _, needle := range []string{"Shape", "n int", "total := 0"} {
 		sym := symbolAt(t, w, path, needle)
-		if got := symbolDetail(infos, sym); got != "" {
+		if got := symbolDetail(w.infoForTree(sym.Tree), sym); got != "" {
 			t.Errorf("symbolDetail(%s, kind %v) = %q, want \"\"", needle, sym.Kind, got)
 		}
 	}
@@ -76,16 +74,14 @@ func f(n int) int {
 // TestSymbolDetail_NilAndUndeclaredSymbols covers the guard clause - a nil
 // symbol, and one with no declaration node to read a signature from.
 func TestSymbolDetail_NilAndUndeclaredSymbols(t *testing.T) {
-	infos := map[*ast.Tree]*sema.Info{}
-
-	if got := symbolDetail(infos, nil); got != "" {
+	if got := symbolDetail(nil, nil); got != "" {
 		t.Errorf("symbolDetail(nil) = %q, want \"\"", got)
 	}
 	sym := &sema.Symbol{
 		Kind: sema.SymFunc,
 		Decl: ast.InvalidNode,
 	}
-	if got := symbolDetail(infos, sym); got != "" {
+	if got := symbolDetail(nil, sym); got != "" {
 		t.Errorf("symbolDetail(symbol with no Tree/Decl) = %q, want \"\"", got)
 	}
 }

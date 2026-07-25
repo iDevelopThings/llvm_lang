@@ -195,7 +195,8 @@ func (w *Workspace) analysisSnapshot() []*FileAnalysis {
 // the lookup symbolDetail needs to render a symbol against the file that
 // actually declares it (which may not be the file the request came from).
 // Built once per request: doing it per rendered symbol would take w.mu once
-// per completion item.
+// per completion item. For a single symbol (Hover), use infoForTree instead -
+// no reason to snapshot every open file just to read one entry back out.
 func (w *Workspace) declaringInfos() map[*ast.Tree]*sema.Info {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -206,6 +207,20 @@ func (w *Workspace) declaringInfos() map[*ast.Tree]*sema.Info {
 		}
 	}
 	return out
+}
+
+// infoForTree returns the cached Info belonging to tree - the single-symbol
+// counterpart to declaringInfos, for a caller (Hover) that only ever needs
+// one entry rather than a whole-request snapshot.
+func (w *Workspace) infoForTree(tree *ast.Tree) *sema.Info {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, fa := range w.analysis {
+		if fa.Tree == tree {
+			return fa.Info
+		}
+	}
+	return nil
 }
 
 // Forget drops path's cached analysis (didClose) - the buffer overlay
