@@ -29,6 +29,91 @@ when actually relevant to the task at hand:
   in `src/bench`. Read this (and update it) whenever a change might
   meaningfully move performance/allocations in one of those stages, per the
   `## Standards` section below.
+- **`docs/`** - concise, user-facing guides for learning and using the
+  language. These explain what users write and observe; they are not a
+  replacement for the exact rules in `LANGUAGE.md` or compiler internals in
+  `CODEGEN.md`.
+
+# User-facing documentation
+
+Every user-visible language, standard-library, compiler CLI, diagnostic, or
+editor feature change must update `docs/` in the same round. Documentation is
+part of the feature, not follow-up work.
+
+Keep the layers distinct:
+
+- `LANGUAGE.md` is the precise language specification.
+- `CODEGEN.md` records lowering and compiler-driver implementation details.
+- `DECISIONS.md` records why a design was chosen.
+- `BLOCKERS.md` records unresolved questions.
+- `docs/` teaches users what exists, how to use it, and the limits they will
+  encounter.
+
+Do not copy implementation history into `docs/`. Avoid phrases such as "this
+round", AST/sema/codegen narration, internal function names, and rejected
+alternatives unless they materially affect how a user writes or runs a
+program. Link to the exact reference document instead of duplicating its long
+explanation.
+
+## Documentation style
+
+Assume the reader already understands ordinary programming concepts but is
+new to this language. Write for quick scanning and low attention overhead:
+
+- Lead with the syntax or outcome, then explain it in one short paragraph.
+- Keep one concept per section and one non-obvious point per paragraph.
+- Prefer a small runnable example, compact table, or short list over several
+  paragraphs of prose.
+- Keep snippets focused on one idea. Link to a full program in `examples/`
+  instead of pasting a large demo or explaining it line by line.
+- Show expected output only when it clarifies behavior that is not obvious
+  from the snippet.
+- Use plain language. Introduce project-specific terms only when the user
+  needs them.
+- State important restrictions beside the feature they restrict, not several
+  pages later.
+- Do not narrate provenance, implementation chronology, or the full reasoning
+  behind a rule. That belongs in `DECISIONS.md` or `CODEGEN.md`.
+- Do not assume Go behavior merely because the syntax looks like Go. Verify
+  the actual compiler/spec behavior, especially `_`, capture, range, ownership,
+  conversion, and addressability rules.
+
+The beginner path must stay small. Put uncommon caveats in
+`docs/current-limitations.md`, exact feature routing in
+`docs/feature-index.md`, and longer edge-case detail in `LANGUAGE.md`.
+Do not make the introductory pages exhaustive.
+
+## Keeping the docs complete
+
+For every new or changed user-visible feature:
+
+1. Update its topic page under `docs/`.
+2. Add or update its row in `docs/feature-index.md`.
+3. Update `docs/current-limitations.md` when a limitation is introduced,
+   removed, or narrowed.
+4. Update `docs/compiler.md` for CLI/editor behavior or
+   `docs/packages-and-stdlib.md` for package/stdlib behavior.
+5. Add the runnable example to `docs/examples.md`, or explicitly use `—` in
+   the feature index when no dedicated example exists.
+6. Keep `docs/README.md` navigation correct when pages are added, renamed, or
+   moved.
+
+Avoid explaining the same feature independently on several pages. Give it one
+main home; other pages should summarize in a sentence and link there.
+
+Examples in `docs/` must compile as written once placed in the context they
+claim to use. After changing user-facing docs:
+
+- compile the relevant documentation snippets or equivalent example programs;
+- compile every changed example package;
+- verify every relative Markdown link and heading anchor;
+- confirm every file under `examples/` remains represented in
+  `docs/examples.md`.
+
+When implementation and docs disagree, do not quietly document whichever
+behavior seems nicer. Verify the compiler, tests, examples, and
+`LANGUAGE.md`; fix the stale layer or record a genuine unresolved question in
+`BLOCKERS.md`.
 
 # Compiling
 
@@ -188,7 +273,7 @@ return Token{
 Bad:
 ```go
 switch t.Lexeme {
-	case enums.Lexemes.Number, enums.Lexemes.String, 
+	case enums.Lexemes.Number, enums.Lexemes.String,
 	enums.Lexemes.RightParen, enums.Lexemes.LeftParen, enums.Lexemes.Identifier:
         return true
     case enums.Lexemes.Identifier:
