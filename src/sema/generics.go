@@ -821,6 +821,13 @@ func (c *checker) checkGenericCall(n, callee ast.NodeIndex, args []ast.NodeIndex
 		return invalidType, true
 	}
 	c.info.Refs[callee] = sym
+	if explicit != ast.InvalidNode {
+		// callee is the whole Name[T] IndexExpr here - also point the bare
+		// name's own Ref at sym, or hovering directly over "Name" (not the
+		// [T] part) still finds genericRef's original template-pointing
+		// resolution instead of this instantiation's real signature.
+		c.info.Refs[c.tree.Child(callee, 0)] = sym
+	}
 
 	restore := c.pushTree(sym.Tree)
 	sig := c.funcSigForDecl(sym.Decl)

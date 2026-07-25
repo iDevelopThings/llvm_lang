@@ -20,6 +20,8 @@ import (
 
 	"llvm_lang/src/lexer"
 	"llvm_lang/src/sema"
+
+	protocol "github.com/tliron/glsp/protocol_3_16"
 )
 
 const genericStructFixture = `struct Box[T] {
@@ -96,6 +98,43 @@ func TestGenerics_Hover_WorksInsideTemplateBody(t *testing.T) {
 	hover := w.Hover(path, pos)
 	if hover == nil {
 		t.Fatal("Hover returned nil for a parameter reference inside a generic template's own body")
+	}
+}
+
+// TestGenerics_Hover_ExplicitInstantiationShowsSubstitutedSignature is the
+// regression test for a real reported bug: hovering the bare name at an
+// explicit-instantiation call site (NewBox[int](), not NewBox(x) with T
+// inferred) showed the template's own unsubstituted "() Box[T]" - checkGenericCall
+// only pointed the *whole* Name[T] IndexExpr's own Ref at the real
+// specialization, never the bare name Ident nested inside it, so a hover
+// landing on just "NewBox" (not the "[int]" part) still read genericRef's
+// original template-pointing resolution.
+func TestGenerics_Hover_ExplicitInstantiationShowsSubstitutedSignature(t *testing.T) {
+	src := `struct Box[T] {
+	v T
+}
+func NewBox[T]() Box[T] {
+	return Box[T]{}
+}
+func main() int {
+	b := NewBox[int]()
+	print(b.v)
+	return 0
+}
+`
+	w, path := singleFileWorkspace(t, src)
+	fa, _ := w.Analysis(path)
+
+	offset := strings.Index(fa.Tree.File.Src, "NewBox[int]") + len("Ne")
+	pos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(offset))
+
+	hover := w.Hover(path, pos)
+	if hover == nil {
+		t.Fatal("Hover returned nil at an explicit-instantiation call site")
+	}
+	content := hover.Contents.(protocol.MarkupContent)
+	if !strings.Contains(content.Value, "() Box[int]") {
+		t.Errorf("hover content = %q, want it to contain the substituted \"() Box[int]\", not the template's own \"() Box[T]\"", content.Value)
 	}
 }
 
