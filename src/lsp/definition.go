@@ -41,9 +41,21 @@ func (w *Workspace) Definition(path string, pos protocol.Position) *protocol.Loc
 	}
 
 	sym, ok := fa.Info.Refs[n]
-	if !ok || sym == nil || sym.Tree == nil || sym.Decl == ast.InvalidNode {
-		// No Ref recorded at all, or a predeclared symbol (print, int, ...)
-		// with no real declaration site in any source file.
+	if !ok || sym == nil {
+		return nil
+	}
+
+	// An instantiation's own Decl is a synthetic clone - land on the
+	// template it came from instead (see Symbol.GenericTemplate). The
+	// clone's spans coincide with the template's today only because cloning
+	// preserves tokens verbatim, so this isn't just belt-and-braces.
+	if sym.GenericTemplate != nil {
+		sym = sym.GenericTemplate
+	}
+
+	if sym.Tree == nil || sym.Decl == ast.InvalidNode {
+		// A predeclared symbol (print, int, ...) with no real declaration
+		// site in any source file.
 		return nil
 	}
 

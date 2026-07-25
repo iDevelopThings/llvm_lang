@@ -72,22 +72,23 @@ func (w *Workspace) memberCompletions(fa *FileAnalysis, memberExpr ast.NodeIndex
 // methods, auto-dereferencing one pointer level exactly like ordinary
 // member access does (see sema.Type.Underlying).
 func (w *Workspace) valueMemberCompletions(objType sema.Type) []protocol.CompletionItem {
+	infos := w.declaringInfos()
 	switch objType.Underlying().Kind {
 	case sema.TypeStruct:
 		info := objType.Underlying().Struct
 		items := make([]protocol.CompletionItem, 0, len(info.Fields)+len(info.Methods))
 		for name, sym := range info.Fields {
-			items = append(items, symbolCompletionItem(w, name, protocol.CompletionItemKindField, sym))
+			items = append(items, symbolCompletionItem(infos, name, protocol.CompletionItemKindField, sym))
 		}
 		for name, sym := range info.Methods {
-			items = append(items, symbolCompletionItem(w, name, protocol.CompletionItemKindMethod, sym))
+			items = append(items, symbolCompletionItem(infos, name, protocol.CompletionItemKindMethod, sym))
 		}
 		return items
 	case sema.TypeEnum:
 		info := objType.Underlying().Enum
 		items := make([]protocol.CompletionItem, 0, len(info.Methods))
 		for name, sym := range info.Methods {
-			items = append(items, symbolCompletionItem(w, name, protocol.CompletionItemKindMethod, sym))
+			items = append(items, symbolCompletionItem(infos, name, protocol.CompletionItemKindMethod, sym))
 		}
 		return items
 	default:
@@ -116,12 +117,13 @@ func (w *Workspace) packageMemberCompletions(pkg *sema.PackageResult) []protocol
 	if pkg == nil || pkg.Scope == nil {
 		return nil
 	}
+	infos := w.declaringInfos()
 	var items []protocol.CompletionItem
 	for sym := range pkg.Scope.Local() {
 		if !sym.Exported {
 			continue
 		}
-		items = append(items, symbolCompletionItem(w, sym.Name, symbolKindToCompletionItemKind(sym.Kind), sym))
+		items = append(items, symbolCompletionItem(infos, sym.Name, symbolKindToCompletionItemKind(sym.Kind), sym))
 	}
 	return items
 }
@@ -136,11 +138,12 @@ func (w *Workspace) identifierCompletions(fa *FileAnalysis, n ast.NodeIndex) []p
 		return nil
 	}
 
+	infos := w.declaringInfos()
 	var items []protocol.CompletionItem
 	visible := make(map[string]bool)
 	for sym := range scope.Visible() {
 		visible[sym.Name] = true
-		items = append(items, symbolCompletionItem(w, sym.Name, symbolKindToCompletionItemKind(sym.Kind), sym))
+		items = append(items, symbolCompletionItem(infos, sym.Name, symbolKindToCompletionItemKind(sym.Kind), sym))
 	}
 	items = append(items, w.unimportedPackageNameCompletions(fa, visible)...)
 	return items
@@ -152,8 +155,10 @@ func (w *Workspace) identifierCompletions(fa *FileAnalysis, n ast.NodeIndex) []p
 // LSP client should offer (matters nowhere today, but keeps the field
 // lookup and the display label from silently drifting apart). Detail is
 // populated via symbolDetail (a function's real signature, a struct's own
-// field list) whenever sym is a kind it knows how to render.
-func symbolCompletionItem(w *Workspace, label string, kind protocol.CompletionItemKind, sym *sema.Symbol) protocol.CompletionItem {
+// field list) whenever sym is a kind it knows how to render - infos is that
+// function's own per-request declaring-file lookup, built once by the caller
+// rather than per item.
+func symbolCompletionItem(infos map[*ast.Tree]*sema.Info, label string, kind protocol.CompletionItemKind, sym *sema.Symbol) protocol.CompletionItem {
 	item := protocol.CompletionItem{
 		Label: label,
 		Kind:  completionItemKindPtr(kind),
@@ -162,7 +167,7 @@ func symbolCompletionItem(w *Workspace, label string, kind protocol.CompletionIt
 		if doc := sym.Tree.DocComment(sym.Decl); doc != "" {
 			item.Documentation = doc
 		}
-		if detail := symbolDetail(w, sym); detail != "" {
+		if detail := symbolDetail(infos, sym); detail != "" {
 			item.Detail = &detail
 		}
 	}

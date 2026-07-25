@@ -7,6 +7,7 @@ import (
 
 	"llvm_lang/src/ast"
 	"llvm_lang/src/loader"
+	"llvm_lang/src/sema"
 
 	"github.com/spf13/afero"
 	protocol "github.com/tliron/glsp/protocol_3_16"
@@ -186,6 +187,23 @@ func (w *Workspace) analysisSnapshot() []*FileAnalysis {
 	out := make([]*FileAnalysis, 0, len(w.analysis))
 	for _, fa := range w.analysis {
 		out = append(out, fa)
+	}
+	return out
+}
+
+// declaringInfos snapshots every cached file's own Info, keyed by its Tree -
+// the lookup symbolDetail needs to render a symbol against the file that
+// actually declares it (which may not be the file the request came from).
+// Built once per request: doing it per rendered symbol would take w.mu once
+// per completion item.
+func (w *Workspace) declaringInfos() map[*ast.Tree]*sema.Info {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := make(map[*ast.Tree]*sema.Info, len(w.analysis))
+	for _, fa := range w.analysis {
+		if fa.Tree != nil {
+			out[fa.Tree] = fa.Info
+		}
 	}
 	return out
 }

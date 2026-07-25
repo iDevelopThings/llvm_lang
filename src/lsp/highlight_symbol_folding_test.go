@@ -76,16 +76,7 @@ func TestDocumentHighlight_ReadWrite(t *testing.T) {
 		t.Fatalf("len(highlights) = %d, want 4 (decl, reassignment target, its own read, and the Add(total, ...) read)", len(highlights))
 	}
 
-	writes, reads := 0, 0
-	for _, h := range highlights {
-		switch *h.Kind {
-		case protocol.DocumentHighlightKindWrite:
-			writes++
-		case protocol.DocumentHighlightKindRead:
-			reads++
-		}
-	}
-	if writes != 2 || reads != 2 {
+	if writes, reads := highlightKinds(highlights); writes != 2 || reads != 2 {
 		t.Errorf("writes=%d reads=%d, want writes=2 (decl + reassignment target) reads=2", writes, reads)
 	}
 }
@@ -108,7 +99,14 @@ func TestDocumentHighlight_GenericFunc_NoDuplicatesAcrossInstantiations(t *testi
 		t.Fatalf("len(highlights) = %d, want 4 (declaration, Bump's own target+read, main's return - no clone duplicates): %+v", len(highlights), highlights)
 	}
 
-	writes, reads := 0, 0
+	if writes, reads := highlightKinds(highlights); writes != 2 || reads != 2 {
+		t.Errorf("writes=%d reads=%d, want writes=2 (decl + Bump's own assignment target) reads=2", writes, reads)
+	}
+}
+
+// highlightKinds counts h's own Read/Write split, the two kinds
+// DocumentHighlight ever emits.
+func highlightKinds(highlights []protocol.DocumentHighlight) (writes, reads int) {
 	for _, h := range highlights {
 		switch *h.Kind {
 		case protocol.DocumentHighlightKindWrite:
@@ -117,8 +115,75 @@ func TestDocumentHighlight_GenericFunc_NoDuplicatesAcrossInstantiations(t *testi
 			reads++
 		}
 	}
-	if writes != 2 || reads != 2 {
-		t.Errorf("writes=%d reads=%d, want writes=2 (decl + Bump's own assignment target) reads=2", writes, reads)
+	return writes, reads
+}
+
+// TestDocumentHighlight_GenericFunc_DeclarationHighlightsEveryInstantiation
+// is the DocumentHighlight half of the unification References already got:
+// each instantiation resolves its callee to a *different* specialized
+// Symbol, so a bare pointer compare against the template's own Symbol
+// highlighted only the declaration itself.
+func TestDocumentHighlight_GenericFunc_DeclarationHighlightsEveryInstantiation(t *testing.T) {
+	w, path := singleFileWorkspace(t, genericRefsFixture)
+	fa, _ := w.Analysis(path)
+
+	declOffset := strings.Index(fa.Tree.File.Src, "Bump[T]")
+	pos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(declOffset))
+
+	highlights := w.DocumentHighlight(path, pos)
+	if len(highlights) != 3 {
+		t.Fatalf("len(highlights) = %d, want 3 (the declaration + both Bump(1)/Bump(1.5) call sites): %+v", len(highlights), highlights)
+	}
+	if writes, reads := highlightKinds(highlights); writes != 1 || reads != 2 {
+		t.Errorf("writes=%d reads=%d, want writes=1 (the declaration) reads=2 (both call sites)", writes, reads)
+	}
+}
+
+// TestDocumentHighlight_GenericFunc_CallSiteHighlightsSiblings covers the
+// reverse direction: one instantiation's own call site must still highlight
+// the declaration and every sibling instantiation.
+func TestDocumentHighlight_GenericFunc_CallSiteHighlightsSiblings(t *testing.T) {
+	w, path := singleFileWorkspace(t, genericRefsFixture)
+	fa, _ := w.Analysis(path)
+
+	callOffset := strings.Index(fa.Tree.File.Src, "Bump(1)")
+	pos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(callOffset))
+
+	highlights := w.DocumentHighlight(path, pos)
+	if len(highlights) != 3 {
+		t.Fatalf("len(highlights) = %d, want 3 (declaration + Bump(1) + Bump(1.5)): %+v", len(highlights), highlights)
+	}
+}
+
+// TestDocumentHighlight_GenericStructMethod_DeclarationHighlightsEveryInstantiation
+// is the harder half of the same fix: a generic struct's own method gets a
+// separate per-receiver-instantiation template Symbol, unified only through
+// Symbol.GenericMethod (see sema.Symbol.GenericFamily).
+func TestDocumentHighlight_GenericStructMethod_DeclarationHighlightsEveryInstantiation(t *testing.T) {
+	w, path := singleFileWorkspace(t, genericMethodRefsFixture)
+	fa, _ := w.Analysis(path)
+
+	declOffset := strings.Index(fa.Tree.File.Src, "Get() T")
+	pos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(declOffset))
+
+	highlights := w.DocumentHighlight(path, pos)
+	if len(highlights) != 3 {
+		t.Fatalf("len(highlights) = %d, want 3 (the declaration + a.Get() + b.Get(), two different receiver instantiations): %+v", len(highlights), highlights)
+	}
+}
+
+// TestDocumentHighlight_GenericStructMethod_CallSiteHighlightsDeclarationAndSibling
+// covers that same method case from one instantiated call site.
+func TestDocumentHighlight_GenericStructMethod_CallSiteHighlightsDeclarationAndSibling(t *testing.T) {
+	w, path := singleFileWorkspace(t, genericMethodRefsFixture)
+	fa, _ := w.Analysis(path)
+
+	callOffset := strings.Index(fa.Tree.File.Src, "a.Get()") + len("a.")
+	pos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(callOffset))
+
+	highlights := w.DocumentHighlight(path, pos)
+	if len(highlights) != 3 {
+		t.Fatalf("len(highlights) = %d, want 3 (declaration + a.Get() + b.Get()): %+v", len(highlights), highlights)
 	}
 }
 

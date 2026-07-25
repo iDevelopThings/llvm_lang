@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"llvm_lang/src/lexer"
+	"llvm_lang/src/sema"
 )
 
 const genericStructFixture = `struct Box[T] {
@@ -117,6 +118,50 @@ func TestGenerics_Completion_IdentifierInsideTemplateBodySeesParams(t *testing.T
 			t.Errorf("completion labels inside Sum[T]'s own body = %v, missing %q", labels, want)
 		}
 	}
+}
+
+// TestGenerics_SemanticTokens_ParameterInsideUninstantiatedTemplate is the
+// assertion for the literal symptom this whole round started from: a
+// never-instantiated generic function's body had no Refs at all, so every
+// identifier in it fell back to variable+readonly - a wall of underlines
+// under LSP4IJ's default color mapping. The parameter must classify as a
+// real parameter token.
+func TestGenerics_SemanticTokens_ParameterInsideUninstantiatedTemplate(t *testing.T) {
+	src := `func Sum[T](a T, b T) T {
+	return a + b
+}
+`
+	w, path := singleFileWorkspace(t, src)
+	fa, _ := w.Analysis(path)
+
+	offset := strings.Index(src, "return a + b") + len("return ")
+	tok, ok := semanticTokenAt(fa, lexer.Pos(offset))
+	if !ok {
+		t.Fatal("no semantic token emitted for 'a' inside the template body")
+	}
+	if tok.typeIdx != semTokParameter {
+		t.Errorf("token type = %d, want semTokParameter (%d) - an uninstantiated template's own body fell back to the unresolved-identifier classification",
+			tok.typeIdx, semTokParameter)
+	}
+}
+
+// semanticTokenAt runs SemanticTokens' own collection passes over fa and
+// returns whichever token starts at offset.
+func semanticTokenAt(fa *FileAnalysis, offset lexer.Pos) (rawToken, bool) {
+	reassigned := make(map[*sema.Symbol]bool)
+	collectReassignedSymbols(fa.Tree, fa.Info, fa.Tree.Root, reassigned)
+
+	covered := make(map[lexer.Pos]bool)
+	var raw []rawToken
+	collectNodeTokens(fa.Tree, fa.Info, fa.Tree.Root, reassigned, covered, &raw)
+
+	want := byteOffsetToPosition(fa.Tree.File, offset)
+	for _, tok := range raw {
+		if uint32(tok.line) == want.Line && uint32(tok.char) == want.Character {
+			return tok, true
+		}
+	}
+	return rawToken{}, false
 }
 
 // TestGenerics_DanglingMemberAccessInsideGenericMethod_NoCrash is the

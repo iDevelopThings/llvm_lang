@@ -172,6 +172,29 @@ func TestCoroutines_Completion_IdentifierInsideAsyncBodySeesLocals(t *testing.T)
 }
 
 // TestCoroutines_DanglingMemberAccessInsideAsyncBody_NoCrash is the
+// TestCoroutines_References_AsyncFuncAndHandle covers the two capabilities
+// generics needed real fixes for (References/DocumentHighlight) against a
+// coroutine instead: an async func's own declaration and call site, and a
+// coroutine handle threaded through done/resume/delete.
+func TestCoroutines_References_AsyncFuncAndHandle(t *testing.T) {
+	w, path := singleFileWorkspace(t, coroutinesFixture)
+	fa, _ := w.Analysis(path)
+
+	declPos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(strings.Index(fa.Tree.File.Src, "Sequence()")))
+	if locs := w.References(path, declPos, true); len(locs) != 2 {
+		t.Errorf("len(locs) = %d, want 2 (the async func's own declaration + its h := Sequence() call site): %+v", len(locs), locs)
+	}
+
+	handlePos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(strings.Index(fa.Tree.File.Src, "h := Sequence()")))
+	highlights := w.DocumentHighlight(path, handlePos)
+	if len(highlights) != 4 {
+		t.Fatalf("len(highlights) = %d, want 4 (h's declaration + done(h) + resume(h) + delete h): %+v", len(highlights), highlights)
+	}
+	if writes, reads := highlightKinds(highlights); writes != 1 || reads != 3 {
+		t.Errorf("writes=%d reads=%d, want writes=1 (the declaration) reads=3", writes, reads)
+	}
+}
+
 // broken/incomplete-source variant every capability above needs to
 // survive, per this project's own invalid-path-coverage standard.
 func TestCoroutines_DanglingMemberAccessInsideAsyncBody_NoCrash(t *testing.T) {

@@ -2,7 +2,6 @@ package lsp
 
 import (
 	"llvm_lang/src/ast"
-	"llvm_lang/src/sema"
 
 	protocol "github.com/tliron/glsp/protocol_3_16"
 )
@@ -31,25 +30,10 @@ func (w *Workspace) References(path string, pos protocol.Position, includeDeclar
 		return nil
 	}
 
-	// A monomorphized generic's own template (a free func/struct, or a
-	// struct method - see Symbol.GenericInstances) and each of its
-	// instantiations (Sum[int], Sum[f64], ...) are, from a user's point of
-	// view, all "the same" Sum - clicking any one of them (the
-	// declaration, or one call site) must find every other. declSym is
-	// whichever of the pair is the real declaring Symbol, the one
-	// DeclaringNameNode/Tree actually make sense against - an
-	// instantiation's own Decl points at a synthetic clone (see
-	// ast.Tree.CloneSubtree), already excluded from every scan below by
-	// the RootAncestor check.
-	targets := map[*sema.Symbol]bool{sym: true}
-	declSym := sym
-	if sym.GenericTemplate != nil {
-		declSym = sym.GenericTemplate
-		targets[declSym] = true
-	}
-	for inst := range declSym.GenericInstances() {
-		targets[inst] = true
-	}
+	// A generic's template and each of its instantiations (Sum[int],
+	// Sum[f64], ...) are all "the same" Sum to a user - clicking any one of
+	// them must find every other (see sema.Symbol.GenericFamily).
+	declSym, targets := sym.GenericFamily()
 
 	var declNameNode ast.NodeIndex
 	if declSym.Tree != nil {
