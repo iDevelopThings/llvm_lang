@@ -82,6 +82,12 @@ func StructFieldsText(tree *ast.Tree, info *Info, decl ast.NodeIndex) string {
 	return tree.StructFieldsText(decl, typeRenderer(tree, info))
 }
 
+// FieldTypeText renders fieldDecl's (a Field's) own type - see
+// FuncSignatureText for the same Type-first-with-source-fallback reasoning.
+func FieldTypeText(tree *ast.Tree, info *Info, fieldDecl ast.NodeIndex) string {
+	return typeOrSourceText(tree, info, tree.Child(fieldDecl, 1))
+}
+
 // typeRenderer is the per-type-node renderer this package injects into
 // ast's own signature shape walks.
 func typeRenderer(tree *ast.Tree, info *Info) func(ast.NodeIndex) string {

@@ -315,7 +315,10 @@ type Symbol struct {
 	// cross-package iff the struct itself is exported) - a name-based lookup
 	// through whichever tree's own Info.Structs happens to be active would
 	// be wrong the moment the constructor was declared in a different
-	// package's file than the call site.
+	// package's file than the call site. Also set for a SymField symbol,
+	// pointing at the struct that declares it - the LSP's own struct-field
+	// hover reads this to answer "which struct owns this field" and to
+	// recompute that struct's own layout without a separate lookup.
 	StructInfo *StructInfo
 
 	// Captured reports whether some function-literal expression (a FuncLit -

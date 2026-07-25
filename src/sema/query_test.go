@@ -97,6 +97,20 @@ func TestStructFieldsText_PlainStruct(t *testing.T) {
 	}
 }
 
+func TestFieldTypeText_PlainField(t *testing.T) {
+	tree, info := checkSrc(t, "struct Point {\n\tx int\n\ty int\n}\n"+
+		"func f() int {\n\tp := Point{1, 2}\n\treturn p.x\n}\n")
+	decl := tree.Children(tree.Root)[0]
+	fields := tree.StructFields(decl)
+
+	if got, want := FieldTypeText(tree, info, fields[0]), "int"; got != want {
+		t.Errorf("FieldTypeText(x) = %q, want %q", got, want)
+	}
+	if got, want := FieldTypeText(tree, info, fields[1]), "int"; got != want {
+		t.Errorf("FieldTypeText(y) = %q, want %q", got, want)
+	}
+}
+
 // TestFuncSignatureText_GenericMethod_ShowsInstantiatedTypes covers the
 // Type-first half of FuncSignatureText's own contract: an instantiated
 // generic method's own clone gets separately-checked Info.Types entries

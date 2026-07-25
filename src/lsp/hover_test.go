@@ -125,6 +125,86 @@ func f() int {
 	}
 }
 
+// TestHover_FieldShowsOwnSizeAlignOffsetWithPadding covers the CLion-style
+// per-field hover: a field's own type+name on one line, which struct it
+// belongs to, and its own Size (with any padding *after* it before the next
+// field starts)/Alignment/Offset - not the whole struct's totals, which
+// hovering the struct itself already shows.
+func TestHover_FieldShowsOwnSizeAlignOffsetWithPadding(t *testing.T) {
+	w, path := singleFileWorkspace(t, `struct Example {
+	flag bool
+	n int
+}
+
+func f() int {
+	e := Example{true, 1}
+	return e.n
+}
+`)
+	fa, _ := w.Analysis(path)
+	nameOffset := strings.Index(fa.Tree.File.Src, "flag bool")
+	pos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(nameOffset))
+
+	hover := w.Hover(path, pos)
+	if hover == nil {
+		t.Fatal("Hover returned nil")
+	}
+	content, ok := hover.Contents.(protocol.MarkupContent)
+	if !ok {
+		t.Fatalf("hover.Contents = %T, want protocol.MarkupContent", hover.Contents)
+	}
+	if !strings.Contains(content.Value, "field flag bool") {
+		t.Errorf("hover content = %q, want \"field flag bool\" on one line", content.Value)
+	}
+	if !strings.Contains(content.Value, "in struct `Example`") {
+		t.Errorf("hover content = %q, want it to say which struct flag belongs to", content.Value)
+	}
+	if !strings.Contains(content.Value, "Size: 1 (+ 3 padding)") {
+		t.Errorf("hover content = %q, want \"Size: 1 (+ 3 padding)\" - the 3 bytes before n", content.Value)
+	}
+	if !strings.Contains(content.Value, "Alignment: 1") {
+		t.Errorf("hover content = %q, want \"Alignment: 1\"", content.Value)
+	}
+	if !strings.Contains(content.Value, "Offset: 0") {
+		t.Errorf("hover content = %q, want \"Offset: 0\"", content.Value)
+	}
+}
+
+// TestHover_LastFieldShowsNoPaddingNote covers the other direction: a field
+// with nothing wasted after it (here, the struct's own last field, once
+// rounded-up total size leaves no tail padding) must render a bare "Size: N"
+// with no "(+ N padding)" note at all.
+func TestHover_LastFieldShowsNoPaddingNote(t *testing.T) {
+	w, path := singleFileWorkspace(t, `struct Pair {
+	a int
+	b int
+}
+
+func f() int {
+	p := Pair{1, 2}
+	return p.b
+}
+`)
+	fa, _ := w.Analysis(path)
+	nameOffset := strings.Index(fa.Tree.File.Src, "b int")
+	pos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(nameOffset))
+
+	hover := w.Hover(path, pos)
+	if hover == nil {
+		t.Fatal("Hover returned nil")
+	}
+	content, ok := hover.Contents.(protocol.MarkupContent)
+	if !ok {
+		t.Fatalf("hover.Contents = %T, want protocol.MarkupContent", hover.Contents)
+	}
+	if !strings.Contains(content.Value, "Size: 4\n") {
+		t.Errorf("hover content = %q, want a bare \"Size: 4\" with no padding note", content.Value)
+	}
+	if strings.Contains(content.Value, "padding") {
+		t.Errorf("hover content = %q, want no padding mentioned for a field with none after it", content.Value)
+	}
+}
+
 // TestHover_ConstructorDoesNotRepeatItsOwnKindWord covers a gap the one-line
 // header fix introduced: a constructor's own Symbol.Name already reads
 // "<Struct>.constructor(<arity>)" (see resolve.go's declareConstructor), so

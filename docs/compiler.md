@@ -18,7 +18,9 @@ signature or field list beside its name.
 
 Hovering a struct also shows its real in-memory layout: total size and
 alignment, each field's own byte offset, and how many bytes are spent on
-alignment padding rather than a field's own data.
+alignment padding rather than a field's own data. Hovering a single field
+instead shows which struct it belongs to and that one field's own
+size/alignment/offset, including any padding spent before the next field.
 
 Incremental parsing is not implemented yet - each edit re-analyzes the whole
 package.

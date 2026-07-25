@@ -54,3 +54,36 @@ func formatStructLayout(layout sema.StructLayout) string {
 	fmt.Fprintf(&b, "\nsize = %d, align = %d, padding = %d", layout.Size, layout.Align, layout.Padding)
 	return b.String()
 }
+
+// formatFieldLayout renders fieldName's own Size/Alignment/Offset from
+// layout - the CLion-style per-field companion to formatStructLayout, shown
+// when hovering a struct FIELD rather than the struct itself. Padding here
+// is only the gap between this field's own end and whatever comes right
+// after it (the next field's own offset, or the struct's own tail padding
+// for the last field) - not the whole struct's total, which
+// formatStructLayout already covers. ok is false if fieldName isn't one of
+// layout's own fields (shouldn't happen for a real *sema.Symbol of kind
+// SymField, but a caller shouldn't assume it can't).
+func formatFieldLayout(layout sema.StructLayout, fieldName string) (string, bool) {
+	for i, f := range layout.Fields {
+		if f.Name != fieldName {
+			continue
+		}
+		next := layout.Size
+		if i+1 < len(layout.Fields) {
+			next = layout.Fields[i+1].Offset
+		}
+		padding := next - (f.Offset + f.Size)
+
+		var b strings.Builder
+		if padding > 0 {
+			fmt.Fprintf(&b, "Size: %d (+ %d padding)\n", f.Size, padding)
+		} else {
+			fmt.Fprintf(&b, "Size: %d\n", f.Size)
+		}
+		fmt.Fprintf(&b, "Alignment: %d\n", f.Align)
+		fmt.Fprintf(&b, "Offset: %d", f.Offset)
+		return b.String(), true
+	}
+	return "", false
+}

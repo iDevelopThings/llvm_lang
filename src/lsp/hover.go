@@ -42,9 +42,17 @@ func (w *Workspace) Hover(path string, pos protocol.Position) *protocol.Hover {
 		// Go's that a Go grammar renders it reasonably, and Go highlighting
 		// is near-universally bundled.
 		lines = append(lines, fenceGo(hoverHeader(w.infoForTree(sym.Tree), sym)))
-		if sym.Kind == sema.SymStruct && sym.StructInfo != nil {
+		switch {
+		case sym.Kind == sema.SymStruct && sym.StructInfo != nil:
 			if layout, ok := sema.StructLayoutOf(sym.StructInfo, w.resolveStructFields); ok {
 				lines = append(lines, fenceGo(formatStructLayout(layout)))
+			}
+		case sym.Kind == sema.SymField && sym.StructInfo != nil:
+			lines = append(lines, fmt.Sprintf("in struct `%s`", sym.StructInfo.Symbol.Name))
+			if layout, ok := sema.StructLayoutOf(sym.StructInfo, w.resolveStructFields); ok {
+				if fieldText, ok := formatFieldLayout(layout, sym.Name); ok {
+					lines = append(lines, fenceGo(fieldText))
+				}
 			}
 		}
 	}

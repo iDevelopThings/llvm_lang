@@ -138,6 +138,43 @@ func main() int {
 	}
 }
 
+// TestGenerics_Hover_FieldOfInstantiationShowsSubstitutedTypeAndLayout covers
+// the struct-field hover feature (Size/Alignment/Offset, "in struct X") for
+// a field belonging to an INSTANTIATED generic struct - the field's own
+// Symbol.StructInfo must be the instantiation's own (Box[int]), not the
+// template's (Box[T]), and its layout must reflect the substituted concrete
+// type (int, size 4), not the template's unresolvable T.
+func TestGenerics_Hover_FieldOfInstantiationShowsSubstitutedTypeAndLayout(t *testing.T) {
+	src := `struct Box[T] {
+	value T
+}
+func f() int {
+	b := Box[int]{7}
+	return b.value
+}
+`
+	w, path := singleFileWorkspace(t, src)
+	fa, _ := w.Analysis(path)
+
+	offset := strings.LastIndex(fa.Tree.File.Src, "value")
+	pos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(offset))
+
+	hover := w.Hover(path, pos)
+	if hover == nil {
+		t.Fatal("Hover returned nil at a generic instantiation's own field-access site")
+	}
+	content := hover.Contents.(protocol.MarkupContent)
+	if !strings.Contains(content.Value, "field value int") {
+		t.Errorf("hover content = %q, want the substituted \"field value int\", not the template's own \"field value T\"", content.Value)
+	}
+	if !strings.Contains(content.Value, "in struct `Box[int]`") {
+		t.Errorf("hover content = %q, want it to name the instantiation \"Box[int]\", not the template \"Box[T]\"", content.Value)
+	}
+	if !strings.Contains(content.Value, "Size: 4\n") || !strings.Contains(content.Value, "Offset: 0") {
+		t.Errorf("hover content = %q, want the substituted int's own Size: 4/Offset: 0", content.Value)
+	}
+}
+
 // TestGenerics_Completion_IdentifierInsideTemplateBodySeesParams is the
 // Completion-level regression test for the same tooling-pass fix: before
 // it, identifier completion inside a generic body only ever saw

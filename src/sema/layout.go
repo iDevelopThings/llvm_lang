@@ -19,12 +19,15 @@ type FieldSpec struct {
 type ResolveStructFields func(si *StructInfo) (fields []FieldSpec, ok bool)
 
 // FieldLayout is one field's placement within its own struct's real memory
-// layout - StructLayout's own doc comment.
+// layout - StructLayout's own doc comment. Align is this field's own type's
+// alignment, which can differ from the struct's overall Align (its widest
+// field) - the LSP's per-field hover shows this one, not the struct's.
 type FieldLayout struct {
 	Name   string
 	Type   Type
 	Offset uint64
 	Size   uint64
+	Align  uint64
 }
 
 // StructLayout is a struct's real, natural-alignment memory layout: total
@@ -140,7 +143,7 @@ func structLayoutOf(si *StructInfo, resolve ResolveStructFields, visiting map[*S
 		}
 		align = max(align, fAlign)
 		offset := roundUpToAlign(size, fAlign)
-		out[i] = FieldLayout{Name: f.Name, Type: f.Type, Offset: offset, Size: fSize}
+		out[i] = FieldLayout{Name: f.Name, Type: f.Type, Offset: offset, Size: fSize, Align: fAlign}
 		size = offset + fSize
 		dataBytes += fSize
 	}

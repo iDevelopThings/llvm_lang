@@ -414,12 +414,13 @@ func (r *resolver) declareStructMembers(info *StructInfo, decl ast.NodeIndex) {
 		fieldNameNode := r.tree.Child(field, 0)
 		fieldName := r.tree.Text(fieldNameNode)
 		fieldSym := &Symbol{
-			Name:     fieldName,
-			Kind:     SymField,
-			Decl:     field,
-			Tree:     r.tree,
-			Scope:    sym.Scope,
-			Exported: isExportedName(fieldName),
+			Name:       fieldName,
+			Kind:       SymField,
+			Decl:       field,
+			Tree:       r.tree,
+			Scope:      sym.Scope,
+			Exported:   isExportedName(fieldName),
+			StructInfo: info,
 		}
 		if _, exists := info.Fields[fieldName]; exists {
 			r.errorAt(field, "field %s redeclared in struct %s", fieldName, sym.Name)
