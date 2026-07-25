@@ -2644,6 +2644,26 @@ effect (e.g. guard a window-creation call with the library's own
 Confirmed by `TestBinary_Watch_TickExit`, `TestBinary_Watch_Reload`, and
 `TestBinary_Watch_LastGoodOnError`.
 
+## `-test`: in-language test runner
+
+`llvmc -test …` discovers free functions in the **entry package** whose
+names match Go's `TestXxx` convention (uppercase after `Test`) and whose
+signature is exactly `func TestXxx(t *test.Runner)` (void, non-generic,
+non-method). It overlays a synthesized `__llvmc_test_main.llx` driver
+(afero copy-on-write — the user's tree is never written) that imports
+`std/test`, calls each discovered test, prints `--- PASS`/`--- FAIL`, and
+returns `0`/`1`. Then the ordinary compile/JIT (or `-o` / `-emit-llvm`)
+path runs.
+
+Mutually exclusive with `-watch`. Composes with `-o` and `-emit-llvm`.
+Zero matching tests is a usage error (exit 2). An entry package that
+already declares `main` collides with the driver (ordinary redeclaration
+diagnostic). Assert failures soft-fail on `Runner`; a hard `llvm.trap` in
+code under test still aborts the whole process.
+
+Confirmed by `TestBinary_TestMode_DemoFails`, `TestBinary_TestMode_AllPass`,
+and `TestBinary_TestMode_AOT`.
+
 ## Source file extension: `.llx`
 
 This project's source files use the extension `.llx`, not `.ll` - `.ll` is

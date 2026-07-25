@@ -1,0 +1,35 @@
+import "../../../../../std/test"
+
+struct Point {
+    x int
+    y int
+}
+
+func TestSliceEqualPass(t *test.Runner) {
+    t.AssertSliceEqual([]int{1, 2, 3}, []int{1, 2, 3}, "equal slices should pass")
+}
+
+func TestSliceEqualEmptyBothPass(t *test.Runner) {
+    a := make([]int, 0)
+    b := make([]int, 0)
+    t.AssertSliceEqual(a, b, "two empty slices should pass")
+}
+
+// Deliberately fails - proves AssertSliceEqual's length-mismatch branch
+// actually detects a real difference, not just always passing.
+func TestSliceEqualLengthMismatchFails(t *test.Runner) {
+    t.AssertSliceEqual([]int{1, 2, 3}, []int{1, 2}, "length mismatch should fail")
+}
+
+// Deliberately fails - proves the element-mismatch branch too, same reason.
+func TestSliceEqualContentMismatchFails(t *test.Runner) {
+    t.AssertSliceEqual([]int{1, 2, 3}, []int{1, 2, 4}, "content mismatch should fail")
+}
+
+func TestNilPointerStruct(t *test.Runner) {
+    var p *Point = nil
+    t.AssertNil(p, "nil struct pointer")
+    x := Point{1, 2}
+    p = &x
+    t.AssertNotNil(p, "address of local struct")
+}

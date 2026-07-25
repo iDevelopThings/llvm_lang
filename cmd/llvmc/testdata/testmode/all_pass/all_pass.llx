@@ -1,0 +1,11 @@
+import "../../../../../std/test"
+
+func add(a int, b int) int {
+    return a + b
+}
+
+func TestOne(t *test.Runner) {
+    t.AssertEqual(add(1, 1), 2, "1+1")
+    t.AssertNotEqual(add(1, 1), 3, "not 3")
+    t.AssertApprox(2.0, 2.0, 0.001, "exact")
+}

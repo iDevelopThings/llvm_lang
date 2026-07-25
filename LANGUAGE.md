@@ -2563,6 +2563,12 @@ import "../../std/collections"
   `examples/generics/generics.llx` first proved out; that example is left
   untouched, this is an additive package on top of it (same reasoning
   `std/time`'s own entry above gives for `examples/scope_timer`).
+- **`std/test`** - soft-fail test helpers for `llvmc -test`: `Runner`,
+  `NewRunner`, `Assert` / `AssertFalse` / `AssertEqual[T]` /
+  `AssertNotEqual[T]` / `AssertNil[T]` / `AssertNotNil[T]` /
+  `AssertSliceEqual[T]` / `AssertApprox`. Discovery looks for
+  `func TestXxx(t *test.Runner)` in the entry package (see CODEGEN.md's
+  `-test` section). No auto-formatting of values into messages.
 
 **Deliberately deferred, not built this round:** Unicode-aware string
 handling (everything above is ASCII-only, matching this language having no
