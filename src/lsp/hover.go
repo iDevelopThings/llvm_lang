@@ -27,11 +27,19 @@ func (w *Workspace) Hover(path string, pos protocol.Position) *protocol.Hover {
 		sym = s
 		lines = append(lines, fmt.Sprintf("**%s** `%s`", sym.Kind, sym.Name))
 		if detail := symbolDetail(w.infoForTree(sym.Tree), sym); detail != "" {
-			lines = append(lines, fmt.Sprintf("`%s`", detail))
+			// Fenced, not inline backticks: most markdown-hover clients
+			// (this project's own LSP4IJ template included) only apply
+			// per-token syntax highlighting inside a fenced block, never a
+			// single-line inline code span. Tagged "go" rather than this
+			// project's own "llx" language ID - no client bundles a
+			// grammar for a hobby language's own ID, but this language's
+			// syntax is close enough to Go's that a Go grammar renders it
+			// reasonably, and Go highlighting is near-universally bundled.
+			lines = append(lines, fenceGo(detail))
 		}
 	}
 	if typ, ok := fa.Info.Types[n]; ok && !typ.IsInvalid() {
-		lines = append(lines, fmt.Sprintf("type: `%s`", typ.String()))
+		lines = append(lines, "type:\n"+fenceGo(typ.String()))
 	}
 	if sym != nil && sym.Tree != nil && sym.Decl != ast.InvalidNode {
 		if doc := sym.Tree.DocComment(sym.Decl); doc != "" {
@@ -50,4 +58,10 @@ func (w *Workspace) Hover(path string, pos protocol.Position) *protocol.Hover {
 		},
 		Range: &rng,
 	}
+}
+
+// fenceGo wraps code in a "go"-tagged fenced markdown block - see this
+// function's own call sites for why "go" specifically.
+func fenceGo(code string) string {
+	return "```go\n" + code + "\n```"
 }

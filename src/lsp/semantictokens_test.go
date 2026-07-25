@@ -55,6 +55,39 @@ func main() int {
 	}
 }
 
+// TestSemanticTokens_NilGetsKeywordClassification is the regression case
+// for a real reported bug: nil isn't a lexer keyword like true/false (see
+// scope.go's own universe-scope doc comment - it's a predeclared identifier
+// resolved via scope, SymBuiltinValue), so it fell all the way through
+// classifyIdentToken's default case and rendered as a plain variable
+// instead of reading like the literal it is.
+func TestSemanticTokens_NilGetsKeywordClassification(t *testing.T) {
+	src := `struct Point {
+	x int
+}
+
+func f() int {
+	var p *Point = nil
+	if p == nil {
+		return 0
+	}
+	return 1
+}
+`
+	w, path := singleFileWorkspace(t, src)
+	fa, _ := w.Analysis(path)
+
+	offset := strings.Index(src, "= nil") + len("= ")
+	tok, ok := semanticTokenAt(fa, lexer.Pos(offset))
+	if !ok {
+		t.Fatal("no semantic token emitted for nil")
+	}
+	if tok.typeIdx != semTokKeyword {
+		t.Errorf("token type = %d, want semTokKeyword (%d) - nil fell back to the plain-variable classification",
+			tok.typeIdx, semTokKeyword)
+	}
+}
+
 // TestSemanticTokens_UnresolvedIdentifierGetsReadonlyFallback is the
 // regression case for a real reported bug: an unresolved identifier (here,
 // simulated the same way TestSemanticTokens_UncapturedKeywords already does

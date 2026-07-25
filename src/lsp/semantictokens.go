@@ -305,7 +305,12 @@ func classifyIdentToken(info *sema.Info, n ast.NodeIndex, reassigned map[*sema.S
 		return semTokMethod, 0, true
 	case sema.SymParam:
 		return semTokParameter, variableModifiers(sym, reassigned), true
-	default: // SymVar, SymReceiver, SymBuiltinValue
+	case sema.SymBuiltinValue:
+		// nil - a predeclared identifier, not a lexer keyword like true/false
+		// (see scope.go's own universe-scope doc comment), but it should read
+		// the same way: a fixed literal, not a plain variable.
+		return semTokKeyword, 0, true
+	default: // SymVar, SymReceiver
 		return semTokVariable, variableModifiers(sym, reassigned), true
 	}
 }
