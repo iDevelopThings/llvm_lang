@@ -12,6 +12,8 @@
 //   -1                   IndexOf(nums, 99)
 //   [2 4 6 8 10]         Map(nums, double) - named function
 //   [1 4 9 16 25]        Map(nums, lambda x*x)
+//   [1.000000 2.000000 3.000000 4.000000 5.000000]
+//                        Map[int, f64](nums, toFloat) - T and U genuinely differ
 //   [2 4]                Filter(nums, lambda x%2==0)
 //   15                   Reduce(nums, 0, lambda sum)
 //   [5 4 3 2 1]          Reverse(nums), then print(nums)
@@ -32,6 +34,13 @@ func double(x int) int {
     return x * 2
 }
 
+// toFloat is Map's own T!=U case: instantiating Map[int, f64] rather than
+// Map[int, int], proving the result slice's element width/type genuinely
+// differs from the source's, not just its values.
+func toFloat(x int) f64 {
+    return f64(x)
+}
+
 func main() int {
     nums := []int{1, 2, 3, 4, 5}
 
@@ -47,6 +56,9 @@ func main() int {
         return x * x
     })                                        // lambda
     print(squared)                            // [1 4 9 16 25]
+
+    floats := slices.Map(nums, toFloat)   // Map[int, f64] - T != U
+    print(floats)                            // [1.000000 2.000000 3.000000 4.000000 5.000000]
 
     evens := slices.Filter(nums, func(x int) bool {
         return x % 2 == 0

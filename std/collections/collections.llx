@@ -67,9 +67,9 @@ func (SlotMap[T]) Valid(h Handle) bool {
     return this.generations[h.Index] == h.Generation
 }
 
-// Get returns the value h refers to. See Valid's doc comment for the one
-// case this doesn't itself guard against: a stale Handle for a slot that's
-// been Removed and reused reads back the new occupant's value, not an error.
+// Get returns the value h refers to - it doesn't itself call Valid, so a
+// stale h silently reads back whatever now occupies that slot (see Valid's
+// own doc comment).
 func (SlotMap[T]) Get(h Handle) T {
     return this.items[h.Index]
 }

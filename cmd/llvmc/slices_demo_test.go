@@ -16,6 +16,7 @@ const slicesDemoExampleWant = "true\n" +
 	"-1\n" +
 	"[2 4 6 8 10]\n" +
 	"[1 4 9 16 25]\n" +
+	"[1.000000 2.000000 3.000000 4.000000 5.000000]\n" +
 	"[2 4]\n" +
 	"15\n" +
 	"[5 4 3 2 1]\n" +
@@ -30,7 +31,8 @@ const slicesDemoExampleWant = "true\n" +
 // TestBinary_SlicesDemoExample runs examples/slices_demo through the real
 // llvmc binary (JIT) - what actually exercises std/slices's generic
 // algorithms (Contains/IndexOf/Reverse/Map/Filter/Reduce), including Map
-// called with both a named function and a lambda as its callback argument.
+// called with a named function, a lambda, and (Map[int, f64]) a genuinely
+// different result element type.
 func TestBinary_SlicesDemoExample(t *testing.T) {
 	cmd := exec.Command(llvmcPath, "../../examples/slices_demo/slices_demo.llx")
 	out, err := cmd.Output()

@@ -2510,8 +2510,9 @@ import "../../std/collections"
   (`Sqrt`, `Pow`, `Floor`, `Ceil`, `Fabs`, all `f64`-in/`f64`-out, bound via
   `extern func` - see "External functions (FFI)" above), plus three generic
   (see "Generics" above) pure-`.llx` helpers needing no libc call at all:
-  `Abs[T]`, `Min[T]`, `Max[T]` (comparison-based, instantiated in this
-  project's own examples at both `int` and `f64`). Named "mathutil", not
+  `Abs[T]`, `Min[T]`, `Max[T]` (comparison-based; `Min`/`Max` are exercised
+  at both `int` and `f64` in this project's own examples, `Abs` at `int`
+  only so far). Named "mathutil", not
   "mathutils", to read distinctly from `examples/imports`'s own unrelated
   same-named demo fixture - not that a real collision was ever possible,
   since imports here resolve by relative path, not a global package
@@ -2557,10 +2558,8 @@ import "../../std/collections"
   instantiates with a comparable type.
 - **`std/collections`** - `SlotMap[T]`, a generational-handle container:
   `Insert(v T) Handle`, `Get(h Handle) T`, `Remove(h Handle)`,
-  `Valid(h Handle) bool`. A `Handle{Index, Generation}` outlives its own
-  slot's reuse safely - `Remove` bumps that slot's generation, so a `Handle`
-  issued before the removal reads back as invalid (`Valid` false) even after
-  a later `Insert` reuses the same index. Promoted from the same shape
+  `Valid(h Handle) bool` (see the package's own doc comment for the
+  generational-handle mechanism itself). Promoted from the same shape
   `examples/generics/generics.llx` first proved out; that example is left
   untouched, this is an additive package on top of it (same reasoning
   `std/time`'s own entry above gives for `examples/scope_timer`).
