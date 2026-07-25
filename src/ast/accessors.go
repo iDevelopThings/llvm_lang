@@ -67,6 +67,22 @@ func (t *Tree) StructFields(decl NodeIndex) []NodeIndex {
 	return fields
 }
 
+// StructFieldNodes yields decl's own fields' (nameNode, typeNode) pairs, in
+// declaration order - the "a Field's child 0 is its name, child 1 is its
+// type" convention in one place, shared by every caller that only needs to
+// walk that shape forward (StructFieldsText's own rendering, codegen's
+// defineStructBody, the LSP's own struct-layout hover) rather than
+// StructFields' indexed/random access.
+func (t *Tree) StructFieldNodes(decl NodeIndex) iter.Seq2[NodeIndex, NodeIndex] {
+	return func(yield func(NodeIndex, NodeIndex) bool) {
+		for _, f := range t.StructFields(decl) {
+			if !yield(t.Child(f, 0), t.Child(f, 1)) {
+				return
+			}
+		}
+	}
+}
+
 // StructConstructors yields decl's (a StructDecl's) ConstructorDecl children,
 // in declaration order - the constructor-kind counterpart to StructFields
 // (see LANGUAGE.md's "Constructors" section). iter.Seq, not a plain slice:

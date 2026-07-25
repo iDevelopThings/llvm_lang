@@ -37,6 +37,11 @@ func (w *Workspace) Hover(path string, pos protocol.Position) *protocol.Hover {
 			// reasonably, and Go highlighting is near-universally bundled.
 			lines = append(lines, fenceGo(detail))
 		}
+		if sym.Kind == sema.SymStruct && sym.StructInfo != nil {
+			if layout, ok := sema.StructLayoutOf(sym.StructInfo, w.resolveStructFields); ok {
+				lines = append(lines, fenceGo(formatStructLayout(layout)))
+			}
+		}
 	}
 	if typ, ok := fa.Info.Types[n]; ok && !typ.IsInvalid() {
 		lines = append(lines, "type:\n"+fenceGo(typ.String()))

@@ -884,14 +884,14 @@ func (g *Generator) defineStructBody(decl ast.NodeIndex) {
 	fieldNodes := g.tree.StructFields(decl)
 	fieldTypes := make([]llvm.Type, len(fieldNodes))
 	fieldSemaTypes := make([]sema.Type, len(fieldNodes))
-	for i, fieldNode := range fieldNodes {
-		fieldNameNode := g.tree.Child(fieldNode, 0)
-		fieldTypeNode := g.tree.Child(fieldNode, 1)
+	i := 0
+	for fieldNameNode, fieldTypeNode := range g.tree.StructFieldNodes(decl) {
 		sym := g.info.Refs[fieldNameNode]
 
 		fieldSemaTypes[i] = g.info.Types[fieldTypeNode]
 		fieldTypes[i] = g.llvmType(fieldSemaTypes[i])
 		layout.fieldIndex[sym] = i
+		i++
 	}
 	layout.fieldTypes = fieldTypes
 	layout.fieldSemaTypes = fieldSemaTypes

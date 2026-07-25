@@ -26,43 +26,33 @@ import (
 // abiSizeAlign computes t's real C-ABI byte size/alignment - the
 // classification externParamType/externReturnType need (Windows x64: a
 // struct/union of size 1, 2, 4, or 8 bytes is passed/returned as an integer
-// of that size; anything else goes by reference). Computed directly from
-// field types rather than via LLVM's own TargetData, since codegen runs
-// before the module's DataLayout is pinned (see compiler.finishPipeline) -
-// mirrors the natural-alignment layout StructSetBody(fieldTypes, false)
-// will later produce under that same DataLayout, for this project's one
-// supported target (x86-64 - see DECISIONS.md). Only ever called on a type
-// sema's isFFISafeType/isFFISafeStructField already accepted, so every
-// TypeKind reachable here has a well-defined size.
+// of that size; anything else goes by reference). Delegates to
+// sema.SizeAlign (see its own doc comment for why this is hand-written math
+// rather than an LLVM TargetData query) - only ever called on a type sema's
+// isFFISafeType/isFFISafeStructField already accepted, so every TypeKind
+// reachable here has a well-defined size.
 func (g *Generator) abiSizeAlign(t sema.Type) (size, align uint64) {
-	switch t.Kind {
-	case sema.TypeI8, sema.TypeU8, sema.TypeBool:
-		return 1, 1
-	case sema.TypeI16, sema.TypeU16:
-		return 2, 2
-	case sema.TypeI32, sema.TypeU32, sema.TypeF32:
-		return 4, 4
-	case sema.TypeI64, sema.TypeU64, sema.TypeF64, sema.TypePointer, sema.TypeCString, sema.TypeCFunc:
-		// cfunc lowers to a bare function pointer - same size/align as ptr.
-		return 8, 8
-	case sema.TypeArray:
-		elemSize, elemAlign := g.abiSizeAlign(*t.Elem)
-		return roundUpToAlign(elemSize, elemAlign) * uint64(t.Size), elemAlign
-	case sema.TypeStruct:
-		var size, align uint64 = 0, 1
-		for _, ft := range g.structLayouts[t.Struct].fieldSemaTypes {
-			fSize, fAlign := g.abiSizeAlign(ft)
-			align = max(align, fAlign)
-			size = roundUpToAlign(size, fAlign) + fSize
-		}
-		return roundUpToAlign(size, align), align
-	default:
+	size, align, ok := sema.SizeAlign(t, g.resolveStructFields)
+	if !ok {
 		panic(fmt.Sprintf("codegen: abiSizeAlign called on non-FFI-safe type %s", t))
 	}
+	return size, align
 }
 
-func roundUpToAlign(n, align uint64) uint64 {
-	return (n + align - 1) / align * align
+// resolveStructFields answers sema.ResolveStructFields from codegen's own
+// already-built structLayouts (see defineStructBody) - field names come from
+// fieldIndex's inverse (fieldSemaTypes itself carries no names, just each
+// field's own checked Type in declaration order).
+func (g *Generator) resolveStructFields(si *sema.StructInfo) ([]sema.FieldSpec, bool) {
+	layout, ok := g.structLayouts[si]
+	if !ok {
+		return nil, false
+	}
+	fields := make([]sema.FieldSpec, len(layout.fieldSemaTypes))
+	for sym, idx := range layout.fieldIndex {
+		fields[idx] = sema.FieldSpec{Name: sym.Name, Type: layout.fieldSemaTypes[idx]}
+	}
+	return fields, true
 }
 
 // coercedIntType returns the LLVM integer type the Windows x64 ABI coerces

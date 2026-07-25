@@ -38,8 +38,8 @@ func (t *Tree) FuncSignatureText(decl NodeIndex, renderType func(NodeIndex) stri
 // compact "{ name Type, ... }" summary - see FuncSignatureText for renderType.
 func (t *Tree) StructFieldsText(decl NodeIndex, renderType func(NodeIndex) string) string {
 	var fields []string
-	for _, f := range t.StructFields(decl) {
-		fields = append(fields, t.Text(t.Child(f, 0))+" "+renderTypeNode(t.Child(f, 1), renderType))
+	for nameNode, typeNode := range t.StructFieldNodes(decl) {
+		fields = append(fields, t.Text(nameNode)+" "+renderTypeNode(typeNode, renderType))
 	}
 	return "{ " + strings.Join(fields, ", ") + " }"
 }

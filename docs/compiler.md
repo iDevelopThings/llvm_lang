@@ -16,6 +16,10 @@ references and occurrence highlighting on `Sum[T]`'s declaration find every
 `Sum(...)` call, and vice versa. The outline shows each declaration's own
 signature or field list beside its name.
 
+Hovering a struct also shows its real in-memory layout: total size and
+alignment, each field's own byte offset, and how many bytes are spent on
+alignment padding rather than a field's own data.
+
 Incremental parsing is not implemented yet - each edit re-analyzes the whole
 package.
 
