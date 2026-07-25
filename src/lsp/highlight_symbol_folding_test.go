@@ -90,6 +90,38 @@ func TestDocumentHighlight_ReadWrite(t *testing.T) {
 	}
 }
 
+// TestDocumentHighlight_GenericFunc_NoDuplicatesAcrossInstantiations is the
+// DocumentHighlight-side regression test for the same reported bug as
+// references_test.go's identically-shaped ones: a monomorphized generic's
+// own instantiations each carry a clone of its body, and DocumentHighlight
+// iterated Info.Refs directly - counter showed one duplicate highlight
+// range per instantiation of Bump, on top of its real occurrences.
+func TestDocumentHighlight_GenericFunc_NoDuplicatesAcrossInstantiations(t *testing.T) {
+	w, path := singleFileWorkspace(t, genericRefsFixture)
+	fa, _ := w.Analysis(path)
+
+	declOffset := strings.Index(fa.Tree.File.Src, "counter int")
+	pos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(declOffset))
+
+	highlights := w.DocumentHighlight(path, pos)
+	if len(highlights) != 4 {
+		t.Fatalf("len(highlights) = %d, want 4 (declaration, Bump's own target+read, main's return - no clone duplicates): %+v", len(highlights), highlights)
+	}
+
+	writes, reads := 0, 0
+	for _, h := range highlights {
+		switch *h.Kind {
+		case protocol.DocumentHighlightKindWrite:
+			writes++
+		case protocol.DocumentHighlightKindRead:
+			reads++
+		}
+	}
+	if writes != 2 || reads != 2 {
+		t.Errorf("writes=%d reads=%d, want writes=2 (decl + Bump's own assignment target) reads=2", writes, reads)
+	}
+}
+
 func TestFoldingRanges(t *testing.T) {
 	w, path, _ := appAnalysis(t)
 

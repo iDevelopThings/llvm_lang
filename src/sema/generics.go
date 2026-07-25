@@ -9,6 +9,7 @@ package sema
 
 import (
 	"fmt"
+	"iter"
 	"slices"
 	"strings"
 
@@ -240,6 +241,28 @@ func typeParamScope(parent *Scope, names []string, args []Type) *Scope {
 	return scope
 }
 
+// Instances yields every already-created specialization's own Symbol - the
+// func/method Symbol a call site's callee resolved to, or the struct
+// Symbol a `Name[args]` type position resolved to (see genericInstance) -
+// letting a consumer (Workspace.References) treat every instantiation of
+// one generic as the same logical symbol as the template itself.
+func (gi *GenericInfo) Instances() iter.Seq[*Symbol] {
+	return func(yield func(*Symbol) bool) {
+		for _, inst := range gi.instances {
+			sym := inst.sym
+			if sym == nil && inst.structInfo != nil {
+				sym = inst.structInfo.Symbol
+			}
+			if sym == nil {
+				continue
+			}
+			if !yield(sym) {
+				return
+			}
+		}
+	}
+}
+
 // instanceKey is a template's mangled specialization name - "SlotMap[int]",
 // "Pair[int,string]" - and doubles as its instance-cache key. Type.String()
 // alone isn't guaranteed injective (two same-named structs in different
@@ -407,12 +430,13 @@ func (c *checker) instantiateFunc(gi *GenericInfo, args []Type, at ast.NodeIndex
 
 	clone := tree.CloneSubtree(gi.Decl)
 	sym := &Symbol{
-		Name:     key,
-		Kind:     SymFunc,
-		Decl:     clone,
-		Tree:     tree,
-		Scope:    gi.Symbol.Scope,
-		Exported: gi.Symbol.Exported,
+		Name:            key,
+		Kind:            SymFunc,
+		Decl:            clone,
+		Tree:            tree,
+		Scope:           gi.Symbol.Scope,
+		Exported:        gi.Symbol.Exported,
+		GenericTemplate: gi.Symbol,
 	}
 	info.Refs[tree.FuncName(clone)] = sym
 	if gi.OwnerSym != nil {
@@ -469,13 +493,14 @@ func (c *checker) instantiateStruct(gi *GenericInfo, args []Type, at ast.NodeInd
 		TypeArgs:     args,
 	}
 	si.Symbol = &Symbol{
-		Name:       key,
-		Kind:       SymStruct,
-		Decl:       clone,
-		Tree:       tree,
-		Scope:      gi.Symbol.Scope,
-		Exported:   gi.Symbol.Exported,
-		StructInfo: si,
+		Name:            key,
+		Kind:            SymStruct,
+		Decl:            clone,
+		Tree:            tree,
+		Scope:           gi.Symbol.Scope,
+		Exported:        gi.Symbol.Exported,
+		StructInfo:      si,
+		GenericTemplate: gi.Symbol,
 	}
 	info.Structs[key] = si
 	info.Refs[tree.StructName(clone)] = si.Symbol

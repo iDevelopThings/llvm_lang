@@ -352,6 +352,16 @@ type Symbol struct {
 	// generics.go). nil for every ordinary symbol.
 	Generic *GenericInfo
 
+	// GenericTemplate is set only on a specialization's own Symbol (built by
+	// instantiateFunc/instantiateStruct, generics.go) - the template's own
+	// declaring Symbol (the one Generic above is set on) it was instantiated
+	// from. Lets a consumer that only has one call site's specialized
+	// Symbol in hand (e.g. Workspace.References) still find its way back to
+	// the template, and from there to every other instantiation
+	// (GenericInfo.Instances), without a separate name-based lookup. nil
+	// for every ordinary symbol, including the template itself.
+	GenericTemplate *Symbol
+
 	// TypeParamBound is set only for a SymTypeParam symbol - the concrete type
 	// that type parameter is bound to inside one specialization. There is no
 	// unbound form: a type parameter only ever becomes a real Symbol at

@@ -52,7 +52,12 @@ func analyzeProgram(prog *loader.Program, generation int) map[string]*FileAnalys
 	out := make(map[string]*FileAnalysis, len(fe.Trees))
 	for _, tree := range fe.Trees {
 		info := fe.Infos[tree]
-		resolveGenericTemplatesForTooling(tree, info)
+		// A generic declaration's own body is never resolved by the real
+		// pipeline (only each instantiation is) - see
+		// sema.ResolveTemplatesForTooling's own doc comment - which
+		// otherwise leaves every hover/completion/semantic-highlighting
+		// query inside one with nothing to read.
+		sema.ResolveTemplatesForTooling(tree, info)
 		out[tree.File.Name] = &FileAnalysis{
 			Tree:       tree,
 			Info:       info,
@@ -61,35 +66,4 @@ func analyzeProgram(prog *loader.Program, generation int) map[string]*FileAnalys
 		}
 	}
 	return out
-}
-
-// resolveGenericTemplatesForTooling enriches info in place with real
-// Refs/Scopes entries for every one of tree's own generic declarations
-// (struct/func templates - see sema.Info.IsGenericTemplate) - source the
-// real compile pipeline deliberately never resolves as written (only each
-// concrete instantiation is), which otherwise leaves every hover/
-// completion/semantic-highlighting query inside a generic declaration's
-// own body with nothing to read (see sema.ResolveTemplateForTooling's own
-// doc comment for why this is safe: Resolve-only, never touches real
-// shared state). Merged directly into info's own maps rather than kept as
-// a separate overlay - every existing Info.Refs[n]/Info.Scopes[n] read
-// site picks this up for free, with zero key collisions possible (a real
-// resolve/check pass never writes an entry for a template's own nodes in
-// the first place).
-func resolveGenericTemplatesForTooling(tree *ast.Tree, info *sema.Info) {
-	if info == nil {
-		return
-	}
-	for _, decl := range tree.Children(tree.Root) {
-		shadow := sema.ResolveTemplateForTooling(tree, info, decl)
-		if shadow == nil {
-			continue
-		}
-		for n, sym := range shadow.Refs {
-			info.Refs[n] = sym
-		}
-		for n, scope := range shadow.Scopes {
-			info.Scopes[n] = scope
-		}
-	}
 }

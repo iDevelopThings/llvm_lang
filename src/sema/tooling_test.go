@@ -1,30 +1,6 @@
 package sema
 
-import (
-	"testing"
-
-	"llvm_lang/src/ast"
-	"llvm_lang/src/enums"
-)
-
-// findIdentByText depth-first searches from n for the first Ident node whose
-// own text is exactly text - a test-only convenience for locating a
-// specific occurrence inside a real parsed tree without hand-indexing
-// Child() calls.
-func findIdentByText(tree *ast.Tree, n ast.NodeIndex, text string) ast.NodeIndex {
-	if n == ast.InvalidNode {
-		return ast.InvalidNode
-	}
-	if tree.Nodes[n].Kind == enums.NodeKinds.Ident && tree.Text(n) == text {
-		return n
-	}
-	for _, c := range tree.Children(n) {
-		if found := findIdentByText(tree, c, text); found != ast.InvalidNode {
-			return found
-		}
-	}
-	return ast.InvalidNode
-}
+import "testing"
 
 func TestResolveTemplateForTooling_GenericFunc_NeverInstantiated(t *testing.T) {
 	tree, info := checkSrc(t, "func Sum[T](a T, b T) T {\n\treturn a + b\n}\n")
@@ -35,7 +11,7 @@ func TestResolveTemplateForTooling_GenericFunc_NeverInstantiated(t *testing.T) {
 		t.Fatal("ResolveTemplateForTooling returned nil for a real generic template")
 	}
 
-	bodyA := findIdentByText(tree, decl, "a")
+	bodyA := tree.FindIdentByText(decl, "a")
 	sym, ok := shadow.Refs[bodyA]
 	if !ok || sym == nil {
 		t.Fatalf("body identifier 'a' has no Refs entry in the tooling Info")
@@ -61,7 +37,7 @@ func TestResolveTemplateForTooling_GenericStruct_FieldsAndMethod(t *testing.T) {
 	if shadowStruct == nil {
 		t.Fatal("ResolveTemplateForTooling returned nil for the struct template")
 	}
-	fieldName := findIdentByText(tree, structDecl, "value")
+	fieldName := tree.FindIdentByText(structDecl, "value")
 	sym, ok := shadowStruct.Refs[fieldName]
 	if !ok || sym == nil || sym.Kind != SymField {
 		t.Fatalf("struct field 'value' Refs = %+v (ok=%v), want a SymField", sym, ok)
@@ -71,13 +47,11 @@ func TestResolveTemplateForTooling_GenericStruct_FieldsAndMethod(t *testing.T) {
 	if shadowMethod == nil {
 		t.Fatal("ResolveTemplateForTooling returned nil for the method template")
 	}
-	thisRef := findIdentByText(tree, methodDecl, "this")
 	// "this" isn't a plain Ident node (see LANGUAGE.md) - assert the method
 	// body resolved at all instead by checking its own Scope was recorded.
 	if _, ok := shadowMethod.Scopes[methodDecl]; !ok {
 		t.Error("method template got no Scopes entry - resolveFuncBody did not run")
 	}
-	_ = thisRef
 }
 
 func TestResolveTemplateForTooling_NonGenericDeclReturnsNil(t *testing.T) {

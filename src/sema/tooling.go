@@ -23,6 +23,33 @@ import (
 // parameter is never actually dereferenced: Resolve (unlike Check's
 // typeFromNode) never reads Symbol.TypeParamBound, so a zero Type is fine.
 //
+// ResolveTemplatesForTooling enriches info in place with real Refs/Scopes
+// entries for every one of tree's own top-level generic declarations - see
+// ResolveTemplateForTooling for what/why. Safe to call unconditionally; a
+// tree with no generic declarations at all does nothing. Merged directly
+// into info's own maps rather than kept as a separate overlay - every
+// existing Info.Refs[n]/Info.Scopes[n] read site (a checker, an LSP
+// feature) picks this up for free, with zero key-collision risk (a real
+// resolve/check pass never writes an entry for a template's own nodes in
+// the first place).
+func ResolveTemplatesForTooling(tree *ast.Tree, info *Info) {
+	if info == nil {
+		return
+	}
+	for _, decl := range tree.Children(tree.Root) {
+		shadow := ResolveTemplateForTooling(tree, info, decl)
+		if shadow == nil {
+			continue
+		}
+		for n, sym := range shadow.Refs {
+			info.Refs[n] = sym
+		}
+		for n, scope := range shadow.Scopes {
+			info.Scopes[n] = scope
+		}
+	}
+}
+
 // nil if decl isn't a generic template at all - nothing to resolve.
 func ResolveTemplateForTooling(tree *ast.Tree, real *Info, decl ast.NodeIndex) *Info {
 	if !real.IsGenericTemplate(tree, decl) {

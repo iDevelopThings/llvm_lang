@@ -68,10 +68,10 @@ func main() int {
 // is) had no Info.Refs entries at all, which made every identifier inside
 // it fall back to a plain "variable" semantic-token classification (see
 // semantictokens_test.go's own regression test for the visible symptom this
-// caused). resolveGenericTemplatesForTooling must enrich Info in place so
-// ordinary Info.Refs[n] lookups - the same ones hover/completion/semantic-
-// tokens already use - see real data here too, even for a generic never
-// instantiated anywhere in this program.
+// caused). sema.ResolveTemplatesForTooling (called from analyzeProgram)
+// must enrich Info in place so ordinary Info.Refs[n] lookups - the same
+// ones hover/completion/semantic-tokens already use - see real data here
+// too, even for a generic never instantiated anywhere in this program.
 func TestAnalyzeProgram_GenericTemplateBodyGetsToolingInfo(t *testing.T) {
 	sep := string(filepath.Separator)
 	dir := filepath.Join(sep, "prog")
@@ -96,10 +96,7 @@ func TestAnalyzeProgram_GenericTemplateBodyGetsToolingInfo(t *testing.T) {
 	}
 
 	funcDecl := fa.Tree.Children(fa.Tree.Root)[0]
-	body := fa.Tree.FuncBody(funcDecl)
-	returnStmt := fa.Tree.Children(body)[0]
-	binExpr := fa.Tree.Child(returnStmt, 0)
-	aIdent := fa.Tree.Child(binExpr, 0)
+	aIdent := fa.Tree.FindIdentByText(funcDecl, "a")
 
 	sym, ok := fa.Info.Refs[aIdent]
 	if !ok || sym == nil {
