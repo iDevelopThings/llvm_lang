@@ -1,0 +1,58 @@
+// collections_demo.llx - exercises every operation std/collections's
+// SlotMap[T] exports, instantiated with two different element types (int and
+// a struct) side by side - proving two independent generic instantiations of
+// the same stdlib type coexist correctly, plus the generational-handle
+// mechanics (Remove bumping a slot's generation, a later Insert reusing the
+// freed slot, Valid distinguishing a live Handle from a stale one) - see
+// LANGUAGE.md's "Standard library" section and std/collections/collections.llx
+// itself.
+//
+// Every printed value below is hand-verifiable, in order:
+//   10        ints.Get(a)
+//   20        ints.Get(b)
+//   0         a.Generation right after Insert
+//   false     ints.Valid(a) after Remove(a)
+//   30        ints.Get(reused) - the freed slot came back
+//   1         reused.Generation - bumped once from a's own generation
+//   sword     items.Get(h1).name
+//   4.500000  items.Get(h2).price
+//   false     items.Valid(h1) after Remove(h1)
+//   true      items.Valid(h2) - untouched by h1's removal
+//
+// Run with:
+//   .\llvmc.exe examples\collections_demo\collections_demo.llx
+
+import "../../std/collections"
+
+struct Item {
+    name  string
+    price f64
+}
+
+func main() int {
+    ints := collections.NewSlotMap[int]()
+    a := ints.Insert(10)
+    b := ints.Insert(20)
+    print(ints.Get(a))   // 10
+    print(ints.Get(b))   // 20
+    print(a.Generation)  // 0
+
+    ints.Remove(a)
+    print(ints.Valid(a))   // false - a's slot was freed
+
+    reused := ints.Insert(30)
+    print(ints.Get(reused))    // 30 - the freed slot came back
+    print(reused.Generation)   // 1 - bumped since a's own insert
+
+    items := collections.NewSlotMap[Item]()
+    h1 := items.Insert(Item{"sword", 9.99})
+    h2 := items.Insert(Item{"shield", 4.5})
+    print(items.Get(h1).name)    // sword
+    print(items.Get(h2).price)   // 4.500000
+
+    items.Remove(h1)
+    print(items.Valid(h1))   // false
+    print(items.Valid(h2))   // true - h2 untouched
+
+    return 0
+}

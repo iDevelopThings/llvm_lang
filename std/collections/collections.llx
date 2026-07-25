@@ -1,0 +1,87 @@
+// collections.llx - std/collections: a generational-handle container,
+// promoted into a real stdlib package from the same shape
+// examples/generics/generics.llx first proved out as a generics dogfooding
+// fixture (see LANGUAGE.md's "Generics" section) - that example is left
+// untouched; this is a separate, additive package, not a replacement for it
+// (the same reasoning std/time's own doc comment gives for leaving
+// examples/scope_timer alone).
+//
+// The generational-handle idea: a plain array index is unsafe to hold onto
+// across removals, because a later insert can silently reuse a freed slot -
+// an old index then points at someone else's data instead of failing loudly.
+// A SlotMap fixes this by pairing every slot with a generation counter that
+// bumps every time that slot is freed, and handing callers a Handle (index +
+// the generation it was valid for) instead of a bare index. A stale Handle
+// is then a value a caller can actually check (Valid), rather than an index
+// that silently aliases whatever now occupies that slot.
+
+// Handle identifies one SlotMap[T] slot at the generation it was inserted
+// (or last reused) at. Both fields are exported since a Handle is meant to
+// be held, passed around, and compared by its caller - unlike SlotMap[T]'s
+// own internal storage below.
+struct Handle {
+    Index      int
+    Generation i32
+}
+
+// SlotMap[T] is a growable container of T values, each reachable by a stable
+// Handle rather than a raw index. Insert/Get/Remove are all O(1); a freed
+// slot is reused by a later Insert instead of leaving a permanent hole.
+struct SlotMap[T] {
+    items       []T
+    generations []i32
+    freeList    []int
+}
+
+// NewSlotMap creates an empty SlotMap[T]. T can't be inferred from any
+// argument here (there are none), so it must be given explicitly at the call
+// site: NewSlotMap[int]().
+func NewSlotMap[T]() SlotMap[T] {
+    return SlotMap[T]{make([]T, 0), make([]i32, 0), make([]int, 0)}
+}
+
+// Insert adds v and returns a Handle identifying it. A freed slot (see
+// Remove) is reused before growing the backing storage.
+func (SlotMap[T]) Insert(v T) Handle {
+    n := len(this.freeList)
+    if n > 0 {
+        slot := this.freeList[n-1]
+        this.freeList = this.freeList[0 : n-1]
+        this.items[slot] = v
+        return Handle{slot, this.generations[slot]}
+    }
+    this.items = append(this.items, v)
+    this.generations = append(this.generations, 0)
+    return Handle{len(this.items) - 1, 0}
+}
+
+// Valid reports whether h still refers to the value it was issued for - the
+// slot exists and hasn't since been Removed (and possibly reused by another
+// Insert). Get on an invalid Handle silently reads back whatever now
+// occupies that slot rather than trapping, so a caller that cares should
+// check Valid first.
+func (SlotMap[T]) Valid(h Handle) bool {
+    if h.Index < 0 || h.Index >= len(this.generations) {
+        return false
+    }
+    return this.generations[h.Index] == h.Generation
+}
+
+// Get returns the value h refers to - it doesn't itself call Valid, so a
+// stale h silently reads back whatever now occupies that slot (see Valid's
+// own doc comment).
+func (SlotMap[T]) Get(h Handle) T {
+    return this.items[h.Index]
+}
+
+// Remove frees h's slot, bumping its generation so every Handle issued
+// before this call becomes stale (Valid returns false for them from now on)
+// - including h itself. A no-op if h is already invalid, so double-Remove
+// doesn't add the same slot to the free list twice.
+func (SlotMap[T]) Remove(h Handle) {
+    if !this.Valid(h) {
+        return
+    }
+    this.generations[h.Index] = this.generations[h.Index] + 1
+    this.freeList = append(this.freeList, h.Index)
+}

@@ -1,0 +1,102 @@
+// slices_demo.llx - exercises every function std/slices exports, plus its
+// own boundary cases (empty slice, single-element Reverse) - see
+// LANGUAGE.md's "Standard library" section and std/slices/slices.llx itself.
+// Map is called once with a plain named function (double) and once with a
+// lambda literal, proving both function-value shapes work as the callback
+// argument to a generic function.
+//
+// Every printed value below is hand-verifiable, in order:
+//   true                 Contains(nums, 3)
+//   false                Contains(nums, 99)
+//   3                    IndexOf(nums, 4)     (0-indexed: 1 2 3 4 5)
+//   -1                   IndexOf(nums, 99)
+//   [2 4 6 8 10]         Map(nums, double) - named function
+//   [1 4 9 16 25]        Map(nums, lambda x*x)
+//   [1.000000 2.000000 3.000000 4.000000 5.000000]
+//                        Map[int, f64](nums, toFloat) - T and U genuinely differ
+//   [2 4]                Filter(nums, lambda x%2==0)
+//   15                   Reduce(nums, 0, lambda sum)
+//   [5 4 3 2 1]          Reverse(nums), then print(nums)
+//   false                Contains(empty, 1)
+//   -1                   IndexOf(empty, 1)
+//   0                    len(empty) after Reverse(empty) - still a no-op
+//   0                    len(Map(empty, double))
+//   0                    len(Filter(empty, lambda true))
+//   100                  Reduce(empty, 100, lambda sum) - init unchanged
+//   [42]                 Reverse(single), then print(single) - no-op
+//
+// Run with:
+//   .\llvmc.exe examples\slices_demo\slices_demo.llx
+
+import "../../std/slices"
+
+func double(x int) int {
+    return x * 2
+}
+
+// toFloat is Map's own T!=U case: instantiating Map[int, f64] rather than
+// Map[int, int], proving the result slice's element width/type genuinely
+// differs from the source's, not just its values.
+func toFloat(x int) f64 {
+    return f64(x)
+}
+
+func main() int {
+    nums := []int{1, 2, 3, 4, 5}
+
+    print(slices.Contains(nums, 3))   // true
+    print(slices.Contains(nums, 99))  // false
+    print(slices.IndexOf(nums, 4))    // 3
+    print(slices.IndexOf(nums, 99))   // -1
+
+    doubled := slices.Map(nums, double)   // named function
+    print(doubled)                          // [2 4 6 8 10]
+
+    squared := slices.Map(nums, func(x int) int {
+        return x * x
+    })                                        // lambda
+    print(squared)                            // [1 4 9 16 25]
+
+    floats := slices.Map(nums, toFloat)   // Map[int, f64] - T != U
+    print(floats)                            // [1.000000 2.000000 3.000000 4.000000 5.000000]
+
+    evens := slices.Filter(nums, func(x int) bool {
+        return x % 2 == 0
+    })
+    print(evens)   // [2 4]
+
+    sum := slices.Reduce(nums, 0, func(acc int, x int) int {
+        return acc + x
+    })
+    print(sum)   // 15
+
+    slices.Reverse(nums)
+    print(nums)   // [5 4 3 2 1]
+
+    // Boundary cases: empty slice.
+    empty := make([]int, 0)
+    print(slices.Contains(empty, 1))   // false
+    print(slices.IndexOf(empty, 1))    // -1
+    slices.Reverse(empty)               // no-op, must not trap
+    print(len(empty))                    // 0
+
+    emptyMapped := slices.Map(empty, double)
+    print(len(emptyMapped))   // 0
+
+    emptyFiltered := slices.Filter(empty, func(x int) bool {
+        return true
+    })
+    print(len(emptyFiltered))   // 0
+
+    emptyReduced := slices.Reduce(empty, 100, func(acc int, x int) int {
+        return acc + x
+    })
+    print(emptyReduced)   // 100 - init passed straight through
+
+    // Boundary case: single-element Reverse is a no-op.
+    single := []int{42}
+    slices.Reverse(single)
+    print(single)   // [42]
+
+    return 0
+}
