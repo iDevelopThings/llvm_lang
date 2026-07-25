@@ -76,6 +76,34 @@ func TestRun_Watch_MissingTick(t *testing.T) {
 	}
 }
 
+// TestRun_Watch_StdImportAcrossFilesystems is the regression case for a real
+// bug: -watch's own file-staleness tracking (stampFiles/sourcesChanged,
+// programSourcePaths) stat'd every file in the program against one shared
+// afero.Fs, but a std: import's own files live in a genuinely different
+// afero.Fs (the std root's own BasePathFs) than the entry package's - see
+// loader.Package's own FS field doc comment. Before the fix, this failed
+// outright on the very first compile: "stat fakepkg\fakepkg.llx: ... cannot
+// find the path specified" (a real user hit this against std:collections/
+// std:scheduler under -watch with a real raylib project).
+func TestRun_Watch_StdImportAcrossFilesystems(t *testing.T) {
+	withFakeStdFS(t, map[string]string{
+		"fakepkg/fakepkg.llx": "func Helper() int {\n\treturn 5\n}\n",
+	})
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "main.llx")
+	src := "import \"std:fakepkg\"\n\n" +
+		"func Init() {\n}\n\n" +
+		"func Frame() int {\n\treturn fakepkg.Helper()\n}\n"
+	if err := os.WriteFile(srcPath, []byte(src), 0o644); err != nil {
+		t.Fatalf("writing source: %v", err)
+	}
+	var stderr bytes.Buffer
+	code := run([]string{"-watch", srcPath}, &stderr)
+	if code != 5 {
+		t.Fatalf("exit code = %d, want 5 (Frame's own return value); stderr:\n%s", code, stderr.String())
+	}
+}
+
 // TestRun_Watch_TickWrongArity covers the signature-validation fix: a Frame
 // declaring a parameter is rejected with a clean diagnostic before ever
 // being called - calling a wrong-arity Tick via the raw syscall this driver

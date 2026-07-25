@@ -58,6 +58,40 @@ func TestLoadProgram_RelativePathResolution(t *testing.T) {
 	}
 }
 
+// TestProgramFiles_PairsEachFileWithItsOwnPackageFS covers Program.Files'
+// own reason for existing: a std:-resolved package's files live in a
+// genuinely different afero.Fs than the entry package's (see Package.FS's
+// own doc comment) - this asserts that directly, independent of cmd/llvmc's
+// own -watch behavior (which only exercises this indirectly).
+func TestProgramFiles_PairsEachFileWithItsOwnPackageFS(t *testing.T) {
+	entryFS := afero.NewMemMapFs()
+	writeFiles(t, entryFS, map[string]string{
+		join("root", "main.llx"): `import "std:mathutil"`,
+	})
+	stdFS := fakeStdFS(t)
+
+	prog, err := LoadProgramWithOptions(entryFS, join("root"), Options{StdFS: stdFS})
+	if err != nil {
+		t.Fatalf("LoadProgramWithOptions: %v", err)
+	}
+
+	got := make(map[string]afero.Fs)
+	for fs, path := range prog.Files() {
+		got[path] = fs
+	}
+
+	if len(got) != 2 {
+		t.Fatalf("Files() yielded %d entries, want 2: %+v", len(got), got)
+	}
+	if fs := got[join("root", "main.llx")]; fs != entryFS {
+		t.Errorf("main.llx paired with %v, want the entry package's own fs", fs)
+	}
+	mathutilPath := filepath.Join("mathutil", "mathutil.llx")
+	if fs := got[mathutilPath]; fs != stdFS {
+		t.Errorf("%s paired with %v, want the std scheme's own fs", mathutilPath, fs)
+	}
+}
+
 // TestLoadProgram_DiamondDependencyDedup covers two different packages
 // (a, b) both importing the same third package (common) - it must be
 // loaded exactly once, not once per import edge: the two Import.Package

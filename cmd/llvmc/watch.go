@@ -38,6 +38,19 @@ type fileStamp struct {
 	size    int64
 }
 
+// watchedFile names one source file together with the filesystem it must be
+// stat'd against - see loader.Package.FS's own doc comment for why a single
+// shared fs can't stat every file in a program. Safe as a map key: the
+// afero.Fs implementations used here (afero.OsFs, afero.BasePathFs) are
+// plain comparable structs - but staleness detection across reloads only
+// works because the SAME instance is reused every tryCompile call (fs
+// itself, and resolveStdFS's own sync.OnceValues memoization), not a fresh
+// one each time - two separately-constructed instances never compare equal.
+type watchedFile struct {
+	fs   afero.Fs
+	path string
+}
+
 // runWatch keeps one LLJIT instance alive, loads the user module under a
 // ResourceTracker, and loops calling TickName (default Frame). On source
 // change it recompiles and swaps the tracker (reset-on-reload: Init runs
@@ -72,7 +85,7 @@ func runWatch(cfg watchConfig, stderr io.Writer) int {
 	var (
 		rt      llvm.ResourceTracker
 		hasRT   bool
-		stamps  map[string]fileStamp
+		stamps  map[watchedFile]fileStamp
 		reloads uint64
 	)
 
@@ -144,13 +157,13 @@ func runWatch(cfg watchConfig, stderr io.Writer) int {
 		return nil
 	}
 
-	tryCompile := func() (map[string]fileStamp, error) {
+	tryCompile := func() (map[watchedFile]fileStamp, error) {
 		prog, err := loader.LoadProgramWithOptions(fs, cfg.EntryPath, loaderOptionsFunc())
 		if err != nil {
 			return nil, err
 		}
 		paths := programSourcePaths(prog)
-		newStamps, err := stampFiles(fs, paths)
+		newStamps, err := stampFiles(paths)
 		if err != nil {
 			return nil, err
 		}
@@ -190,7 +203,7 @@ func runWatch(cfg watchConfig, stderr io.Writer) int {
 	}
 
 	for {
-		changed, err := sourcesChanged(fs, stamps)
+		changed, err := sourcesChanged(stamps)
 		if err != nil {
 			fmt.Fprintf(stderr, "llvmc: %v\n", err)
 			return exitCompile
@@ -227,24 +240,22 @@ func runWatch(cfg watchConfig, stderr io.Writer) int {
 	}
 }
 
-func programSourcePaths(prog *loader.Program) []string {
-	var paths []string
-	for _, pkg := range prog.Order {
-		for _, f := range pkg.Files {
-			paths = append(paths, f.Name)
-		}
+func programSourcePaths(prog *loader.Program) []watchedFile {
+	var files []watchedFile
+	for fs, path := range prog.Files() {
+		files = append(files, watchedFile{fs: fs, path: path})
 	}
-	return paths
+	return files
 }
 
-func stampFiles(fs afero.Fs, paths []string) (map[string]fileStamp, error) {
-	out := make(map[string]fileStamp, len(paths))
-	for _, p := range paths {
-		info, err := fs.Stat(p)
+func stampFiles(files []watchedFile) (map[watchedFile]fileStamp, error) {
+	out := make(map[watchedFile]fileStamp, len(files))
+	for _, wf := range files {
+		info, err := wf.fs.Stat(wf.path)
 		if err != nil {
-			return nil, fmt.Errorf("stat %s: %w", p, err)
+			return nil, fmt.Errorf("stat %s: %w", wf.path, err)
 		}
-		out[p] = fileStamp{
+		out[wf] = fileStamp{
 			modTime: info.ModTime(),
 			size:    info.Size(),
 		}
@@ -252,14 +263,14 @@ func stampFiles(fs afero.Fs, paths []string) (map[string]fileStamp, error) {
 	return out, nil
 }
 
-func sourcesChanged(fs afero.Fs, stamps map[string]fileStamp) (bool, error) {
-	for p, prev := range stamps {
-		info, err := fs.Stat(p)
+func sourcesChanged(stamps map[watchedFile]fileStamp) (bool, error) {
+	for wf, prev := range stamps {
+		info, err := wf.fs.Stat(wf.path)
 		if err != nil {
 			if os.IsNotExist(err) {
 				return true, nil
 			}
-			return false, fmt.Errorf("stat %s: %w", p, err)
+			return false, fmt.Errorf("stat %s: %w", wf.path, err)
 		}
 		cur := fileStamp{
 			modTime: info.ModTime(),

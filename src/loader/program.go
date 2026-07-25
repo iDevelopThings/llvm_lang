@@ -2,6 +2,7 @@ package loader
 
 import (
 	"fmt"
+	"iter"
 	"os"
 	"path"
 	"path/filepath"
@@ -53,7 +54,16 @@ type Package struct {
 	// Name is this package's local name - Dir's own last path segment
 	// (Go's own directory-as-package-name convention, matching
 	// LANGUAGE.md's "Multi-file packages" section).
-	Name  string
+	Name string
+	// FS is the filesystem this package's own Files were read from - the
+	// plain fs passed to LoadProgram for an ordinary relative-path package,
+	// but a scheme root's own afero.Fs (see schemeRoot) for a std:/lib:
+	// import, which is a genuinely different filesystem than the entry
+	// package's. Every File.Name is only ever meaningful when resolved
+	// against THIS Fs, never assumed to be the same one another package in
+	// the same Program used - cmd/llvmc's own -watch file-staleness
+	// tracking needs this to stat each file against the right filesystem.
+	FS    afero.Fs
 	Files []*File
 }
 
@@ -67,6 +77,22 @@ type Program struct {
 	// this exact order, since an importing package's file scope has to be
 	// wired up against its dependency's already-resolved package surface.
 	Order []*Package
+}
+
+// Files iterates every source file across every package in Order, paired
+// with the afero.Fs it must be read from - see Package.FS's own doc comment
+// for why a caller can't assume one shared fs covers every file in a
+// Program. cmd/llvmc's own -watch reload detection is the first caller.
+func (p *Program) Files() iter.Seq2[afero.Fs, string] {
+	return func(yield func(afero.Fs, string) bool) {
+		for _, pkg := range p.Order {
+			for _, f := range pkg.Files {
+				if !yield(pkg.FS, f.Name) {
+					return
+				}
+			}
+		}
+	}
 }
 
 // LoadProgram resolves root (a single .llx file, or a directory - see Load's
@@ -287,6 +313,7 @@ func (l *programLoader) loadPackage(loc resolvedImport, isEntry bool) (*Package,
 	pkg := &Package{
 		Dir:  loc.dir,
 		Name: filepath.Base(loc.dir),
+		FS:   loc.fs,
 	}
 
 	for _, sf := range srcFiles {
