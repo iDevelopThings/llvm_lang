@@ -117,7 +117,7 @@ func CompilePackage(files []loader.SourceFile, optimize bool) *Result {
 
 	for i, f := range files {
 		lf := lexer.NewFile(f.Name, f.Src)
-		tree, pdiags := parser.ParseFile(lf)
+		tree, pdiags := parser.ParseFile(lf, false)
 		diags[tree] = pdiags
 		if pdiags.HasErrors() {
 			anyParseErrors = true

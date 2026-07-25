@@ -26,7 +26,7 @@ func checkSrc(t *testing.T, src string) (*ast.Tree, *Info) {
 // for tests asserting a specific error count instead.
 func checkSrcAllowErrors(t *testing.T, src string) (*ast.Tree, *Info, *diag.Bag) {
 	t.Helper()
-	tree, pdiags := parser.ParseFile(lexer.NewFile("t.ll", src))
+	tree, pdiags := parser.ParseFile(lexer.NewFile("t.ll", src), false)
 	if pdiags.HasErrors() {
 		t.Fatalf("unexpected parse errors for %q: %v", src, pdiags.All())
 	}

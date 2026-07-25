@@ -47,6 +47,15 @@ type Parser struct {
 	// Entering any (...)/[...] bumps it back non-negative, so a
 	// parenthesized composite literal in a condition still works.
 	exprLev int
+
+	// testMode splices a tests{} block's own contents directly into the
+	// enclosing declaration sequence instead of wrapping them in a
+	// TestBlockDecl node - see parseTestsBlock.
+	testMode bool
+	// inTestBlock tracks whether parsing is currently nested inside a
+	// tests{} block, so a second one directly inside it can be rejected -
+	// see parseTestsBlock.
+	inTestBlock bool
 }
 
 // New prepares a Parser over file with its first token loaded.

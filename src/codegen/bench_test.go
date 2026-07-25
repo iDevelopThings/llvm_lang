@@ -30,7 +30,7 @@ import (
 // leak an LLVM Context per b.N iteration.
 func benchmarkGenerate(b *testing.B, src string) {
 	b.Helper()
-	tree, pdiags := parser.ParseFile(lexer.NewFile("bench.llx", src))
+	tree, pdiags := parser.ParseFile(lexer.NewFile("bench.llx", src), false)
 	if pdiags.HasErrors() {
 		b.Fatalf("unexpected parse errors: %v", pdiags.All())
 	}

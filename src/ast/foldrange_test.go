@@ -17,7 +17,7 @@ import (
 func parseTree(t *testing.T, src string) *ast.Tree {
 	t.Helper()
 	file := lexer.NewFile("t.llx", src)
-	tree, diags := parser.ParseFile(file)
+	tree, diags := parser.ParseFile(file, false)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected parse errors: %v", diags.Sorted())
 	}

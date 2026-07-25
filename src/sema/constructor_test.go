@@ -62,7 +62,7 @@ func TestConstructorDuplicateArityIsError(t *testing.T) {
 		"\tconstructor(a int) {\n\t\tthis.x = a\n\t}\n" +
 		"\tconstructor(b int) {\n\t\tthis.x = b\n\t}\n" +
 		"}\n"
-	tree, pdiags := parser.ParseFile(lexer.NewFile("t.ll", src))
+	tree, pdiags := parser.ParseFile(lexer.NewFile("t.ll", src), false)
 	if pdiags.HasErrors() {
 		t.Fatalf("unexpected parse errors: %v", pdiags.All())
 	}

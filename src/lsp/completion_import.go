@@ -93,7 +93,7 @@ func exportedPackageDecls(fs afero.Fs, dir string) []ast.DeclSymbol {
 
 	var out []ast.DeclSymbol
 	for _, f := range files {
-		tree, _ := parser.ParseFile(lexer.NewFile(f.Name, f.Src))
+		tree, _ := parser.ParseFile(lexer.NewFile(f.Name, f.Src), false)
 		if tree == nil {
 			// A hopelessly broken file (10+ parse errors) bails out with no
 			// tree at all (see parser.Run) - skip it rather than crash on

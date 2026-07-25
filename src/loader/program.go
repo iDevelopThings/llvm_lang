@@ -103,6 +103,12 @@ type Options struct {
 	// value) means "std:" isn't available, same as the still-unimplemented
 	// "lib:" scheme. Real callers get one from StdlibFS.
 	StdFS afero.Fs
+	// TestMode splices every tests{} block belonging to the entry package
+	// (never an imported dependency's own tests{} blocks - see loadPackage's
+	// isEntry parameter) into ordinary top-level declarations, instead of
+	// leaving each one wrapped in an invisible TestBlockDecl node - see
+	// parser.ParseFile and LANGUAGE.md's "tests{}" section.
+	TestMode bool
 }
 
 // LoadProgramWithOptions is LoadProgram with its scheme-qualified import
@@ -125,12 +131,13 @@ func LoadProgramWithOptions(fs afero.Fs, root string, opts Options) (*Program, e
 	}
 
 	l := &programLoader{
-		fs:      fs,
-		schemes: schemes,
-		loaded:  make(map[string]*Package),
-		loading: make(map[string]bool),
+		fs:       fs,
+		schemes:  schemes,
+		testMode: opts.TestMode,
+		loaded:   make(map[string]*Package),
+		loading:  make(map[string]bool),
 	}
-	entry, err := l.loadPackage(resolvedImport{fs: fs, dir: dir, key: dir})
+	entry, err := l.loadPackage(resolvedImport{fs: fs, dir: dir, key: dir}, true)
 	if err != nil {
 		return nil, err
 	}
@@ -193,12 +200,13 @@ type schemeRoot struct {
 // diamond re-visit - a key already fully in loaded is a diamond, a key still
 // marked loading when revisited is a genuine cycle).
 type programLoader struct {
-	fs      afero.Fs
-	schemes map[string]schemeRoot
-	loaded  map[string]*Package
-	loading map[string]bool
-	stack   []string
-	order   []*Package
+	fs       afero.Fs
+	schemes  map[string]schemeRoot
+	testMode bool
+	loaded   map[string]*Package
+	loading  map[string]bool
+	stack    []string
+	order    []*Package
 }
 
 // resolvedImport is one import's own already-resolved location: which
@@ -252,8 +260,11 @@ func splitScheme(importPath string) (scheme, rest string, ok bool) {
 // loadPackage loads loc's package (recursively resolving/loading every
 // import it or its own dependencies declare) and returns it, reusing an
 // already-loaded package by loc.key rather than reloading it - see
-// LoadProgram's own doc comment.
-func (l *programLoader) loadPackage(loc resolvedImport) (*Package, error) {
+// LoadProgram's own doc comment. isEntry is true only for the very first
+// call (root itself); every import this package or a transitive dependency
+// declares recurses with isEntry false, so l.testMode only ever splices the
+// entry package's own tests{} blocks, never an imported dependency's.
+func (l *programLoader) loadPackage(loc resolvedImport, isEntry bool) (*Package, error) {
 	if pkg, ok := l.loaded[loc.key]; ok {
 		return pkg, nil // diamond dependency - already fully loaded once
 	}
@@ -280,7 +291,7 @@ func (l *programLoader) loadPackage(loc resolvedImport) (*Package, error) {
 
 	for _, sf := range srcFiles {
 		lf := lexer.NewFile(sf.Name, sf.Src)
-		tree, diags := parser.ParseFile(lf)
+		tree, diags := parser.ParseFile(lf, l.testMode && isEntry)
 		file := &File{
 			Name:  sf.Name,
 			Tree:  tree,
@@ -298,7 +309,7 @@ func (l *programLoader) loadPackage(loc resolvedImport) (*Package, error) {
 				return nil, err
 			}
 
-			targetPkg, err := l.loadPackage(targetLoc)
+			targetPkg, err := l.loadPackage(targetLoc, false)
 			if err != nil {
 				return nil, err
 			}

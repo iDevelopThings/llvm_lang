@@ -14,7 +14,7 @@ import (
 // source is broken, not the imports machinery under test.
 func mustParseFile(t *testing.T, name, src string) *ast.Tree {
 	t.Helper()
-	tree, diags := parser.ParseFile(lexer.NewFile(name, src))
+	tree, diags := parser.ParseFile(lexer.NewFile(name, src), false)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected parse errors in %s: %v", name, diags.All())
 	}

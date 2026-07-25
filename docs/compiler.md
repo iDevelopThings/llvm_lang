@@ -72,6 +72,29 @@ Only tests in the entry package are discovered. A package defining its own
 `main` conflicts with the generated test driver. No matching tests is a
 usage error.
 
+**Same-file tests:** a `tests { ... }` block lets `TestXxx` functions live
+directly in the file they test, instead of (or alongside) a standalone test
+package - see `LANGUAGE.md`'s "`tests{}`" section for the full rules:
+
+```go
+func add(a int, b int) int {
+    return a + b
+}
+
+tests {
+    import "std:test"
+
+    func TestAdd(t *test.Runner) {
+        t.AssertEqual(add(1, 1), 2, "1+1")
+    }
+}
+```
+
+`llvmc -test` discovers `TestAdd` the same as any standalone test file's;
+every other build mode treats the whole block as if it weren't there. See
+[`std/collections/collections.llx`](../std/collections/collections.llx) for
+a real stdlib package using this.
+
 ## Watch and reload
 
 ```powershell

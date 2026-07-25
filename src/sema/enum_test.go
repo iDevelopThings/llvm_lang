@@ -19,7 +19,7 @@ import (
 // the two phases actually raised it.
 func allErrorsSrc(t *testing.T, src string) (*ast.Tree, int) {
 	t.Helper()
-	tree, pdiags := parser.ParseFile(lexer.NewFile("t.ll", src))
+	tree, pdiags := parser.ParseFile(lexer.NewFile("t.ll", src), false)
 	if pdiags.HasErrors() {
 		t.Fatalf("unexpected parse errors for %q: %v", src, pdiags.All())
 	}

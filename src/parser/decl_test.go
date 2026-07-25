@@ -543,7 +543,7 @@ func main() {
 	}
 }
 `
-	tree, diags := ParseFile(lexer.NewFile("t.ll", src))
+	tree, diags := ParseFile(lexer.NewFile("t.ll", src), false)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected parse errors: %v", diags.All())
 	}
@@ -580,7 +580,7 @@ func TestTopLevelVarFuncStruct(t *testing.T) {
 		"struct Point {\n" +
 		"\tx int\n" +
 		"}\n"
-	tree, diags := ParseFile(lexer.NewFile("t.ll", src))
+	tree, diags := ParseFile(lexer.NewFile("t.ll", src), false)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected parse errors: %v", diags.All())
 	}
@@ -608,7 +608,7 @@ func TestBareStatementsRejectedAtTopLevel(t *testing.T) {
 		"func add(x int, y int) int {\n" +
 		"\treturn x + y\n" +
 		"}\n"
-	tree, diags := ParseFile(lexer.NewFile("t.ll", src))
+	tree, diags := ParseFile(lexer.NewFile("t.ll", src), false)
 	if diags.ErrorCount() != 2 {
 		t.Fatalf("ErrorCount = %d, want 2 (one per bad top-level statement): %v", diags.ErrorCount(), diags.All())
 	}
@@ -626,7 +626,7 @@ func TestTopLevelGarbageRecovers(t *testing.T) {
 	// bounded diagnostic and a still-usable tree, same as any other
 	// malformed input.
 	src := ")\n\nfunc f() { }"
-	tree, diags := ParseFile(lexer.NewFile("t.ll", src))
+	tree, diags := ParseFile(lexer.NewFile("t.ll", src), false)
 	if !diags.HasErrors() {
 		t.Fatalf("expected a diagnostic for the stray ')'")
 	}

@@ -29,7 +29,7 @@ func main() int {
 }
 `
 	file := lexer.NewFile("test.llx", src)
-	tree, diags := parser.ParseFile(file)
+	tree, diags := parser.ParseFile(file, false)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected parse errors: %v", diags.Sorted())
 	}
@@ -103,7 +103,7 @@ func TestSemanticTokens_UnresolvedIdentifierGetsReadonlyFallback(t *testing.T) {
 }
 `
 	file := lexer.NewFile("test.llx", src)
-	tree, diags := parser.ParseFile(file)
+	tree, diags := parser.ParseFile(file, false)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected parse errors: %v", diags.Sorted())
 	}

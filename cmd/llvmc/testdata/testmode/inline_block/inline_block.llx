@@ -1,0 +1,11 @@
+func add(a int, b int) int {
+    return a + b
+}
+
+tests {
+    import "std:test"
+
+    func TestAdd(t *test.Runner) {
+        t.AssertEqual(add(1, 1), 2, "1+1")
+    }
+}

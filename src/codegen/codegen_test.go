@@ -42,7 +42,7 @@ func initJIT() {
 // disposal path).
 func compileSrc(t *testing.T, src string) *Module {
 	t.Helper()
-	tree, pdiags := parser.ParseFile(lexer.NewFile("t.ll", src))
+	tree, pdiags := parser.ParseFile(lexer.NewFile("t.ll", src), false)
 	if pdiags.HasErrors() {
 		t.Fatalf("unexpected parse errors for %q: %v", src, pdiags.All())
 	}
@@ -72,7 +72,7 @@ func compileSrc(t *testing.T, src string) *Module {
 // way, and these are single, short-lived test-only modules).
 func compileSrcExpectCodegenError(t *testing.T, src string) *diag.Bag {
 	t.Helper()
-	tree, pdiags := parser.ParseFile(lexer.NewFile("t.ll", src))
+	tree, pdiags := parser.ParseFile(lexer.NewFile("t.ll", src), false)
 	if pdiags.HasErrors() {
 		t.Fatalf("unexpected parse errors for %q: %v", src, pdiags.All())
 	}

@@ -62,4 +62,7 @@ This is a quick list of deliberate limits, not a roadmap.
   real command-line arguments.
 - The language server re-analyzes a whole package per edit - no incremental
   parsing yet.
+- `llvmc -test` only discovers `TestXxx` functions (standalone or inside a
+  `tests{}` block) belonging to the entry package itself - an imported
+  package's own tests never run as a side effect of being imported.
 

@@ -43,7 +43,7 @@ func TestDestructorDuplicateIsError(t *testing.T) {
 		"\tdestructor() {\n\t\tthis.x = 0\n\t}\n" +
 		"\tdestructor() {\n\t\tthis.x = 1\n\t}\n" +
 		"}\n"
-	tree, pdiags := parser.ParseFile(lexer.NewFile("t.ll", src))
+	tree, pdiags := parser.ParseFile(lexer.NewFile("t.ll", src), false)
 	if pdiags.HasErrors() {
 		t.Fatalf("unexpected parse errors: %v", pdiags.All())
 	}

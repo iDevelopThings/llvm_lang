@@ -22,7 +22,7 @@ func checkPackageSrcs(t *testing.T, files [][2]string) ([]*ast.Tree, map[*ast.Tr
 	trees := make([]*ast.Tree, len(files))
 	for i, f := range files {
 		name, src := f[0], f[1]
-		tree, pdiags := parser.ParseFile(lexer.NewFile(name, src))
+		tree, pdiags := parser.ParseFile(lexer.NewFile(name, src), false)
 		if pdiags.HasErrors() {
 			t.Fatalf("unexpected parse errors in %s: %v", name, pdiags.All())
 		}
@@ -116,7 +116,7 @@ func TestMultiFile_RedeclarationAcrossFilesIsAnError(t *testing.T) {
 	}
 	trees := make([]*ast.Tree, len(files))
 	for i, f := range files {
-		tree, pdiags := parser.ParseFile(lexer.NewFile(f[0], f[1]))
+		tree, pdiags := parser.ParseFile(lexer.NewFile(f[0], f[1]), false)
 		if pdiags.HasErrors() {
 			t.Fatalf("unexpected parse errors in %s: %v", f[0], pdiags.All())
 		}
