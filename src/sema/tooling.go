@@ -21,8 +21,15 @@ func ResolveTemplatesForTooling(tree *ast.Tree, info *Info) {
 	if info == nil {
 		return
 	}
+	// One cache shared across every top-level declaration this call
+	// processes, so a generic struct's own body and each of its separately-
+	// resolved methods (this loop treats every top-level decl as its own
+	// independent ResolveTemplateForTooling call) all reuse the identical
+	// Field/Method Symbol objects - see shadowStructInfo's own doc comment
+	// for why that identity is load-bearing, not cosmetic.
+	shadowStructs := make(map[string]*StructInfo)
 	for _, decl := range tree.Children(tree.Root) {
-		shadow := ResolveTemplateForTooling(tree, info, decl)
+		shadow := resolveTemplateForTooling(tree, info, decl, shadowStructs)
 		if shadow == nil {
 			continue
 		}
@@ -49,6 +56,17 @@ func ResolveTemplatesForTooling(tree *ast.Tree, info *Info) {
 // dereferenced: Resolve (unlike Check's typeFromNode) never reads
 // Symbol.TypeParamBound, so a zero Type is fine.
 func ResolveTemplateForTooling(tree *ast.Tree, real *Info, decl ast.NodeIndex) *Info {
+	return resolveTemplateForTooling(tree, real, decl, make(map[string]*StructInfo))
+}
+
+// resolveTemplateForTooling is ResolveTemplateForTooling's own real
+// implementation, taking an explicit shadowStructs cache so
+// ResolveTemplatesForTooling can share one across every top-level
+// declaration in a single call - see that cache's own doc comment
+// (shadowStructInfo) for why. The exported singular entry point (used
+// standalone by tests, and anywhere that only ever resolves one declaration
+// in isolation) just seeds a fresh, call-scoped cache of its own.
+func resolveTemplateForTooling(tree *ast.Tree, real *Info, decl ast.NodeIndex, shadowStructs map[string]*StructInfo) *Info {
 	if !real.IsGenericTemplate(tree, decl) {
 		return nil
 	}
@@ -58,9 +76,9 @@ func ResolveTemplateForTooling(tree *ast.Tree, real *Info, decl ast.NodeIndex) *
 
 	switch tree.Nodes[decl].Kind {
 	case enums.NodeKinds.StructDecl:
-		resolveStructTemplateForTooling(r, real, tree, decl)
+		resolveStructTemplateForTooling(r, real, tree, decl, shadowStructs)
 	case enums.NodeKinds.FuncDecl:
-		resolveFuncTemplateForTooling(r, real, tree, decl)
+		resolveFuncTemplateForTooling(r, real, tree, decl, shadowStructs)
 	}
 	return shadow
 }
@@ -72,27 +90,55 @@ func ResolveTemplateForTooling(tree *ast.Tree, real *Info, decl ast.NodeIndex) *
 // Symbol already exists in real.Refs (declareStruct always runs, even for a
 // template - see its own doc comment) and is reused directly rather than
 // fabricated, so `this` inside a method resolves to the real declaration.
-func resolveStructTemplateForTooling(r *resolver, real *Info, tree *ast.Tree, decl ast.NodeIndex) {
+func resolveStructTemplateForTooling(r *resolver, real *Info, tree *ast.Tree, decl ast.NodeIndex, shadowStructs map[string]*StructInfo) {
 	nameNode := tree.StructName(decl)
 	gi := real.Generics[tree.Text(nameNode)]
 	if gi == nil {
 		return
 	}
+	si := shadowStructInfo(r, gi, shadowStructs)
+	scope := typeParamScope(real.FileScope, gi.Params, placeholderTypes(len(gi.Params)))
+	r.resolveStructFieldTypes(scope, decl)
+	for ctor := range tree.StructConstructors(decl) {
+		r.resolveConstructorBody(scope, si, ctor)
+		resolveThisMemberAccesses(r, tree, tree.ConstructorBody(ctor), si)
+	}
+	for dtor := range tree.StructDestructors(decl) {
+		r.resolveDestructorBody(scope, si, dtor)
+		resolveThisMemberAccesses(r, tree, tree.DestructorBody(dtor), si)
+	}
+}
+
+// shadowStructInfo returns gi's own tooling-only synthetic StructInfo -
+// fields declared fresh via declareStructMembers (a generic template never
+// gets a real one of its own - see declareStruct's own doc comment), methods
+// reused directly from gi.Methods (already real, shared data: built during
+// the REAL Resolve pass, since addGenericStructMethod runs unconditionally,
+// not only for tooling - see generics.go). Memoized in shadowStructs (per
+// struct name) rather than rebuilt per call: a generic struct's own body and
+// each of its methods are separately-resolved top-level declarations (each
+// its own ResolveTemplateForTooling call), and References/hover unify a
+// field's declaration with every `this.field` access across those calls
+// purely by Symbol pointer identity (see Workspace.References) - a fresh
+// Fields map per call would give every occurrence its own disconnected
+// Symbol, breaking that unification even though each one individually still
+// "looks" correct.
+func shadowStructInfo(r *resolver, gi *GenericInfo, shadowStructs map[string]*StructInfo) *StructInfo {
+	if si, ok := shadowStructs[gi.Symbol.Name]; ok {
+		return si
+	}
 	si := &StructInfo{
-		Symbol:       real.Refs[nameNode],
+		Symbol:       gi.Symbol,
 		Fields:       make(map[string]*Symbol),
 		Methods:      make(map[string]*Symbol),
 		Constructors: make(map[int]*Symbol),
 	}
-	scope := typeParamScope(real.FileScope, gi.Params, placeholderTypes(len(gi.Params)))
-	r.declareStructMembers(si, decl)
-	r.resolveStructFieldTypes(scope, decl)
-	for ctor := range tree.StructConstructors(decl) {
-		r.resolveConstructorBody(scope, si, ctor)
+	r.declareStructMembers(si, gi.Decl)
+	for _, gm := range gi.Methods {
+		si.Methods[gm.Name] = gm.Sym
 	}
-	for dtor := range tree.StructDestructors(decl) {
-		r.resolveDestructorBody(scope, si, dtor)
-	}
+	shadowStructs[gi.Symbol.Name] = si
+	return si
 }
 
 // resolveFuncTemplateForTooling resolves decl's own body against whichever
@@ -103,9 +149,10 @@ func resolveStructTemplateForTooling(r *resolver, real *Info, tree *ast.Tree, de
 // the method's own, computed the identical way addGenericStructMethod
 // does), or a generic method of an already-concrete type (only its own
 // params need binding; the receiver was already resolved by the real pass).
-func resolveFuncTemplateForTooling(r *resolver, real *Info, tree *ast.Tree, decl ast.NodeIndex) {
+func resolveFuncTemplateForTooling(r *resolver, real *Info, tree *ast.Tree, decl ast.NodeIndex, shadowStructs map[string]*StructInfo) {
 	receiver := tree.FuncReceiver(decl)
 	var names []string
+	var recvStruct *StructInfo
 
 	switch {
 	case receiver == ast.InvalidNode:
@@ -116,15 +163,66 @@ func resolveFuncTemplateForTooling(r *resolver, real *Info, tree *ast.Tree, decl
 		ownParams := r.typeParamNames(tree.FuncTypeParamList(decl), recvParams)
 		names = append(recvParams, ownParams...)
 		r.info.Refs[receiver] = gi.Symbol
+		recvStruct = shadowStructInfo(r, gi, shadowStructs)
 	default:
 		names = r.typeParamNames(tree.FuncTypeParamList(decl), nil)
 		if sym, ok := real.Refs[receiver]; ok {
 			r.info.Refs[receiver] = sym
+			// The receiver type itself is already concrete (only the
+			// method's own type parameters need placeholder binding here),
+			// so unlike the generic-struct-template case above, sym's own
+			// StructInfo is already real and correctly self-referential -
+			// no synthetic shadow needed, just reuse it directly.
+			recvStruct = sym.StructInfo
 		}
 	}
 
 	scope := typeParamScope(real.FileScope, names, placeholderTypes(len(names)))
 	r.resolveFuncBody(scope, decl)
+	if recvStruct == nil {
+		return
+	}
+
+	// resolveFuncBody built `this`'s own receiver Symbol from gi.Symbol
+	// (real.Refs[receiver] above), whose StructInfo is nil - a generic
+	// struct template never gets a real one (see declareStruct's own doc
+	// comment) - so `this` itself would otherwise carry no field/method
+	// catalog at all. fnScope.Receiver is a fresh, tooling-only Symbol
+	// (built by receiverSymbol, never shared/real state - see its own doc
+	// comment), so overwriting its StructInfo here is safe.
+	if fnScope, ok := r.info.Scopes[decl]; ok && fnScope.Receiver != nil {
+		fnScope.Receiver.StructInfo = recvStruct
+	}
+	resolveThisMemberAccesses(r, tree, tree.FuncBody(decl), recvStruct)
+}
+
+// resolveThisMemberAccesses gives `this.field`/`this.method` MemberExpr
+// nodes real Info.Refs entries anywhere inside body - the one thing
+// resolveFuncBody's ordinary (shared with the real pipeline) body-walk
+// deliberately leaves for Check to resolve later (see resolve.go's own
+// MemberExpr case doc comment), which a generic template's body never gets
+// (see this file's own doc comment). Narrowly scoped to `this.` access
+// specifically - a template body has no other way to reach a concretely-
+// enough-known value's own fields/methods; every other expression's type is
+// either a placeholder type parameter (nothing to look up) or something only
+// Check's full type inference could resolve.
+func resolveThisMemberAccesses(r *resolver, tree *ast.Tree, body ast.NodeIndex, recvStruct *StructInfo) {
+	for n := range tree.Descendants(body) {
+		if tree.Nodes[n].Kind != enums.NodeKinds.MemberExpr {
+			continue
+		}
+		if tree.Nodes[tree.Child(n, 0)].Kind != enums.NodeKinds.ThisExpr {
+			continue
+		}
+		name := tree.Text(n)
+		if sym, ok := recvStruct.Fields[name]; ok {
+			r.info.Refs[n] = sym
+			continue
+		}
+		if sym, ok := recvStruct.Methods[name]; ok {
+			r.info.Refs[n] = sym
+		}
+	}
 }
 
 func placeholderTypes(n int) []Type {

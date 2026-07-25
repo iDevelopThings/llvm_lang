@@ -151,3 +151,170 @@ func TestReferences_GenericStructMethod_CallSiteFindsDeclarationAndSibling(t *te
 		t.Fatalf("len(locs) = %d, want 3 (declaration + a.Get() + b.Get()): %+v", len(locs), locs)
 	}
 }
+
+// TestReferences_GenericStructField_ThisAccessInConstructorFindsFieldDeclaration
+// covers the same bug's constructor-body path specifically: `this.value`
+// inside a generic struct's own constructor goes through
+// resolveConstructorBody, not resolveFuncBody/resolveFuncTemplateForTooling -
+// a separate call site that needs its own `this`.StructInfo fix (see
+// resolveConstructorBody's own doc comment), not just the ordinary-method one.
+func TestReferences_GenericStructField_ThisAccessInConstructorFindsFieldDeclaration(t *testing.T) {
+	src := `struct Box[T] {
+	value T
+
+	constructor(v T) {
+		this.value = v
+	}
+}
+func f() int {
+	b := Box[int](5)
+	return 0
+}
+`
+	w, path := singleFileWorkspace(t, src)
+	fa, _ := w.Analysis(path)
+
+	offset := strings.Index(fa.Tree.File.Src, "this.value") + len("this.")
+	pos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(offset))
+
+	locs := w.References(path, pos, true)
+	if len(locs) != 2 {
+		t.Fatalf("len(locs) = %d, want 2 (the field's own declaration \"value T\" + this.value's own use inside the constructor): %+v", len(locs), locs)
+	}
+}
+
+// TestReferences_GenericStructField_ThisAccessInDestructorFindsFieldDeclaration
+// is the destructor-body counterpart to the constructor test above -
+// resolveDestructorBody is its own separate call site needing the identical
+// this.StructInfo fix (see resolveDestructorBody's own doc comment).
+func TestReferences_GenericStructField_ThisAccessInDestructorFindsFieldDeclaration(t *testing.T) {
+	src := `struct Box[T] {
+	value T
+
+	destructor() {
+		print(this.value)
+	}
+}
+func f() int {
+	b := Box[int](5)
+	return 0
+}
+`
+	w, path := singleFileWorkspace(t, src)
+	fa, _ := w.Analysis(path)
+
+	offset := strings.Index(fa.Tree.File.Src, "this.value") + len("this.")
+	pos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(offset))
+
+	locs := w.References(path, pos, true)
+	if len(locs) != 2 {
+		t.Fatalf("len(locs) = %d, want 2 (the field's own declaration \"value T\" + this.value's own use inside the destructor): %+v", len(locs), locs)
+	}
+}
+
+// TestReferences_GenericStructField_ThisAccessInGenericMethodOfConcreteStruct
+// is the regression test for a gap the required separate review pass caught:
+// resolveFuncTemplateForTooling's own "default" branch (a generic METHOD
+// attached to an already-concrete, non-generic struct - the receiver type
+// itself needs no synthetic shadow at all, only the method's own type
+// parameter does) never computed recvStruct, so resolveThisMemberAccesses
+// was never called for this one specific shape even though the two other
+// shapes (a method of a generic struct template, and a plain generic free
+// function) were both fixed.
+func TestReferences_GenericStructField_ThisAccessInGenericMethodOfConcreteStruct(t *testing.T) {
+	src := `struct Entity {
+	id int
+}
+func (Entity) Tag[T](v T) T {
+	print(this.id)
+	return v
+}
+func main() {
+	e := Entity{1}
+	print(e.Tag[int](5))
+}
+`
+	w, path := singleFileWorkspace(t, src)
+	fa, _ := w.Analysis(path)
+
+	offset := strings.Index(fa.Tree.File.Src, "this.id") + len("this.")
+	pos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(offset))
+
+	locs := w.References(path, pos, true)
+	if len(locs) != 2 {
+		t.Fatalf("len(locs) = %d, want 2 (the field's own declaration \"id int\" + this.id's own use inside Tag[T]): %+v", len(locs), locs)
+	}
+}
+
+// TestReferences_GenericStructMethod_ThisCallFindsMethodDeclaration covers
+// the method half of the same fix - resolveThisMemberAccesses resolves
+// `this.method()` against recvStruct.Methods too, not just Fields.
+func TestReferences_GenericStructMethod_ThisCallFindsMethodDeclaration(t *testing.T) {
+	src := `struct Box[T] {
+	value T
+}
+func (Box[T]) Get() T {
+	return this.value
+}
+func (Box[T]) GetTwice() T {
+	print(this.Get())
+	return this.Get()
+}
+`
+	w, path := singleFileWorkspace(t, src)
+	fa, _ := w.Analysis(path)
+
+	declOffset := strings.Index(fa.Tree.File.Src, "Get() T")
+	pos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(declOffset))
+
+	locs := w.References(path, pos, true)
+	if len(locs) != 3 {
+		t.Fatalf("len(locs) = %d, want 3 (the declaration + both this.Get() calls inside GetTwice): %+v", len(locs), locs)
+	}
+}
+
+// TestReferences_GenericStructField_ThisAccessToUnknownMemberDoesNotPanic
+// covers the invalid-path case: `this.bogus`, naming neither a real field
+// nor a real method, must leave Info.Refs unset for that node rather than
+// panicking or resolving to something wrong - References on it (and just
+// analyzing the file at all) must degrade gracefully.
+func TestReferences_GenericStructField_ThisAccessToUnknownMemberDoesNotPanic(t *testing.T) {
+	src := `struct Box[T] {
+	value T
+}
+func (Box[T]) Get() T {
+	return this.bogus
+}
+`
+	w, path := singleFileWorkspace(t, src)
+	fa, _ := w.Analysis(path)
+
+	offset := strings.Index(fa.Tree.File.Src, "this.bogus") + len("this.")
+	pos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(offset))
+
+	locs := w.References(path, pos, true)
+	if len(locs) != 0 {
+		t.Errorf("References(this.bogus) = %+v, want none (not a real field/method)", locs)
+	}
+}
+
+// TestReferences_GenericStructField_ThisAccessFindsFieldDeclaration is the
+// regression test for a real reported bug: `this.value`'s own field-name
+// reference inside a generic struct's method body never resolved at all -
+// ordinary struct field access is only ever resolved by Check (which needs
+// the object's own checked Type), and a generic template's body never runs
+// Check (see sema/tooling.go's own doc comment) - so Info.Refs had no entry
+// for it at all, and "Find Usages" on `this.value` (genericMethodRefsFixture's
+// own Get method) reported nothing.
+func TestReferences_GenericStructField_ThisAccessFindsFieldDeclaration(t *testing.T) {
+	w, path := singleFileWorkspace(t, genericMethodRefsFixture)
+	fa, _ := w.Analysis(path)
+
+	offset := strings.Index(fa.Tree.File.Src, "this.value") + len("this.")
+	pos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(offset))
+
+	locs := w.References(path, pos, true)
+	if len(locs) != 2 {
+		t.Fatalf("len(locs) = %d, want 2 (the field's own declaration \"value T\" + this.value's own use inside Get): %+v", len(locs), locs)
+	}
+}

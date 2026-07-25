@@ -674,6 +674,16 @@ func (r *resolver) resolveConstructorBody(pkg *Scope, info *StructInfo, ctor ast
 	fnScope := newScope(ScopeFunc, pkg, ctor)
 	r.info.Scopes[ctor] = fnScope
 	fnScope.Receiver = receiverSymbol(info.Symbol, fnScope)
+	// info.Symbol.StructInfo already equals info for an ordinary struct or a
+	// real generic instantiation (both self-referential by construction),
+	// but NOT for a generic template's own tooling-only shadow (see
+	// sema/tooling.go's shadowStructInfo: its Symbol is the real, shared
+	// template Symbol, deliberately left with a nil StructInfo of its own) -
+	// this direct assignment is a no-op for the first two, and the fix for
+	// the third: `this` inside the constructor must carry the StructInfo the
+	// caller actually resolved it against, not whatever info.Symbol's own
+	// (possibly nil) back-pointer happens to hold.
+	fnScope.Receiver.StructInfo = info
 
 	for _, param := range r.tree.Children(paramList) {
 		r.declareLocal(fnScope, param, r.tree.Child(param, 0), SymParam)
@@ -715,6 +725,9 @@ func (r *resolver) resolveDestructorBody(pkg *Scope, info *StructInfo, dtor ast.
 	fnScope := newScope(ScopeFunc, pkg, dtor)
 	r.info.Scopes[dtor] = fnScope
 	fnScope.Receiver = receiverSymbol(info.Symbol, fnScope)
+	// See resolveConstructorBody's identical assignment for why this isn't
+	// redundant with what receiverSymbol already copied.
+	fnScope.Receiver.StructInfo = info
 
 	for _, param := range r.tree.Children(paramList) {
 		r.declareLocal(fnScope, param, r.tree.Child(param, 0), SymParam)

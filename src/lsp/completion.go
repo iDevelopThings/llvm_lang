@@ -62,6 +62,21 @@ func (w *Workspace) memberCompletions(fa *FileAnalysis, memberExpr ast.NodeIndex
 			return enumVariantCompletions(objSym.EnumInfo)
 		case sema.SymPackage:
 			return w.packageMemberCompletions(objSym.Package)
+		case sema.SymReceiver:
+			// `this.<cursor>` inside a generic template's own method body:
+			// Info.Types[object] above is never populated there (only Check
+			// sets it, and a template body never runs Check - see
+			// sema/tooling.go's own doc comment), so this receiver's own
+			// StructInfo/EnumInfo - set by that same tooling pass
+			// specifically so this works - is the only way to answer with
+			// real fields/methods instead of falling through to the
+			// not-yet-imported-package guess below.
+			switch {
+			case objSym.StructInfo != nil:
+				return w.valueMemberCompletions(sema.Type{Kind: sema.TypeStruct, Struct: objSym.StructInfo})
+			case objSym.EnumInfo != nil:
+				return w.valueMemberCompletions(sema.Type{Kind: sema.TypeEnum, Enum: objSym.EnumInfo})
+			}
 		}
 	}
 

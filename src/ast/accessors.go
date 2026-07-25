@@ -83,6 +83,32 @@ func (t *Tree) StructFieldNodes(decl NodeIndex) iter.Seq2[NodeIndex, NodeIndex] 
 	}
 }
 
+// Descendants yields every node in n's own subtree, pre-order depth-first (n
+// itself first, then each child's own subtree in turn) - the general "walk
+// everything under here regardless of shape" case Children/StructFields/etc.
+// don't cover, since they only ever look at direct children of a known node
+// kind. Needed by anything searching for a particular node shape anywhere
+// under a subtree rather than at one fixed position (e.g. sema's own
+// tooling.go, resolving every `this.field` MemberExpr inside a generic
+// method's body, wherever it appears, not just at one known child slot).
+func (t *Tree) Descendants(n NodeIndex) iter.Seq[NodeIndex] {
+	return func(yield func(NodeIndex) bool) {
+		var walk func(NodeIndex) bool
+		walk = func(cur NodeIndex) bool {
+			if !yield(cur) {
+				return false
+			}
+			for _, c := range t.Children(cur) {
+				if !walk(c) {
+					return false
+				}
+			}
+			return true
+		}
+		walk(n)
+	}
+}
+
 // StructConstructors yields decl's (a StructDecl's) ConstructorDecl children,
 // in declaration order - the constructor-kind counterpart to StructFields
 // (see LANGUAGE.md's "Constructors" section). iter.Seq, not a plain slice:

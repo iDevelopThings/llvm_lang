@@ -156,3 +156,55 @@ func TestDumpProducesIndentedOutline(t *testing.T) {
 		t.Errorf("Dump() = %q, want %q", out, want)
 	}
 }
+
+// TestDescendants_PreOrderIncludesSelfAndEveryChild covers Descendants' own
+// contract: n itself first, then each child's own subtree in declaration
+// order - the shape a caller searching for a node kind anywhere under a
+// subtree (not just at one known child slot) depends on.
+func TestDescendants_PreOrderIncludesSelfAndEveryChild(t *testing.T) {
+	tree, bin, left, right := buildBinaryExpr(t)
+
+	var got []NodeIndex
+	for n := range tree.Descendants(bin) {
+		got = append(got, n)
+	}
+	want := []NodeIndex{bin, left, right}
+	if len(got) != len(want) {
+		t.Fatalf("Descendants(bin) = %v, want %v", got, want)
+	}
+	for i, n := range want {
+		if got[i] != n {
+			t.Errorf("Descendants(bin)[%d] = %d, want %d", i, got[i], n)
+		}
+	}
+}
+
+// TestDescendants_LeafYieldsOnlyItself covers the base case: a node with no
+// children yields exactly one entry, itself.
+func TestDescendants_LeafYieldsOnlyItself(t *testing.T) {
+	tree, _, left, _ := buildBinaryExpr(t)
+
+	var got []NodeIndex
+	for n := range tree.Descendants(left) {
+		got = append(got, n)
+	}
+	if len(got) != 1 || got[0] != left {
+		t.Errorf("Descendants(left) = %v, want [%d]", got, left)
+	}
+}
+
+// TestDescendants_StopsEarlyWhenYieldReturnsFalse covers the iter.Seq
+// contract every consumer of a range-over-func relies on: a break inside the
+// range loop must stop the walk, not visit every remaining node regardless.
+func TestDescendants_StopsEarlyWhenYieldReturnsFalse(t *testing.T) {
+	tree, bin, _, _ := buildBinaryExpr(t)
+
+	var got []NodeIndex
+	for n := range tree.Descendants(bin) {
+		got = append(got, n)
+		break
+	}
+	if len(got) != 1 || got[0] != bin {
+		t.Errorf("Descendants(bin) after one iteration = %v, want [%d]", got, bin)
+	}
+}

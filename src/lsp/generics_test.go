@@ -196,6 +196,38 @@ func TestGenerics_Completion_IdentifierInsideTemplateBodySeesParams(t *testing.T
 	}
 }
 
+// TestGenerics_Completion_ThisMemberInsideTemplateBodyListsFieldsAndMethods
+// is the completion-level regression test for the same reported bug as
+// TestReferences_GenericStructField_ThisAccessFindsFieldDeclaration:
+// `this.<cursor>` inside a generic struct's own method body returned no
+// suggestions at all - memberCompletions' own first check reads
+// Info.Types[object], which a generic template's body never gets (only
+// Check populates it, and templates never run Check), so it fell through
+// all the way to the not-yet-imported-package fallback instead of listing
+// this's own real fields/methods.
+func TestGenerics_Completion_ThisMemberInsideTemplateBodyListsFieldsAndMethods(t *testing.T) {
+	src := `struct Box[T] {
+	value T
+	other T
+}
+func (Box[T]) Get() T {
+	return this.value
+}
+func (Box[T]) Set(v T) {
+	this.`
+	w, path := singleFileWorkspace(t, src)
+	fa, _ := w.Analysis(path)
+	pos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(len(fa.Tree.File.Src)))
+
+	items := w.Completion(path, pos)
+	labels := completionLabels(items)
+	for _, want := range []string{"value", "other", "Get"} {
+		if !slices.Contains(labels, want) {
+			t.Errorf("completion labels at this.<EOF> inside a generic method = %v, missing %q", labels, want)
+		}
+	}
+}
+
 // TestGenerics_SemanticTokens_ParameterInsideUninstantiatedTemplate is the
 // assertion for the literal symptom this whole round started from: a
 // never-instantiated generic function's body had no Refs at all, so every
