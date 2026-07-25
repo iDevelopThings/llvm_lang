@@ -1,0 +1,154 @@
+// Generics coverage across every LSP capability - the actual root problem
+// this whole round started from: nothing under src/lsp exercised generics
+// at all, so a real user-visible regression (see semantictokens_test.go's
+// own TestSemanticTokens_UnresolvedIdentifierGetsReadonlyFallback) went
+// unnoticed. References/DocumentHighlight generics coverage lives in
+// references_test.go/highlight_symbol_folding_test.go (the clone-
+// duplication bug those fixed needed its own dedicated fixtures); Detail
+// rendering's generics coverage lives in signature_test.go and
+// sema/query_test.go. This file covers what isn't exercised anywhere else:
+// Definition, DocumentSymbols, FoldingRanges, Hover and Completion
+// specifically *inside* a generic template's own body (the tooling-pass
+// fix's whole point), plus a broken/incomplete-source variant - per this
+// project's own "invalid-path coverage, not just the happy path" standard.
+package lsp
+
+import (
+	"slices"
+	"strings"
+	"testing"
+
+	"llvm_lang/src/lexer"
+)
+
+const genericStructFixture = `struct Box[T] {
+	value T
+}
+func (Box[T]) Get() T {
+	return this.value
+}
+func Sum[T](a T, b T) T {
+	return a + b
+}
+func f() int {
+	b := Box[int]{7}
+	return b.Get()
+}
+`
+
+func TestGenerics_Definition_InstantiatedCallSiteLandsOnRealDeclaration(t *testing.T) {
+	w, path := singleFileWorkspace(t, genericStructFixture)
+	fa, _ := w.Analysis(path)
+
+	callOffset := strings.Index(fa.Tree.File.Src, "b.Get()") + len("b.")
+	pos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(callOffset))
+
+	loc := w.Definition(path, pos)
+	if loc == nil {
+		t.Fatal("Definition returned nil for an instantiated method call site")
+	}
+
+	wantOffset := strings.Index(fa.Tree.File.Src, "Get()")
+	wantPos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(wantOffset))
+	if loc.Range.Start != wantPos {
+		t.Errorf("Definition landed at %+v, want the real declaration's own name at %+v", loc.Range.Start, wantPos)
+	}
+}
+
+func TestGenerics_DocumentSymbols_ShowsTemplateAndMethods(t *testing.T) {
+	w, path := singleFileWorkspace(t, genericStructFixture)
+
+	syms := w.DocumentSymbols(path)
+	var names []string
+	for _, s := range syms {
+		names = append(names, s.Name)
+	}
+	for _, want := range []string{"Box", "Get", "Sum", "f"} {
+		if !slices.Contains(names, want) {
+			t.Errorf("DocumentSymbols names %v missing %q (a generic template, or its method, silently dropped from the outline)", names, want)
+		}
+	}
+}
+
+func TestGenerics_FoldingRanges_TemplateBodyFolds(t *testing.T) {
+	w, path := singleFileWorkspace(t, genericStructFixture)
+
+	folds := w.FoldingRanges(path)
+	if len(folds) == 0 {
+		t.Fatal("FoldingRanges returned none - a generic struct/method/func body must still fold like any other")
+	}
+}
+
+// TestGenerics_Hover_WorksInsideTemplateBody is the Hover-level regression
+// test for the tooling-pass fix: a generic template's own body used to have
+// no Info.Refs/Info.Types at all (only each instantiation's clone did), so
+// hovering a parameter *inside* the template itself (not at a call site)
+// returned nothing.
+func TestGenerics_Hover_WorksInsideTemplateBody(t *testing.T) {
+	w, path := singleFileWorkspace(t, genericStructFixture)
+	fa, _ := w.Analysis(path)
+
+	// The 'a' in Sum[T](a T, b T) T's own body: `return a + b`.
+	offset := strings.Index(fa.Tree.File.Src, "return a + b") + len("return ")
+	pos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(offset))
+
+	hover := w.Hover(path, pos)
+	if hover == nil {
+		t.Fatal("Hover returned nil for a parameter reference inside a generic template's own body")
+	}
+}
+
+// TestGenerics_Completion_IdentifierInsideTemplateBodySeesParams is the
+// Completion-level regression test for the same tooling-pass fix: before
+// it, identifier completion inside a generic body only ever saw
+// package/universe scope - no params, no locals, since Info.Scopes had no
+// entry for the template's own FuncDecl/Block nodes either.
+func TestGenerics_Completion_IdentifierInsideTemplateBodySeesParams(t *testing.T) {
+	w, path := singleFileWorkspace(t, genericStructFixture)
+	fa, _ := w.Analysis(path)
+
+	offset := strings.Index(fa.Tree.File.Src, "return a + b") + len("return ")
+	pos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(offset))
+
+	items := w.Completion(path, pos)
+	labels := completionLabels(items)
+	for _, want := range []string{"a", "b"} {
+		if !slices.Contains(labels, want) {
+			t.Errorf("completion labels inside Sum[T]'s own body = %v, missing %q", labels, want)
+		}
+	}
+}
+
+// TestGenerics_DanglingMemberAccessInsideGenericMethod_NoCrash is the
+// broken/incomplete-source variant every capability above needs to survive
+// (per this project's own invalid-path-coverage standard): `this.` with
+// nothing typed after it yet, inside a generic method's own body - a
+// dangling member access is itself a parse error by construction (see
+// completion.go's own doc comment on why that's already handled at the
+// frontend.RunProgram level), now compounded with the template-body gap
+// this round's fix targets.
+func TestGenerics_DanglingMemberAccessInsideGenericMethod_NoCrash(t *testing.T) {
+	src := `struct Box[T] {
+	value T
+}
+func (Box[T]) Get() T {
+	this.
+}
+`
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("a dangling member access inside a generic method panicked: %v", r)
+		}
+	}()
+
+	w, path := singleFileWorkspace(t, src)
+	fa, _ := w.Analysis(path)
+	offset := strings.Index(fa.Tree.File.Src, "this.\n") + len("this.")
+	pos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(offset))
+
+	w.Hover(path, pos)
+	w.Completion(path, pos)
+	w.DocumentSymbols(path)
+	w.FoldingRanges(path)
+	w.SemanticTokens(path)
+}

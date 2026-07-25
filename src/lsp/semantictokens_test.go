@@ -55,6 +55,45 @@ func main() int {
 	}
 }
 
+// TestSemanticTokens_UnresolvedIdentifierGetsReadonlyFallback is the
+// regression case for a real reported bug: an unresolved identifier (here,
+// simulated the same way TestSemanticTokens_UncapturedKeywords already does
+// via a nil Info - matching what a generic template's own unresolved body
+// looks like today) must still carry modReadonly on its fallback variable
+// classification. Without it, LSP4IJ's default color mapping renders every
+// such identifier as REASSIGNED_LOCAL_VARIABLE (underlined), regardless of
+// whether it's actually a variable at all - confirmed against a real
+// screenshot of a whole generic struct rendering as a wall of underlines.
+func TestSemanticTokens_UnresolvedIdentifierGetsReadonlyFallback(t *testing.T) {
+	src := `func f() int {
+	return x
+}
+`
+	file := lexer.NewFile("test.llx", src)
+	tree, diags := parser.ParseFile(file)
+	if diags.HasErrors() {
+		t.Fatalf("unexpected parse errors: %v", diags.Sorted())
+	}
+
+	covered := make(map[lexer.Pos]bool)
+	var raw []rawToken
+	collectNodeTokens(tree, nil, tree.Root, make(map[*sema.Symbol]bool), covered, &raw)
+
+	found := false
+	for _, tok := range raw {
+		if tok.typeIdx != semTokVariable {
+			continue
+		}
+		found = true
+		if tok.modifiers&modReadonly == 0 {
+			t.Errorf("unresolved variable token modifiers = %d, want modReadonly set", tok.modifiers)
+		}
+	}
+	if !found {
+		t.Fatal("expected at least one semTokVariable token for the unresolved identifier")
+	}
+}
+
 // TestSemanticTokens_ImportKeyword covers "import" specifically - it needs
 // a real second package to resolve against (see loadProgram, defined in
 // analyze_test.go), since ImportDecl's own Tok is the string path, not the

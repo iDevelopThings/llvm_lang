@@ -1,6 +1,10 @@
 package ast
 
-import "llvm_lang/src/enums"
+import (
+	"strings"
+
+	"llvm_lang/src/enums"
+)
 
 // SymbolOutlineKind classifies a DeclSymbol - a generic "kind of named
 // declaration" concept any consumer walking a Tree's own top-level
@@ -35,6 +39,14 @@ type DeclSymbol struct {
 	Span     Span
 	NameSpan Span
 	Children []DeclSymbol
+
+	// Detail is a compact, single-line rendering of a function's own
+	// parameter list and return type, or a struct's own field list -
+	// exactly as written in source (see Tree.SourceText), since this
+	// package has no sema dependency to render an instantiated generic's
+	// substituted types with instead (see src/lsp's symbolDetail for that
+	// richer, Type-aware rendering). "" for every other kind.
+	Detail string
 }
 
 // DeclSymbols returns t's own top-level declarations (var/func/struct/enum/
@@ -73,7 +85,9 @@ func (t *Tree) declSymbol(decl NodeIndex) (sym DeclSymbol, ok bool) {
 		if t.FuncReceiver(decl) != InvalidNode {
 			kind = SymbolOutlineMethod
 		}
-		return t.namedSymbol(decl, t.FuncName(decl), kind, nil), true
+		sym := t.namedSymbol(decl, t.FuncName(decl), kind, nil)
+		sym.Detail = t.funcSignatureSourceText(decl)
+		return sym, true
 	case enums.NodeKinds.ExternFuncDecl:
 		return t.namedSymbol(decl, t.ExternFuncName(decl), SymbolOutlineFunction, nil), true
 	case enums.NodeKinds.StructDecl:
@@ -96,7 +110,34 @@ func (t *Tree) structSymbol(decl NodeIndex) DeclSymbol {
 	for dtor := range t.StructDestructors(decl) {
 		children = append(children, t.keywordSymbol(dtor, SymbolOutlineDestructor))
 	}
-	return t.namedSymbol(decl, t.StructName(decl), SymbolOutlineStruct, children)
+	sym := t.namedSymbol(decl, t.StructName(decl), SymbolOutlineStruct, children)
+	sym.Detail = t.structFieldsSourceText(decl)
+	return sym
+}
+
+// funcSignatureSourceText renders decl's own parameter list and return
+// type exactly as written - "(v T, n int) int" - via SourceText, not a
+// resolved Type (this package has none to resolve with).
+func (t *Tree) funcSignatureSourceText(decl NodeIndex) string {
+	var params []string
+	for _, p := range t.Children(t.FuncParamList(decl)) {
+		params = append(params, t.Text(t.Child(p, 0))+" "+t.SourceText(t.Child(p, 1)))
+	}
+	sig := "(" + strings.Join(params, ", ") + ")"
+	if ret := t.FuncReturnType(decl); ret != InvalidNode {
+		sig += " " + t.SourceText(ret)
+	}
+	return sig
+}
+
+// structFieldsSourceText renders decl's own fields, in declaration order,
+// as a compact "{ x int, y int }" summary, exactly as written.
+func (t *Tree) structFieldsSourceText(decl NodeIndex) string {
+	var fields []string
+	for _, f := range t.StructFields(decl) {
+		fields = append(fields, t.Text(t.Child(f, 0))+" "+t.SourceText(t.Child(f, 1)))
+	}
+	return "{ " + strings.Join(fields, ", ") + " }"
 }
 
 func (t *Tree) enumSymbol(decl NodeIndex) DeclSymbol {

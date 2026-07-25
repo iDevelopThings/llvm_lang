@@ -71,6 +71,26 @@ func (t *Tree) Parent(n NodeIndex) NodeIndex {
 	return t.Nodes[n].Parent
 }
 
+// RootAncestor returns n's ultimate ancestor, walking Parent repeatedly
+// until it finds a node with no parent of its own. For any node actually
+// reachable from t.Root by walking Children, that's t.Root itself. For a
+// monomorphized-generic instantiation's own clone (see CloneSubtree), whose
+// root is never wired as anyone's child, it's the clone's own unlinked
+// root instead - RootAncestor(n) != t.Root is the containment test for "is
+// n really part of this file's own source tree, or a synthetic clone".
+func (t *Tree) RootAncestor(n NodeIndex) NodeIndex {
+	if n == InvalidNode {
+		return InvalidNode
+	}
+	for {
+		parent := t.Parent(n)
+		if parent == InvalidNode {
+			return n
+		}
+		n = parent
+	}
+}
+
 // Children returns n's children in declaration order. The returned slice
 // aliases the tree's shared arena; callers must not modify it.
 func (t *Tree) Children(n NodeIndex) []NodeIndex {
@@ -117,6 +137,17 @@ func (t *Tree) SpanOf(n NodeIndex) Span {
 // Nodes whose Kind doesn't use Tok return "".
 func (t *Tree) Text(n NodeIndex) string {
 	return t.File.Lexeme(t.Nodes[n].Tok)
+}
+
+// SourceText returns the exact source text spanning n's own full extent
+// (its Span - every token n covers, not just its own leading one; contrast
+// Text) - the "render this node exactly as written" fallback wherever a
+// resolved sema.Type isn't available to render from instead (an unchecked
+// generic template, or a not-yet-imported package candidate with no
+// sema.Info at all - see src/lsp's symbolDetail).
+func (t *Tree) SourceText(n NodeIndex) string {
+	span := t.SpanOf(n)
+	return t.File.Src[span.Start:span.End]
 }
 
 // Dump renders the tree as an indented outline, for tests and debugging -

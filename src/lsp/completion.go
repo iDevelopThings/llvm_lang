@@ -53,7 +53,7 @@ func (w *Workspace) memberCompletions(fa *FileAnalysis, memberExpr ast.NodeIndex
 	object := fa.Tree.Child(memberExpr, 0)
 
 	if objType, ok := fa.Info.Types[object]; ok && !objType.IsInvalid() {
-		return valueMemberCompletions(objType)
+		return w.valueMemberCompletions(objType)
 	}
 
 	if objSym, ok := fa.Info.Refs[object]; ok && objSym != nil {
@@ -61,7 +61,7 @@ func (w *Workspace) memberCompletions(fa *FileAnalysis, memberExpr ast.NodeIndex
 		case sema.SymEnum:
 			return enumVariantCompletions(objSym.EnumInfo)
 		case sema.SymPackage:
-			return packageMemberCompletions(objSym.Package)
+			return w.packageMemberCompletions(objSym.Package)
 		}
 	}
 
@@ -71,23 +71,23 @@ func (w *Workspace) memberCompletions(fa *FileAnalysis, memberExpr ast.NodeIndex
 // valueMemberCompletions handles case 1 above: a real value's own fields/
 // methods, auto-dereferencing one pointer level exactly like ordinary
 // member access does (see sema.Type.Underlying).
-func valueMemberCompletions(objType sema.Type) []protocol.CompletionItem {
+func (w *Workspace) valueMemberCompletions(objType sema.Type) []protocol.CompletionItem {
 	switch objType.Underlying().Kind {
 	case sema.TypeStruct:
 		info := objType.Underlying().Struct
 		items := make([]protocol.CompletionItem, 0, len(info.Fields)+len(info.Methods))
 		for name, sym := range info.Fields {
-			items = append(items, symbolCompletionItem(name, protocol.CompletionItemKindField, sym))
+			items = append(items, symbolCompletionItem(w, name, protocol.CompletionItemKindField, sym))
 		}
 		for name, sym := range info.Methods {
-			items = append(items, symbolCompletionItem(name, protocol.CompletionItemKindMethod, sym))
+			items = append(items, symbolCompletionItem(w, name, protocol.CompletionItemKindMethod, sym))
 		}
 		return items
 	case sema.TypeEnum:
 		info := objType.Underlying().Enum
 		items := make([]protocol.CompletionItem, 0, len(info.Methods))
 		for name, sym := range info.Methods {
-			items = append(items, symbolCompletionItem(name, protocol.CompletionItemKindMethod, sym))
+			items = append(items, symbolCompletionItem(w, name, protocol.CompletionItemKindMethod, sym))
 		}
 		return items
 	default:
@@ -112,7 +112,7 @@ func enumVariantCompletions(info *sema.EnumInfo) []protocol.CompletionItem {
 // package's own exported top-level declarations (see LANGUAGE.md's
 // "Imports" section - only a capitalized-name declaration is even visible
 // through a package qualifier at all).
-func packageMemberCompletions(pkg *sema.PackageResult) []protocol.CompletionItem {
+func (w *Workspace) packageMemberCompletions(pkg *sema.PackageResult) []protocol.CompletionItem {
 	if pkg == nil || pkg.Scope == nil {
 		return nil
 	}
@@ -121,7 +121,7 @@ func packageMemberCompletions(pkg *sema.PackageResult) []protocol.CompletionItem
 		if !sym.Exported {
 			continue
 		}
-		items = append(items, symbolCompletionItem(sym.Name, symbolKindToCompletionItemKind(sym.Kind), sym))
+		items = append(items, symbolCompletionItem(w, sym.Name, symbolKindToCompletionItemKind(sym.Kind), sym))
 	}
 	return items
 }
@@ -140,7 +140,7 @@ func (w *Workspace) identifierCompletions(fa *FileAnalysis, n ast.NodeIndex) []p
 	visible := make(map[string]bool)
 	for sym := range scope.Visible() {
 		visible[sym.Name] = true
-		items = append(items, symbolCompletionItem(sym.Name, symbolKindToCompletionItemKind(sym.Kind), sym))
+		items = append(items, symbolCompletionItem(w, sym.Name, symbolKindToCompletionItemKind(sym.Kind), sym))
 	}
 	items = append(items, w.unimportedPackageNameCompletions(fa, visible)...)
 	return items
@@ -150,8 +150,10 @@ func (w *Workspace) identifierCompletions(fa *FileAnalysis, n ast.NodeIndex) []p
 // for a resolved *Symbol - label is passed separately rather than read off
 // sym.Name since a struct/enum member's map key is already the label an
 // LSP client should offer (matters nowhere today, but keeps the field
-// lookup and the display label from silently drifting apart).
-func symbolCompletionItem(label string, kind protocol.CompletionItemKind, sym *sema.Symbol) protocol.CompletionItem {
+// lookup and the display label from silently drifting apart). Detail is
+// populated via symbolDetail (a function's real signature, a struct's own
+// field list) whenever sym is a kind it knows how to render.
+func symbolCompletionItem(w *Workspace, label string, kind protocol.CompletionItemKind, sym *sema.Symbol) protocol.CompletionItem {
 	item := protocol.CompletionItem{
 		Label: label,
 		Kind:  completionItemKindPtr(kind),
@@ -159,6 +161,9 @@ func symbolCompletionItem(label string, kind protocol.CompletionItemKind, sym *s
 	if sym != nil && sym.Tree != nil && sym.Decl != ast.InvalidNode {
 		if doc := sym.Tree.DocComment(sym.Decl); doc != "" {
 			item.Documentation = doc
+		}
+		if detail := symbolDetail(w, sym); detail != "" {
+			item.Detail = &detail
 		}
 	}
 	return item

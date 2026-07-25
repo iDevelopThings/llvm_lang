@@ -2,8 +2,10 @@ package sema
 
 import (
 	"iter"
+	"strings"
 
 	"llvm_lang/src/ast"
+	"llvm_lang/src/enums"
 )
 
 // EnclosingScope returns the nearest Scope that owns n - walking n up
@@ -60,4 +62,63 @@ func (s *Scope) Local() iter.Seq[*Symbol] {
 			}
 		}
 	}
+}
+
+// FuncSignatureText renders decl's own parameter list and return type as a
+// compact "(name Type, ...) Return" string - Type-first via info.Types
+// (nil-safe: a nil info, or one missing an entry - an unchecked generic
+// template, see ResolveTemplateForTooling's own doc comment on why it
+// never populates Types - falls back to decl's own exact source text for
+// that one piece). Reflects an instantiated generic's own substituted
+// types, since an instantiation's clone gets its own, separately-checked
+// Types entries distinct from the template's.
+//
+// decl may be a FuncDecl or an ExternFuncDecl - the two have different
+// child layouts (FuncDecl reserves a leading receiver slot ExternFuncDecl
+// has none - see ast.Tree.ExternFuncParamList's own doc comment on why
+// reading one through the other's accessors silently reads the wrong
+// child), so which accessor set to use is decided here rather than
+// assumed.
+func FuncSignatureText(tree *ast.Tree, info *Info, decl ast.NodeIndex) string {
+	paramList, returnType := tree.FuncParamList(decl), tree.FuncReturnType(decl)
+	if tree.Nodes[decl].Kind == enums.NodeKinds.ExternFuncDecl {
+		paramList, returnType = tree.ExternFuncParamList(decl), tree.ExternFuncReturnType(decl)
+	}
+
+	var params []string
+	for _, p := range tree.Children(paramList) {
+		name := tree.Text(tree.Child(p, 0))
+		params = append(params, name+" "+typeOrSourceText(tree, info, tree.Child(p, 1)))
+	}
+	sig := "(" + strings.Join(params, ", ") + ")"
+	if returnType != ast.InvalidNode {
+		sig += " " + typeOrSourceText(tree, info, returnType)
+	}
+	return sig
+}
+
+// StructFieldsText renders decl's own fields, in declaration order, as a
+// compact "{ name Type, ... }" summary - see FuncSignatureText for the
+// same Type-first-with-source-fallback reasoning.
+func StructFieldsText(tree *ast.Tree, info *Info, decl ast.NodeIndex) string {
+	var fields []string
+	for _, f := range tree.StructFields(decl) {
+		name := tree.Text(tree.Child(f, 0))
+		fields = append(fields, name+" "+typeOrSourceText(tree, info, tree.Child(f, 1)))
+	}
+	return "{ " + strings.Join(fields, ", ") + " }"
+}
+
+// typeOrSourceText renders typeNode's own checked Type when info has a
+// valid one recorded, else its exact source text.
+func typeOrSourceText(tree *ast.Tree, info *Info, typeNode ast.NodeIndex) string {
+	if typeNode == ast.InvalidNode {
+		return ""
+	}
+	if info != nil {
+		if t, ok := info.Types[typeNode]; ok && !t.IsInvalid() {
+			return t.String()
+		}
+	}
+	return tree.SourceText(typeNode)
 }

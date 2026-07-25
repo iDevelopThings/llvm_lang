@@ -59,6 +59,44 @@ func TestParentLinkSetOnConstruction(t *testing.T) {
 	}
 }
 
+// TestRootAncestor_DistinguishesRealTreeFromClone is the regression test
+// for a real bug affecting References/DocumentHighlight: a monomorphized
+// generic instantiation's own clone (CloneSubtree) is a real, separately
+// addressable subtree whose own root is never wired as anyone's child -
+// RootAncestor must tell the two apart, not just check for a nil-ish
+// Parent (both a real tree's Root and a clone's own root have
+// Parent == InvalidNode).
+func TestRootAncestor_DistinguishesRealTreeFromClone(t *testing.T) {
+	tree, bin, left, right := buildBinaryExpr(t)
+	tree.Root = bin
+
+	if got := tree.RootAncestor(left); got != tree.Root {
+		t.Errorf("RootAncestor(left) = %d, want %d (tree.Root)", got, tree.Root)
+	}
+	if got := tree.RootAncestor(right); got != tree.Root {
+		t.Errorf("RootAncestor(right) = %d, want %d (tree.Root)", got, tree.Root)
+	}
+	if got := tree.RootAncestor(bin); got != tree.Root {
+		t.Errorf("RootAncestor(bin) = %d, want %d (bin is tree.Root itself)", got, tree.Root)
+	}
+
+	clone := tree.CloneSubtree(bin)
+	if clone == tree.Root {
+		t.Fatal("CloneSubtree produced the same NodeIndex as the original - test setup broken")
+	}
+	cloneChild := tree.Child(clone, 0)
+	if got := tree.RootAncestor(cloneChild); got == tree.Root {
+		t.Error("RootAncestor(a clone's own child) equals tree.Root - clone must be distinguishable")
+	}
+	if got := tree.RootAncestor(cloneChild); got != clone {
+		t.Errorf("RootAncestor(a clone's own child) = %d, want %d (the clone's own unlinked root)", got, clone)
+	}
+
+	if got := tree.RootAncestor(InvalidNode); got != InvalidNode {
+		t.Errorf("RootAncestor(InvalidNode) = %d, want InvalidNode", got)
+	}
+}
+
 func TestSiblingNavigation(t *testing.T) {
 	tree, _, left, right := buildBinaryExpr(t)
 

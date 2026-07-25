@@ -51,9 +51,16 @@ func analyzeProgram(prog *loader.Program, generation int) map[string]*FileAnalys
 
 	out := make(map[string]*FileAnalysis, len(fe.Trees))
 	for _, tree := range fe.Trees {
+		info := fe.Infos[tree]
+		// A generic declaration's own body is never resolved by the real
+		// pipeline (only each instantiation is) - see
+		// sema.ResolveTemplatesForTooling's own doc comment - which
+		// otherwise leaves every hover/completion/semantic-highlighting
+		// query inside one with nothing to read.
+		sema.ResolveTemplatesForTooling(tree, info)
 		out[tree.File.Name] = &FileAnalysis{
 			Tree:       tree,
-			Info:       fe.Infos[tree],
+			Info:       info,
 			Diags:      fe.Diags[tree],
 			Generation: generation,
 		}

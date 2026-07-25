@@ -264,20 +264,26 @@ func classifyNodeToken(tok lexer.Token, info *sema.Info, n ast.NodeIndex, reassi
 // Symbol (Info.Refs), when Check/Resolve reached it at all - falling back to
 // a plain variable classification (this package's own documented fallback,
 // see the approved plan) when info is nil, or the node was never resolved
-// (an undefined-name error, or a node kind Resolve/Check deliberately never
-// populates Refs for).
+// (an undefined-name error, a generic template's own unresolved body - see
+// sema.ResolveTemplateForTooling's own doc comment for why that's only a
+// partial mitigation - or a node kind Resolve/Check deliberately never
+// populates Refs for). The fallback always carries modReadonly (never 0):
+// LSP4IJ's default color mapping renders a modifier-less "variable" token as
+// REASSIGNED_LOCAL_VARIABLE (underlined) regardless of whether it's actually
+// a variable at all, so every unresolved identifier in the file would
+// otherwise render as a wall of spurious underlines - see
+// collectReassignedSymbols' own doc comment for the identical reasoning
+// applied to a real SymVar/SymParam/SymReceiver.
 //
 // A SymVar/SymParam/SymReceiver that reassigned doesn't contain gets the
-// readonly modifier - see collectReassignedSymbols' own doc comment for why
-// this matters beyond mere accuracy (a client-side default-color-mapping
-// quirk, not just a nice-to-have).
+// readonly modifier too, for the same reason.
 func classifyIdentToken(info *sema.Info, n ast.NodeIndex, reassigned map[*sema.Symbol]bool) (typeIdx, modifiers int, ok bool) {
 	if info == nil {
-		return semTokVariable, 0, true
+		return semTokVariable, modReadonly, true
 	}
 	sym, refOK := info.Refs[n]
 	if !refOK || sym == nil {
-		return semTokVariable, 0, true
+		return semTokVariable, modReadonly, true
 	}
 	switch sym.Kind {
 	case sema.SymFunc:

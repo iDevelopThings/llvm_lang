@@ -111,6 +111,42 @@ func f(p Point) int {
 	}
 }
 
+// TestCompletion_ItemsCarryDetail covers a real feature request: a
+// function completion candidate must show its real signature, and a
+// struct candidate its real field list, not just a bare name.
+func TestCompletion_ItemsCarryDetail(t *testing.T) {
+	src := `struct Point {
+	x int
+	y int
+}
+func f() int {
+	x := 1
+	return x
+}
+`
+	w, path := singleFileWorkspace(t, src)
+	fa, _ := w.Analysis(path)
+	offset := strings.Index(fa.Tree.File.Src, "return x")
+	pos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(offset))
+
+	items := w.Completion(path, pos)
+	var pointDetail, fDetail *string
+	for i := range items {
+		switch items[i].Label {
+		case "Point":
+			pointDetail = items[i].Detail
+		case "f":
+			fDetail = items[i].Detail
+		}
+	}
+	if pointDetail == nil || *pointDetail != "{ x int, y int }" {
+		t.Errorf("Point's Detail = %v, want \"{ x int, y int }\"", pointDetail)
+	}
+	if fDetail == nil || *fDetail != "() int" {
+		t.Errorf("f's Detail = %v, want \"() int\"", fDetail)
+	}
+}
+
 func TestCompletion_EnumVariantsAndMethods(t *testing.T) {
 	src := `enum Shape {
 	Circle

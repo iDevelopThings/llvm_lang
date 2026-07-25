@@ -520,6 +520,27 @@ func (t *Tree) nodeAtIn(n NodeIndex, pos lexer.Pos) NodeIndex {
 	return n
 }
 
+// FindIdentByText depth-first searches from n for the first Ident node
+// whose own text is exactly text, or InvalidNode if none matches - a
+// convenience for locating a specific occurrence inside a real parsed tree
+// without hand-indexing Child() calls, useful anywhere a test or tool needs
+// "the node for this name" rather than "the node at this position"
+// (NodeAt's own job).
+func (t *Tree) FindIdentByText(n NodeIndex, text string) NodeIndex {
+	if n == InvalidNode {
+		return InvalidNode
+	}
+	if t.Nodes[n].Kind == enums.NodeKinds.Ident && t.Text(n) == text {
+		return n
+	}
+	for _, c := range t.Children(n) {
+		if found := t.FindIdentByText(c, text); found != InvalidNode {
+			return found
+		}
+	}
+	return InvalidNode
+}
+
 // LeadingToken returns n's own leftmost token - usually n.Tok directly (most
 // declaration kinds carry their own leading keyword there, see Node's own
 // doc comment), but for a kind whose Tok is unused (e.g. a struct Field,

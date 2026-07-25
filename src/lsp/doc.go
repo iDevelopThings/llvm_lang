@@ -12,4 +12,18 @@
 // "Incremental reparse / a real green-red tree for the LSP" entry for the
 // full write-up of what a real incremental architecture would need and why
 // it was deliberately deferred.
+//
+// When a language feature lands (a new grammar construct, a new sema
+// concept), add or extend an *_test.go file here covering it against every
+// major capability (hover, definition, references, documentHighlight,
+// documentSymbol, foldingRange, semanticTokens, completion) - both a valid
+// example and at least one deliberately incomplete/broken-source variant
+// (AGENTS.md's own review-process standard applies here exactly as it does
+// to src/sema/src/parser). Generics landed with zero such coverage and a
+// real, user-visible bug (a whole generic struct rendering as a wall of
+// spurious underlines) went unnoticed for several rounds as a result - see
+// generics_test.go/coroutines_test.go for the shape this should take, and
+// the existing *_test.go helpers (singleFileWorkspace, loadProgram,
+// appAnalysis) for what's already there to build on - this is normally a
+// few lines per feature, not a new harness.
 package lsp

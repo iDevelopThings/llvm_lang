@@ -160,6 +160,12 @@ for new/changed `src/`, `cmd/`, or `std/` code should explicitly ask for
 tests covering illegal usage and boundary/edge cases alongside the valid
 ones, not just "test that it works."
 
+**This applies to `src/lsp` too, every time a language feature lands** -
+see `src/lsp/doc.go`'s own note on the exact shape (every major LSP
+capability, plus a broken/incomplete-source variant). Generics landed with
+zero `src/lsp` coverage and a real, user-visible bug went unnoticed for
+several rounds as a direct result.
+
 
 ## Project Code Style Preferences **IMPORTANT**
 

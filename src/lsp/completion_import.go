@@ -36,11 +36,15 @@ func (w *Workspace) unimportedPackageMemberCompletions(fa *FileAnalysis, object 
 		}
 		edit := importEdit(fa, c.Dir)
 		for _, decl := range exportedPackageDecls(w.fs, c.Dir) {
-			items = append(items, protocol.CompletionItem{
+			item := protocol.CompletionItem{
 				Label:               decl.Name,
 				Kind:                completionItemKindPtr(symbolOutlineKindToCompletionItemKind(decl.Kind)),
 				AdditionalTextEdits: []protocol.TextEdit{edit},
-			})
+			}
+			if decl.Detail != "" {
+				item.Detail = &decl.Detail
+			}
+			items = append(items, item)
 		}
 	}
 	return items

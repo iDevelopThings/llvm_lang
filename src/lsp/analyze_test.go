@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"llvm_lang/src/loader"
+	"llvm_lang/src/sema"
 
 	"github.com/spf13/afero"
 )
@@ -58,6 +59,51 @@ func main() int {
 		if fa.Diags == nil || fa.Diags.HasErrors() {
 			t.Errorf("%s: has error diagnostics, want none", path)
 		}
+	}
+}
+
+// TestAnalyzeProgram_GenericTemplateBodyGetsToolingInfo is the analyzeProgram
+// -level regression test for a real reported bug: a generic declaration's
+// own body (never resolved by the real pipeline - only each instantiation
+// is) had no Info.Refs entries at all, which made every identifier inside
+// it fall back to a plain "variable" semantic-token classification (see
+// semantictokens_test.go's own regression test for the visible symptom this
+// caused). sema.ResolveTemplatesForTooling (called from analyzeProgram)
+// must enrich Info in place so ordinary Info.Refs[n] lookups - the same
+// ones hover/completion/semantic-tokens already use - see real data here
+// too, even for a generic never instantiated anywhere in this program.
+func TestAnalyzeProgram_GenericTemplateBodyGetsToolingInfo(t *testing.T) {
+	sep := string(filepath.Separator)
+	dir := filepath.Join(sep, "prog")
+	path := filepath.Join(dir, "main.llx")
+	fs := afero.NewMemMapFs()
+	src := `func Sum[T](a T, b T) T {
+	return a + b
+}
+`
+	if err := afero.WriteFile(fs, path, []byte(src), 0o644); err != nil {
+		t.Fatalf("writing %s: %v", path, err)
+	}
+	prog, err := loader.LoadProgram(fs, dir)
+	if err != nil {
+		t.Fatalf("LoadProgram: %v", err)
+	}
+
+	out := analyzeProgram(prog, 1)
+	fa, ok := out[path]
+	if !ok || fa.Info == nil {
+		t.Fatalf("%s not found or Info nil in analysis result: %+v", path, out)
+	}
+
+	funcDecl := fa.Tree.Children(fa.Tree.Root)[0]
+	aIdent := fa.Tree.FindIdentByText(funcDecl, "a")
+
+	sym, ok := fa.Info.Refs[aIdent]
+	if !ok || sym == nil {
+		t.Fatal("the generic template body's own 'a' identifier has no Refs entry - the tooling pass did not run")
+	}
+	if sym.Kind != sema.SymParam {
+		t.Errorf("'a' resolved to Kind %v, want SymParam", sym.Kind)
 	}
 }
 

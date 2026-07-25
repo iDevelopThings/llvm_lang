@@ -42,6 +42,12 @@ func (w *Workspace) DocumentHighlight(path string, pos protocol.Position) []prot
 		if refSym != sym {
 			continue
 		}
+		if fa.Tree.RootAncestor(refNode) != fa.Tree.Root {
+			// A monomorphized-generic instantiation's own clone (see
+			// ast.Tree.CloneSubtree) - same symbol, but not a real
+			// occurrence in this file's own source text.
+			continue
+		}
 		kind := protocol.DocumentHighlightKindRead
 		if refNode == declNode || fa.Tree.IsAssignmentTarget(refNode) {
 			kind = protocol.DocumentHighlightKindWrite
