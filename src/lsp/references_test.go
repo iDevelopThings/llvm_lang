@@ -89,3 +89,65 @@ func TestReferences_GenericFunc_CallSiteFindsSiblingInstantiations(t *testing.T)
 		t.Errorf("len(withoutDecl) = %d, want 2 (both call sites, declaration excluded): %+v", len(withoutDecl), withoutDecl)
 	}
 }
+
+// genericMethodRefsFixture instantiates Box[T]'s own Get method against two
+// *different* receiver struct instantiations (Box[int] and Box[f64]) -
+// each gets its own separate per-struct method template (see
+// GenericMethod.templates), so unifying them needs the declaring method
+// Symbol's own GenericMethod field, not just GenericInfo/Generic (which
+// only ever covers a free func/struct template, never a struct's own
+// method - see Symbol.GenericMethod's own doc comment for why the two
+// can't share one mechanism).
+const genericMethodRefsFixture = `struct Box[T] {
+	value T
+}
+func (Box[T]) Get() T {
+	return this.value
+}
+func f() int {
+	a := Box[int]{1}
+	b := Box[f64]{2.5}
+	print(a.Get())
+	print(b.Get())
+	return 0
+}
+`
+
+// TestReferences_GenericStructMethod_DeclarationFindsEveryInstantiation is
+// the regression test for a real bug caught by review: a generic struct's
+// own method never unified across instantiations at all (not even within
+// one), since GenericMethod.Sym (the method's real, Refs-anchored
+// declaring Symbol) never had Generic set, and each receiver
+// instantiation's own synthetic per-method template Symbol
+// (GenericMethod.templateFor's own mt.Symbol) was a distinct, unconnected
+// object - GenericTemplate pointed at that synthetic Symbol instead of the
+// real declaration, so neither direction ever found the other.
+func TestReferences_GenericStructMethod_DeclarationFindsEveryInstantiation(t *testing.T) {
+	w, path := singleFileWorkspace(t, genericMethodRefsFixture)
+	fa, _ := w.Analysis(path)
+
+	declOffset := strings.Index(fa.Tree.File.Src, "Get() T")
+	pos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(declOffset))
+
+	locs := w.References(path, pos, true)
+	if len(locs) != 3 {
+		t.Fatalf("len(locs) = %d, want 3 (the declaration + a.Get() + b.Get(), two different receiver instantiations): %+v", len(locs), locs)
+	}
+}
+
+// TestReferences_GenericStructMethod_CallSiteFindsDeclarationAndSibling
+// covers the reverse direction of the same bug: clicking one instantiated
+// call site must still find the real declaration and the *other* receiver
+// instantiation's own call site.
+func TestReferences_GenericStructMethod_CallSiteFindsDeclarationAndSibling(t *testing.T) {
+	w, path := singleFileWorkspace(t, genericMethodRefsFixture)
+	fa, _ := w.Analysis(path)
+
+	callOffset := strings.Index(fa.Tree.File.Src, "a.Get()") + len("a.")
+	pos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(callOffset))
+
+	locs := w.References(path, pos, true)
+	if len(locs) != 3 {
+		t.Fatalf("len(locs) = %d, want 3 (declaration + a.Get() + b.Get()): %+v", len(locs), locs)
+	}
+}

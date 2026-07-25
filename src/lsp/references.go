@@ -31,27 +31,24 @@ func (w *Workspace) References(path string, pos protocol.Position, includeDeclar
 		return nil
 	}
 
-	// A monomorphized generic's own template and each of its instantiations
-	// (Sum[int], Sum[f64], ...) are, from a user's point of view, all "the
-	// same" Sum - clicking any one of them (the declaration, or one call
-	// site) must find every other. declSym is whichever of the pair is the
-	// template itself (Generic != nil), the one DeclaringNameNode/Tree
-	// actually make sense against - an instantiation's own Decl points at a
-	// synthetic clone (see ast.Tree.CloneSubtree), already excluded from
-	// every scan below by the RootAncestor check.
+	// A monomorphized generic's own template (a free func/struct, or a
+	// struct method - see Symbol.GenericInstances) and each of its
+	// instantiations (Sum[int], Sum[f64], ...) are, from a user's point of
+	// view, all "the same" Sum - clicking any one of them (the
+	// declaration, or one call site) must find every other. declSym is
+	// whichever of the pair is the real declaring Symbol, the one
+	// DeclaringNameNode/Tree actually make sense against - an
+	// instantiation's own Decl points at a synthetic clone (see
+	// ast.Tree.CloneSubtree), already excluded from every scan below by
+	// the RootAncestor check.
 	targets := map[*sema.Symbol]bool{sym: true}
 	declSym := sym
-	switch {
-	case sym.Generic != nil:
-		for inst := range sym.Generic.Instances() {
-			targets[inst] = true
-		}
-	case sym.GenericTemplate != nil:
+	if sym.GenericTemplate != nil {
 		declSym = sym.GenericTemplate
 		targets[declSym] = true
-		for inst := range declSym.Generic.Instances() {
-			targets[inst] = true
-		}
+	}
+	for inst := range declSym.GenericInstances() {
+		targets[inst] = true
 	}
 
 	var declNameNode ast.NodeIndex

@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"llvm_lang/src/ast"
+	"llvm_lang/src/enums"
 )
 
 // EnclosingScope returns the nearest Scope that owns n - walking n up
@@ -71,15 +72,27 @@ func (s *Scope) Local() iter.Seq[*Symbol] {
 // that one piece). Reflects an instantiated generic's own substituted
 // types, since an instantiation's clone gets its own, separately-checked
 // Types entries distinct from the template's.
+//
+// decl may be a FuncDecl or an ExternFuncDecl - the two have different
+// child layouts (FuncDecl reserves a leading receiver slot ExternFuncDecl
+// has none - see ast.Tree.ExternFuncParamList's own doc comment on why
+// reading one through the other's accessors silently reads the wrong
+// child), so which accessor set to use is decided here rather than
+// assumed.
 func FuncSignatureText(tree *ast.Tree, info *Info, decl ast.NodeIndex) string {
+	paramList, returnType := tree.FuncParamList(decl), tree.FuncReturnType(decl)
+	if tree.Nodes[decl].Kind == enums.NodeKinds.ExternFuncDecl {
+		paramList, returnType = tree.ExternFuncParamList(decl), tree.ExternFuncReturnType(decl)
+	}
+
 	var params []string
-	for _, p := range tree.Children(tree.FuncParamList(decl)) {
+	for _, p := range tree.Children(paramList) {
 		name := tree.Text(tree.Child(p, 0))
 		params = append(params, name+" "+typeOrSourceText(tree, info, tree.Child(p, 1)))
 	}
 	sig := "(" + strings.Join(params, ", ") + ")"
-	if ret := tree.FuncReturnType(decl); ret != ast.InvalidNode {
-		sig += " " + typeOrSourceText(tree, info, ret)
+	if returnType != ast.InvalidNode {
+		sig += " " + typeOrSourceText(tree, info, returnType)
 	}
 	return sig
 }

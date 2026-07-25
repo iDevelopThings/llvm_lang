@@ -137,3 +137,23 @@ func TestFuncSignatureText_UnresolvedGenericTemplate_FallsBackToSourceText(t *te
 		t.Errorf("FuncSignatureText = %q, want %q", got, want)
 	}
 }
+
+// TestFuncSignatureText_ExternFunc is the regression test for a real bug
+// caught by review: ExternFuncDecl has a different child layout than
+// FuncDecl (no leading receiver slot - see
+// ast.Tree.ExternFuncParamList's own doc comment), so reading one through
+// FuncDecl's own FuncParamList/FuncReturnType accessors silently reads the
+// wrong child instead of the real parameter list/return type.
+func TestFuncSignatureText_ExternFunc(t *testing.T) {
+	tree, info := checkSrc(t, "extern func abs(x i32) i32\n")
+	decl := tree.Children(tree.Root)[0]
+
+	// Type.String() always renders TypeI32 as its canonical "int" spelling
+	// (see types.go - "i32" and "int" name the identical type), same as
+	// every other Type-first rendering in this package - this proves the
+	// real bug (ExternFuncDecl's different child layout reading the wrong
+	// node entirely) is fixed, not that "i32" round-trips verbatim.
+	if got, want := FuncSignatureText(tree, info, decl), "(x int) int"; got != want {
+		t.Errorf("FuncSignatureText = %q, want %q", got, want)
+	}
+}

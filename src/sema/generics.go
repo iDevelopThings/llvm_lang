@@ -42,6 +42,16 @@ type GenericInfo struct {
 	OuterParams []string
 	OuterArgs   []Type
 
+	// Method is set only when this GenericInfo is one specific receiver
+	// struct's own per-instantiation template for a method (built by
+	// GenericMethod.templateFor) - the GenericMethod it came from, letting
+	// instantiateFunc route Symbol.GenericTemplate to the method's real
+	// declaring Symbol (GenericMethod.Sym) instead of this GenericInfo's
+	// own synthetic, per-instantiation Symbol. nil for a free generic
+	// func/struct template, where Symbol above already IS the real
+	// declaring Symbol.
+	Method *GenericMethod
+
 	instances map[string]*genericInstance
 }
 
@@ -150,7 +160,7 @@ func (r *resolver) addGenericStructMethod(gi *GenericInfo, receiver, decl ast.No
 		}
 	}
 	sym.Scope = gi.Symbol.Scope
-	gi.Methods = append(gi.Methods, &GenericMethod{
+	gm := &GenericMethod{
 		Name:       sym.Name,
 		Decl:       decl,
 		Tree:       r.tree,
@@ -158,7 +168,9 @@ func (r *resolver) addGenericStructMethod(gi *GenericInfo, receiver, decl ast.No
 		RecvParams: recvParams,
 		OwnParams:  r.typeParamNames(r.tree.FuncTypeParamList(decl), recvParams),
 		templates:  make(map[*StructInfo]*GenericInfo),
-	})
+	}
+	sym.GenericMethod = gm
+	gi.Methods = append(gi.Methods, gm)
 }
 
 // IsGenericTemplate reports whether decl - a top-level declaration in tree -
@@ -258,6 +270,46 @@ func (gi *GenericInfo) Instances() iter.Seq[*Symbol] {
 			}
 			if !yield(sym) {
 				return
+			}
+		}
+	}
+}
+
+// GenericInstances yields every already-created instantiation of s - s may
+// be a free generic func/struct template's own declaring Symbol (Generic
+// set), or a generic struct method's own declaring Symbol (GenericMethod
+// set, see Symbol.GenericMethod's own doc comment for why methods need
+// their own separate case here rather than sharing Generic). Empty for any
+// other Symbol, including an already-instantiated one - a caller with a
+// specialization's own Symbol in hand should follow GenericTemplate to
+// find the real declaring Symbol this method actually needs.
+func (s *Symbol) GenericInstances() iter.Seq[*Symbol] {
+	switch {
+	case s.Generic != nil:
+		return s.Generic.Instances()
+	case s.GenericMethod != nil:
+		return s.GenericMethod.Instances()
+	default:
+		return func(func(*Symbol) bool) {}
+	}
+}
+
+// Instances yields every already-created specialization of gm, across
+// every receiver struct instantiation it's ever been reached through (see
+// gm.templates - SlotMap[int].Get and SlotMap[f64].Get are separate
+// per-struct templates, each with their own instance cache) - the method
+// counterpart to GenericInfo.Instances above, needed because a method's
+// own per-struct-instantiation template is a distinct GenericInfo, not
+// something a consumer holding only gm.Sym (the method's real declaring
+// Symbol - see Symbol.GenericMethod) can reach a single GenericInfo.Instances
+// call from.
+func (gm *GenericMethod) Instances() iter.Seq[*Symbol] {
+	return func(yield func(*Symbol) bool) {
+		for _, mt := range gm.templates {
+			for sym := range mt.Instances() {
+				if !yield(sym) {
+					return
+				}
 			}
 		}
 	}
@@ -428,6 +480,18 @@ func (c *checker) instantiateFunc(gi *GenericInfo, args []Type, at ast.NodeIndex
 	info := c.info
 	firstNode := len(tree.Nodes)
 
+	// gi.Symbol is a real, Refs-anchored declaring Symbol for a free
+	// generic func/struct template - but for a generic struct's own
+	// method, gi (here) is one specific receiver instantiation's own
+	// per-struct template (built by GenericMethod.templateFor), whose own
+	// Symbol is synthetic bookkeeping, never itself the target of any real
+	// Refs entry. gi.Method.Sym is the method's actual declaring Symbol in
+	// that case - see Symbol.GenericTemplate's own doc comment.
+	templateSym := gi.Symbol
+	if gi.Method != nil {
+		templateSym = gi.Method.Sym
+	}
+
 	clone := tree.CloneSubtree(gi.Decl)
 	sym := &Symbol{
 		Name:            key,
@@ -436,7 +500,7 @@ func (c *checker) instantiateFunc(gi *GenericInfo, args []Type, at ast.NodeIndex
 		Tree:            tree,
 		Scope:           gi.Symbol.Scope,
 		Exported:        gi.Symbol.Exported,
-		GenericTemplate: gi.Symbol,
+		GenericTemplate: templateSym,
 	}
 	info.Refs[tree.FuncName(clone)] = sym
 	if gi.OwnerSym != nil {
@@ -561,6 +625,7 @@ func (gm *GenericMethod) templateFor(si *StructInfo) *GenericInfo {
 		OwnerSym:    si.Symbol,
 		OuterParams: gm.RecvParams,
 		OuterArgs:   si.TypeArgs,
+		Method:      gm,
 		instances:   make(map[string]*genericInstance),
 	}
 	mt.Symbol = &Symbol{

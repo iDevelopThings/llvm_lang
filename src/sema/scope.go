@@ -353,14 +353,34 @@ type Symbol struct {
 	Generic *GenericInfo
 
 	// GenericTemplate is set only on a specialization's own Symbol (built by
-	// instantiateFunc/instantiateStruct, generics.go) - the template's own
-	// declaring Symbol (the one Generic above is set on) it was instantiated
-	// from. Lets a consumer that only has one call site's specialized
-	// Symbol in hand (e.g. Workspace.References) still find its way back to
-	// the template, and from there to every other instantiation
-	// (GenericInfo.Instances), without a separate name-based lookup. nil
-	// for every ordinary symbol, including the template itself.
+	// instantiateFunc/instantiateStruct, generics.go) - the symbol actually
+	// anchored at the template's own declaration site (the one a Refs
+	// lookup on the source name node returns) it was instantiated from.
+	// For a free generic func/struct that's the same Symbol Generic above
+	// is set on; for a generic struct's own method it's instead the
+	// method's real declaring Symbol (GenericMethod field below is set on
+	// it, not Generic - see GenericMethod.Sym's own doc comment for why a
+	// method's per-struct-instantiation template can't reuse Generic the
+	// same way without breaking real call-site dispatch). Either way, lets
+	// a consumer that only has one call site's specialized Symbol in hand
+	// (e.g. Workspace.References) find its way back to the real
+	// declaration, and from there to every other instantiation
+	// (GenericInfo.Instances or GenericMethod.Instances), without a
+	// separate name-based lookup. nil for every ordinary symbol, including
+	// the template itself.
 	GenericTemplate *Symbol
+
+	// GenericMethod is set only on a generic struct method's own real
+	// declaring Symbol (see addGenericStructMethod) - the GenericMethod
+	// record tracking every instantiation of it, across every instantiated
+	// receiver struct. Deliberately separate from Generic above: a
+	// method's own per-struct-instantiation template Symbol
+	// (GenericMethod.templateFor's own mt.Symbol) is load-bearing for real
+	// call-time generic dispatch (genericCallee reads sym.Generic there)
+	// and is a genuinely different object per receiver instantiation, so
+	// it can't simply alias this Symbol's own Generic field without
+	// breaking that.
+	GenericMethod *GenericMethod
 
 	// TypeParamBound is set only for a SymTypeParam symbol - the concrete type
 	// that type parameter is bound to inside one specialization. There is no
