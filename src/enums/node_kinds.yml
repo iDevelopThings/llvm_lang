@@ -67,3 +67,5 @@ values:
   - name: AwaitStmt
   - name: CFuncType
   - name: MoveExpr
+  - name: TypeParamList
+  - name: TypeArgList

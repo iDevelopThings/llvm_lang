@@ -1,0 +1,103 @@
+// Generics - monomorphized, C++-template-style: no constraints, and each
+// instantiation's body is checked against its own concrete types.
+// See LANGUAGE.md's "Generics" section.
+
+// A generic free function. T is inferred from the arguments at every call
+// site - Sum(1, 2) and Sum(1.5, 2.5) compile to two independent functions.
+func Sum[T](a T, b T) T {
+	return a + b
+}
+
+// Two independent type parameters, both inferred.
+struct Pair[A, B] {
+	first  A
+	second B
+}
+
+func MakePair[A, B](a A, b B) Pair[A, B] {
+	return Pair[A, B]{a, b}
+}
+
+struct Entity {
+	hp int
+	mp int
+}
+
+// A generic method on a NON-generic struct: T is its own, independent of the
+// receiver, and inferred per call.
+func (Entity) Describe[T](tag T) T {
+	return tag
+}
+
+// A generational-handle slot map - the motivating use case for this feature.
+// A struct's methods implicitly share its type parameter(s); the receiver
+// clause just names them.
+struct SlotMap[T] {
+	items       []T
+	generations []i32
+	freeList    []int
+}
+
+// A type parameter that appears only in the return type can't be inferred -
+// this one needs the explicit-instantiation escape hatch at every call site.
+func NewSlotMap[T]() SlotMap[T] {
+	return SlotMap[T]{make([]T, 0), make([]i32, 0), make([]int, 0)}
+}
+
+func (SlotMap[T]) Insert(v T) int {
+	n := len(this.freeList)
+	if n > 0 {
+		slot := this.freeList[n-1]
+		this.freeList = this.freeList[0 : n-1]
+		this.items[slot] = v
+		return slot
+	}
+	this.items = append(this.items, v)
+	this.generations = append(this.generations, 0)
+	return len(this.items) - 1
+}
+
+func (SlotMap[T]) Get(i int) T {
+	return this.items[i]
+}
+
+func (SlotMap[T]) Remove(i int) {
+	this.generations[i] = this.generations[i] + 1
+	this.freeList = append(this.freeList, i)
+}
+
+func (SlotMap[T]) Generation(i int) i32 {
+	return this.generations[i]
+}
+
+func main() {
+	// Inference, two instantiations of one function in one program.
+	print(Sum(1, 2))       // 3
+	print(Sum(1.5, 2.25))  // 3.750000
+	print(Sum("ab", "cd")) // abcd
+
+	p := MakePair(3, "hi")
+	print(p.first)  // 3
+	print(p.second) // hi
+
+	e := Entity{7, 8}
+	print(e.Describe("player")) // player
+	print(e.Describe(42))       // 42
+
+	// Two instantiations of one generic struct, side by side.
+	ints := NewSlotMap[int]()
+	a := ints.Insert(10)
+	b := ints.Insert(20)
+	print(ints.Get(a)) // 10
+	print(ints.Get(b)) // 20
+
+	ints.Remove(a)
+	print(ints.Generation(a)) // 1 - that slot's handle is now stale
+	reused := ints.Insert(30)
+	print(ints.Get(reused)) // 30 - the freed slot came back
+
+	entities := NewSlotMap[Entity]()
+	h := entities.Insert(Entity{100, 50})
+	print(entities.Get(h).hp) // 100
+	print(entities.Get(h).mp) // 50
+}

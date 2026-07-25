@@ -29,18 +29,35 @@ func (t *Tree) TopLevelDeclsOfKind(kind enums.NodeKind) iter.Seq[NodeIndex] {
 	}
 }
 
+// structMemberStart is the number of fixed leading slots every StructDecl
+// reserves before its variable-arity member list ([name, typeParamList,
+// member0, ...] - see Node's own StructDecl doc comment).
+const structMemberStart = 2
+
+// StructName returns decl's (a StructDecl's) name child.
+func (t *Tree) StructName(decl NodeIndex) NodeIndex {
+	return t.Child(decl, 0)
+}
+
+// StructTypeParamList returns decl's (a StructDecl's) TypeParamList child -
+// InvalidNode for a non-generic struct (see LANGUAGE.md's "Generics"
+// section).
+func (t *Tree) StructTypeParamList(decl NodeIndex) NodeIndex {
+	return t.Child(decl, 1)
+}
+
 // StructFields returns decl's (a StructDecl's) Field children, skipping its
-// leading name child and filtering out any interspersed ConstructorDecl
-// children (see Node's own StructDecl doc comment for the
-// [name, member0, member1, ...] shape this indexes into, and
-// LANGUAGE.md's "Constructors" section for why a constructor can appear
-// there too now). A plain slice, not iter.Seq: every real caller needs
-// indexed/random access (a positional composite literal's i-th field, or a
-// field-count comparison against len(elems)), not just a single forward
-// pass - see AGENTS.md's Standards section for when a plain slice is the
-// right call over an iterator.
+// leading name/type-parameter-list children and filtering out any
+// interspersed ConstructorDecl children (see Node's own StructDecl doc
+// comment for the [name, typeParamList, member0, member1, ...] shape this
+// indexes into, and LANGUAGE.md's "Constructors" section for why a
+// constructor can appear there too now). A plain slice, not iter.Seq: every
+// real caller needs indexed/random access (a positional composite literal's
+// i-th field, or a field-count comparison against len(elems)), not just a
+// single forward pass - see AGENTS.md's Standards section for when a plain
+// slice is the right call over an iterator.
 func (t *Tree) StructFields(decl NodeIndex) []NodeIndex {
-	children := t.Children(decl)[1:]
+	children := t.Children(decl)[structMemberStart:]
 	fields := make([]NodeIndex, 0, len(children))
 	for _, c := range children {
 		if t.Nodes[c].Kind == enums.NodeKinds.Field {
@@ -58,7 +75,7 @@ func (t *Tree) StructFields(decl NodeIndex) []NodeIndex {
 // forward pass, never indexed access - see AGENTS.md's Standards section.
 func (t *Tree) StructConstructors(decl NodeIndex) iter.Seq[NodeIndex] {
 	return func(yield func(NodeIndex) bool) {
-		for _, c := range t.Children(decl)[1:] {
+		for _, c := range t.Children(decl)[structMemberStart:] {
 			if t.Nodes[c].Kind != enums.NodeKinds.ConstructorDecl {
 				continue
 			}
@@ -91,7 +108,7 @@ func (t *Tree) ConstructorBody(ctor NodeIndex) NodeIndex {
 // silently dropped.
 func (t *Tree) StructDestructors(decl NodeIndex) iter.Seq[NodeIndex] {
 	return func(yield func(NodeIndex) bool) {
-		for _, c := range t.Children(decl)[1:] {
+		for _, c := range t.Children(decl)[structMemberStart:] {
 			if t.Nodes[c].Kind != enums.NodeKinds.DestructorDecl {
 				continue
 			}
@@ -154,9 +171,9 @@ func (t *Tree) IsKeyedElement(n NodeIndex) bool {
 
 // FuncReceiver returns decl's (a FuncDecl's) receiver child - InvalidNode
 // for a free function - see Node's own FuncDecl doc comment for the
-// [receiver, name, paramList, returnType, body] shape these five accessors
-// index into, replacing a magic-index Child(decl, 0..4) call at every site
-// that reads one part of a function declaration.
+// [receiver, name, typeParamList, paramList, returnType, body] shape these
+// six accessors index into, replacing a magic-index Child(decl, 0..5) call at
+// every site that reads one part of a function declaration.
 func (t *Tree) FuncReceiver(decl NodeIndex) NodeIndex {
 	return t.Child(decl, 0)
 }
@@ -166,20 +183,80 @@ func (t *Tree) FuncName(decl NodeIndex) NodeIndex {
 	return t.Child(decl, 1)
 }
 
+// FuncTypeParamList returns decl's (a FuncDecl's) TypeParamList child -
+// InvalidNode for a non-generic function, and for a method that only inherits
+// its receiver's type parameters (see ReceiverTypeParams and LANGUAGE.md's
+// "Generics" section).
+func (t *Tree) FuncTypeParamList(decl NodeIndex) NodeIndex {
+	return t.Child(decl, 2)
+}
+
 // FuncParamList returns decl's (a FuncDecl's) ParamList child.
 func (t *Tree) FuncParamList(decl NodeIndex) NodeIndex {
-	return t.Child(decl, 2)
+	return t.Child(decl, 3)
 }
 
 // FuncReturnType returns decl's (a FuncDecl's) return-type child -
 // InvalidNode when the function declares no return type.
 func (t *Tree) FuncReturnType(decl NodeIndex) NodeIndex {
-	return t.Child(decl, 3)
+	return t.Child(decl, 4)
 }
 
 // FuncBody returns decl's (a FuncDecl's) body child.
 func (t *Tree) FuncBody(decl NodeIndex) NodeIndex {
-	return t.Child(decl, 4)
+	return t.Child(decl, 5)
+}
+
+// ReceiverTypeParams returns recv's (a FuncDecl's receiver child's) own
+// type-parameter Ident children - empty for the plain `(Name)` form, which is
+// a bare Ident node with no children at all. A generic receiver clause
+// (`(SlotMap[T])`) is instead a TypeParamList node whose Tok is the receiver
+// type's own name, so Tree.Text(recv) still yields "SlotMap" for both shapes -
+// see Node's own TypeParamList doc comment.
+func (t *Tree) ReceiverTypeParams(recv NodeIndex) []NodeIndex {
+	if recv == InvalidNode || t.Nodes[recv].Kind != enums.NodeKinds.TypeParamList {
+		return nil
+	}
+	return t.Children(recv)
+}
+
+// TypeArgNodes returns the type-argument type-position nodes of n, an
+// IndexExpr used as a generic instantiation (`Foo[int]`, `Pair[int, string]`).
+// The single-argument form keeps IndexExpr's plain [target, index] shape;
+// only a comma-separated list wraps its arguments in a TypeArgList child (see
+// Node's own TypeArgList doc comment).
+func (t *Tree) TypeArgNodes(n NodeIndex) []NodeIndex {
+	arg := t.Child(n, 1)
+	if arg == InvalidNode {
+		return nil
+	}
+	if t.Nodes[arg].Kind == enums.NodeKinds.TypeArgList {
+		return t.Children(arg)
+	}
+	return t.Children(n)[1:]
+}
+
+// CloneSubtree deep-copies n into t, returning the fresh root of the copy -
+// same Kinds/Tokens/Spans, brand-new NodeIndexes, so every side table keyed by
+// node (sema's Info.Refs/Types) can hold an independent entry per copy. This
+// is what a generic declaration's per-instantiation specialization is built
+// from (see sema's generics.go): the copy is resolved and type-checked exactly
+// like a hand-written declaration, in a scope where its type parameters are
+// bound to concrete types - no source text is ever rewritten.
+//
+// The copy's own root has no Parent (it isn't spliced into n's parent's child
+// list), so a caller walking upward from inside the copy stops at that root.
+func (t *Tree) CloneSubtree(n NodeIndex) NodeIndex {
+	if n == InvalidNode {
+		return InvalidNode
+	}
+	src := t.Nodes[n]
+	kids := t.Children(n)
+	clones := make([]NodeIndex, len(kids))
+	for i, c := range kids {
+		clones[i] = t.CloneSubtree(c)
+	}
+	return t.NewNode(src.Kind, src.Tok, src.Span, clones...)
 }
 
 // FuncIsAsync reports whether decl (a FuncDecl) is an `async func` (see

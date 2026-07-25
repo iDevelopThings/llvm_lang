@@ -30,7 +30,7 @@ func TestConstructorOverloadResolutionByArgCount(t *testing.T) {
 func TestConstructorCallRecordsSelectedConstructorSymbol(t *testing.T) {
 	tree, info := checkSrc(t, pointWithCtorsSrc+"func f() int {\n\ta := Point(5)\n\treturn a.x\n}\n")
 	fn := tree.Children(tree.Root)[1]
-	body := tree.Child(fn, 4)
+	body := tree.Child(fn, 5)
 	short := tree.Child(body, 0)
 	call := tree.Child(short, 1)
 	callee := tree.Child(call, 0)

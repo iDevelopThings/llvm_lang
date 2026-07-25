@@ -266,12 +266,13 @@ func sourcesChanged(fs afero.Fs, stamps map[string]fileStamp) (bool, error) {
 
 // validateWatchEntrySig looks for a top-level, non-method function named
 // name across trees, checking its declared shape purely at the AST level
-// (no sema/codegen dependency needed - see ast.Node's own FuncDecl doc
-// comment for its fixed [receiver, name, paramList, returnType, body]
-// child layout): zero parameters always, plus an "int" return type if
-// wantInt, or no declared return type otherwise. found is false only when
-// no function named name exists at all; err is set when one exists but its
-// shape doesn't match what -watch requires of it.
+// (no sema/codegen dependency needed - read through ast.Tree's own FuncDecl
+// accessors, never a raw child index, since a wrong slot here silently
+// validates nothing and lets a bad Frame reach the raw-syscall call below):
+// not generic, zero parameters always, plus an "int" return type if wantInt,
+// or no declared return type otherwise. found is false only when no function
+// named name exists at all; err is set when one exists but its shape doesn't
+// match what -watch requires of it.
 func validateWatchEntrySig(trees []*ast.Tree, name string, wantInt bool) (found bool, err error) {
 	for _, tree := range trees {
 		for decl := range tree.TopLevelDeclsOfKind(enums.NodeKinds.FuncDecl) {
@@ -281,7 +282,12 @@ func validateWatchEntrySig(trees []*ast.Tree, name string, wantInt bool) (found 
 			if tree.Text(tree.FuncName(decl)) != name {
 				continue
 			}
-			if n := len(tree.Children(tree.Child(decl, 2))); n != 0 {
+			if tree.FuncTypeParamList(decl) != ast.InvalidNode {
+				// A template is never lowered at all, so every later check
+				// would be validating a function that has no address.
+				return true, fmt.Errorf("%s must not be generic", name)
+			}
+			if n := len(tree.Children(tree.FuncParamList(decl))); n != 0 {
 				return true, fmt.Errorf("%s must take no parameters, got %d", name, n)
 			}
 			retNode := tree.FuncReturnType(decl)

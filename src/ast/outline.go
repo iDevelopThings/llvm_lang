@@ -96,7 +96,7 @@ func (t *Tree) structSymbol(decl NodeIndex) DeclSymbol {
 	for dtor := range t.StructDestructors(decl) {
 		children = append(children, t.keywordSymbol(dtor, SymbolOutlineDestructor))
 	}
-	return t.namedSymbol(decl, t.Child(decl, 0), SymbolOutlineStruct, children)
+	return t.namedSymbol(decl, t.StructName(decl), SymbolOutlineStruct, children)
 }
 
 func (t *Tree) enumSymbol(decl NodeIndex) DeclSymbol {

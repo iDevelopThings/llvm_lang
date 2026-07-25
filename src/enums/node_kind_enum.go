@@ -72,6 +72,8 @@ const (
 	NodeKindAwaitStmt         NodeKind = 56
 	NodeKindCFuncType         NodeKind = 57
 	NodeKindMoveExpr          NodeKind = 58
+	NodeKindTypeParamList     NodeKind = 59
+	NodeKindTypeArgList       NodeKind = 60
 )
 
 type NodeKindContainer struct {
@@ -134,6 +136,8 @@ type NodeKindContainer struct {
 	AwaitStmt         NodeKind
 	CFuncType         NodeKind
 	MoveExpr          NodeKind
+	TypeParamList     NodeKind
+	TypeArgList       NodeKind
 }
 
 // NodeKinds is the entry point for the NodeKind enum.
@@ -197,6 +201,8 @@ var NodeKinds = NodeKindContainer{
 	AwaitStmt:         NodeKindAwaitStmt,
 	CFuncType:         NodeKindCFuncType,
 	MoveExpr:          NodeKindMoveExpr,
+	TypeParamList:     NodeKindTypeParamList,
+	TypeArgList:       NodeKindTypeArgList,
 }
 
 // NodeKindInfo is the static metadata attached to a NodeKind.
@@ -442,6 +448,14 @@ var nodeKindInfos = map[NodeKind]NodeKindInfo{
 		NodeKind: NodeKindMoveExpr,
 		Name:     "MoveExpr",
 	},
+	NodeKindTypeParamList: {
+		NodeKind: NodeKindTypeParamList,
+		Name:     "TypeParamList",
+	},
+	NodeKindTypeArgList: {
+		NodeKind: NodeKindTypeArgList,
+		Name:     "TypeArgList",
+	},
 }
 
 var nodeKindValues = []NodeKind{
@@ -504,6 +518,8 @@ var nodeKindValues = []NodeKind{
 	NodeKindAwaitStmt,
 	NodeKindCFuncType,
 	NodeKindMoveExpr,
+	NodeKindTypeParamList,
+	NodeKindTypeArgList,
 }
 
 var nodeKindByName = map[string]NodeKind{
@@ -566,6 +582,8 @@ var nodeKindByName = map[string]NodeKind{
 	"awaitstmt":         NodeKindAwaitStmt,
 	"cfunctype":         NodeKindCFuncType,
 	"moveexpr":          NodeKindMoveExpr,
+	"typeparamlist":     NodeKindTypeParamList,
+	"typearglist":       NodeKindTypeArgList,
 }
 
 // Values returns every declared value in declaration order.

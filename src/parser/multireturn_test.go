@@ -31,6 +31,7 @@ func TestFuncDeclMultiReturnTypeShape(t *testing.T) {
 				"FuncDecl \"func\"\n" +
 				"  <missing>\n" +
 				"  Ident \"f\"\n" +
+				"  <missing>\n" +
 				"  ParamList\n" +
 				"  Ident \"int\"\n" +
 				"  Block\n" +
@@ -44,6 +45,7 @@ func TestFuncDeclMultiReturnTypeShape(t *testing.T) {
 				"FuncDecl \"func\"\n" +
 				"  <missing>\n" +
 				"  Ident \"f\"\n" +
+				"  <missing>\n" +
 				"  ParamList\n" +
 				"  <missing>\n" +
 				"  Block\n",
@@ -55,6 +57,7 @@ func TestFuncDeclMultiReturnTypeShape(t *testing.T) {
 				"FuncDecl \"func\"\n" +
 				"  <missing>\n" +
 				"  Ident \"f\"\n" +
+				"  <missing>\n" +
 				"  ParamList\n" +
 				"  MultiReturnType\n" +
 				"    Ident \"int\"\n" +
@@ -72,6 +75,7 @@ func TestFuncDeclMultiReturnTypeShape(t *testing.T) {
 				"FuncDecl \"func\"\n" +
 				"  <missing>\n" +
 				"  Ident \"f\"\n" +
+				"  <missing>\n" +
 				"  ParamList\n" +
 				"  MultiReturnType\n" +
 				"    Ident \"i64\"\n" +

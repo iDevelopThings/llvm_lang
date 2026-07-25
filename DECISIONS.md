@@ -14,6 +14,38 @@ pointer to all of this project's docs.
 
 ---
 
+## 2026-07-25 - Generics: unconstrained monomorphization, not Go-style constrained generics
+
+**Decision:** generics are C++-template-shaped - type parameters carry no
+constraints at all, and a generic body is type-checked once per concrete
+instantiation, against that instantiation's real types. Not Go's model
+(interface-constrained type parameters, one body checked once against the
+constraint, dictionary/GC-shape-stenciled at runtime).
+
+**Why:** Go's model is inseparable from interfaces, and this language has
+none - adopting it would have meant designing and building an entire
+trait/interface system first, purely as scaffolding for generics, before a
+single generic function could be written. Unconstrained monomorphization
+needs none of that: substitution *is* the whole mechanism. It also matches
+what the feature is actually for here (a `SlotMap[T]` over concrete game
+data), and it makes every instantiation zero-overhead by construction, which
+matters for a compiler that already pays cgo/LLVM costs.
+
+The cost is the C++ cost, accepted knowingly: an error inside a generic body
+is reported at the instantiation that triggered it rather than at the
+declaration, and a generic nobody instantiates is never checked at all.
+
+**Rejected alternative:** keep one shared AST and thread a substitution map
+through every type lookup in sema *and* codegen. Cloning the template's
+subtree per instantiation (the mechanism, see `CODEGEN.md`'s "Generics"
+section) keeps per-instantiation awareness out of codegen entirely, which the
+substitution-map approach would have spread across thousands of lines of it -
+against this project's "sema decides, codegen consumes `Info`" rule.
+
+**Status:** shipped. See `LANGUAGE.md`'s "Generics" section for the rules.
+
+---
+
 ## 2026-07-22 - Numeric type widths: six concrete kinds, `int` as an alias
 
 **Decision:** add explicit-width integers `i8`/`i16`/`i32`/`i64` and floats

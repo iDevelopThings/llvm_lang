@@ -123,12 +123,17 @@ func (p *Parser) parseFuncDecl() ast.NodeIndex {
 
 	receiver := ast.InvalidNode
 	if _, ok := p.accept(enums.Lexemes.LeftParen); ok {
-		receiver = p.parseTypeExpr()
+		receiver = p.parseReceiver()
 		p.expect(enums.Lexemes.RightParen)
 	}
 
 	nameTok := p.expectIdent()
 	name := p.tree.NewNode(enums.NodeKinds.Ident, nameTok, tokenSpan(nameTok))
+
+	typeParams := ast.InvalidNode
+	if p.at(enums.Lexemes.LeftBracket) {
+		typeParams = p.parseTypeParamList(lexer.Token{})
+	}
 
 	params := p.parseParamList()
 
@@ -143,7 +148,45 @@ func (p *Parser) parseFuncDecl() ast.NodeIndex {
 		Start: kwTok.Start,
 		End:   p.tree.SpanOf(body).End,
 	}
-	return p.tree.NewNode(enums.NodeKinds.FuncDecl, kwTok, span, receiver, name, params, returnType, body)
+	return p.tree.NewNode(enums.NodeKinds.FuncDecl, kwTok, span, receiver, name, typeParams, params, returnType, body)
+}
+
+// parseReceiver parses a method's receiver clause contents - a bare type name
+// (`Point`), or a generic one naming the receiver's own type parameters
+// (`SlotMap[T]` - see LANGUAGE.md's "Generics" section). Deliberately its own
+// tiny rule rather than parseTypeExpr: a receiver clause is a declaration
+// position, always exactly one identifier optionally followed by a
+// type-parameter list, never an array/pointer/map/func type - and sema
+// resolves it by name text (see sema's addMethod), which only an Ident-shaped
+// node ever supplied anyway.
+func (p *Parser) parseReceiver() ast.NodeIndex {
+	nameTok := p.expectIdent()
+	if !p.at(enums.Lexemes.LeftBracket) {
+		return p.tree.NewNode(enums.NodeKinds.Ident, nameTok, tokenSpan(nameTok))
+	}
+	return p.parseTypeParamList(nameTok)
+}
+
+// parseTypeParamList parses `[T]` / `[A, B]` - one Ident child per declared
+// type parameter. tok becomes the resulting node's own Tok: the zero Token for
+// a declaration's own type-parameter list, or the receiver type's name token
+// when this is a receiver clause (see ast.Node's TypeParamList doc comment).
+func (p *Parser) parseTypeParamList(tok lexer.Token) ast.NodeIndex {
+	openTok := p.expect(enums.Lexemes.LeftBracket)
+	names := p.parseCommaList(enums.Lexemes.RightBracket, func() ast.NodeIndex {
+		nameTok := p.expectIdent()
+		return p.tree.NewNode(enums.NodeKinds.Ident, nameTok, tokenSpan(nameTok))
+	})
+	closeTok := p.expect(enums.Lexemes.RightBracket)
+	start := openTok.Start
+	if tok.Start != tok.End {
+		start = tok.Start
+	}
+	span := ast.Span{
+		Start: start,
+		End:   closeTok.End,
+	}
+	return p.tree.NewNode(enums.NodeKinds.TypeParamList, tok, span, names...)
 }
 
 // parseFuncDeclReturnType parses a FuncDecl's own return-type position: a
@@ -278,8 +321,13 @@ func (p *Parser) parseStructDecl() ast.NodeIndex {
 	nameTok := p.expectIdent()
 	name := p.tree.NewNode(enums.NodeKinds.Ident, nameTok, tokenSpan(nameTok))
 
+	typeParams := ast.InvalidNode
+	if p.at(enums.Lexemes.LeftBracket) {
+		typeParams = p.parseTypeParamList(lexer.Token{})
+	}
+
 	p.expect(enums.Lexemes.LeftBrace)
-	members := append([]ast.NodeIndex{name}, p.parseSemiList(enums.Lexemes.RightBrace, p.parseStructMember)...)
+	members := append([]ast.NodeIndex{name, typeParams}, p.parseSemiList(enums.Lexemes.RightBrace, p.parseStructMember)...)
 	closeTok := p.expect(enums.Lexemes.RightBrace)
 
 	span := ast.Span{

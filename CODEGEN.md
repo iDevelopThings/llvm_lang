@@ -2220,6 +2220,54 @@ appear exactly once in the flattened list `GeneratePackage` receives. There
 is no separate-compilation/linking concept for this project to get right
 here at all (see `DECISIONS.md`).
 
+## Generics: monomorphization, entirely in sema
+
+Codegen has no notion of genericity at all. Every generic declaration is
+lowered as one ordinary, fully concrete function/struct per distinct
+instantiation, and those specializations are produced by `sema` (see
+`src/sema/generics.go` and `LANGUAGE.md`'s "Generics" section), not here.
+
+**How a specialization comes to exist.** Resolve catalogs a generic
+declaration as a *template* and deliberately never resolves its body - its
+type parameters name nothing yet. Check then, at each call site or type
+position that reaches one, solves that use's type arguments, deep-copies the
+template's AST subtree into the same `ast.Tree`
+(`ast.Tree.CloneSubtree` - fresh `NodeIndex`es, identical tokens, no source
+text rewritten anywhere), and resolves/type-checks the copy in a scope where
+each type parameter is bound to a real `sema.Type`. The copy is an ordinary
+`FuncDecl`/`StructDecl` in every respect afterward: real `Info.Refs`,
+`Info.Types`, `Info.Captures` entries, a real `*sema.Symbol`/`*StructInfo` of
+its own. Each `(template, type arguments)` pair is memoized before its body is
+resolved, so a recursive or mutually-recursive generic terminates.
+
+**What codegen actually does differently.** Two things, both small:
+
+- `Generator.declsOfKind` (codegen.go) replaces the bare
+  `Tree.TopLevelDeclsOfKind` every pass in `genPackage` used to call: it skips
+  templates (`Info.IsGenericTemplate`) and appends `Info.Specializations`,
+  which aren't children of `Tree.Root` and would otherwise be invisible.
+- A struct's catalog and a method's receiver are now looked up through the
+  `*sema.Symbol` recorded for the declaration's own name/receiver node, never
+  through that node's source text: every instantiation of one generic struct is
+  a clone of the same declaration, so they all share the same text.
+
+Nothing else changed. `g.funcs`/`g.ctors` stay keyed by a single
+`*sema.Symbol` because each specialization *has* its own symbol - there is no
+one-symbol-to-many-functions relationship anywhere.
+
+**Mangled names.** A specialization's symbol name is
+`Name[arg1,arg2]` using each argument's `sema.Type.String()` (`Sum[int]`,
+`Pair[int,string]`), which is also its LLVM function/struct name; a method's
+LLVM name follows the existing `Receiver.Method` convention, so
+`SlotMap[int].Insert`. `Type.String()` isn't provably injective (two
+same-named structs in different packages render identically), so a mangled
+name already claimed by a structurally different argument list gets a `#N`
+suffix rather than aliasing onto it (`GenericInfo.instanceKey`).
+
+**A specialization belongs to its declaring package**, not to whichever
+package instantiated it: the clone lives in the tree the template was declared
+in, so a generic used from three packages is emitted exactly once.
+
 # `src/compiler`: pipeline orchestration
 
 Sits directly above `src/loader` in this project's own layering: `loader`

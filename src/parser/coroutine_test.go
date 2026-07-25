@@ -26,6 +26,7 @@ func TestAsyncFuncDeclShape(t *testing.T) {
 				"FuncDecl \"async\"\n" +
 				"  <missing>\n" +
 				"  Ident \"Coro\"\n" +
+				"  <missing>\n" +
 				"  ParamList\n" +
 				"  <missing>\n" +
 				"  Block\n",
@@ -37,6 +38,7 @@ func TestAsyncFuncDeclShape(t *testing.T) {
 				"FuncDecl \"func\"\n" +
 				"  <missing>\n" +
 				"  Ident \"f\"\n" +
+				"  <missing>\n" +
 				"  ParamList\n" +
 				"  <missing>\n" +
 				"  Block\n",
@@ -121,6 +123,7 @@ func TestAwaitStmtShape(t *testing.T) {
 		"FuncDecl \"async\"\n" +
 		"  <missing>\n" +
 		"  Ident \"Coro\"\n" +
+		"  <missing>\n" +
 		"  ParamList\n" +
 		"  <missing>\n" +
 		"  Block\n" +

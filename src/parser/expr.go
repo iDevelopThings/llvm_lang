@@ -158,8 +158,13 @@ func (p *Parser) parseExpr(minPrec precedence) ast.NodeIndex {
 		p.advance()
 		return p.badNode(tok)
 	}
-	left := prefix(p)
+	return p.continueExpr(prefix(p), minPrec)
+}
 
+// continueExpr is parseExpr's own loop, resumed over an already-parsed
+// left-hand side - for the rare rule that had to build its operand itself
+// before ordinary infix/postfix continuation can take over.
+func (p *Parser) continueExpr(left ast.NodeIndex, minPrec precedence) ast.NodeIndex {
 	for {
 		rule, ok := infixRules[p.tok.Lexeme]
 		if !ok || rule.prec < minPrec {
@@ -195,7 +200,7 @@ func parseIdentExpr(p *Parser) ast.NodeIndex {
 		// composite literals are allowed here at all (see exprLev on
 		// Parser); otherwise this is just a plain identifier and the `{`
 		// belongs to whatever follows (an if/for body, most commonly).
-		if p.exprLev >= 0 && p.at(enums.Lexemes.LeftBrace) {
+		if p.atCompositeLitBody() {
 			return p.finishCompositeLit(ident)
 		}
 		return ident
@@ -507,16 +512,84 @@ func (p *Parser) parseMakeArgs() []ast.NodeIndex {
 // following `:` disambiguates a slice expression from a plain index - parse
 // an optional high-bound expression (skipped when `]` follows immediately)
 // and build a SliceExpr; with no `:`, the already-parsed expression is the
-// ordinary index and this is the existing IndexExpr path, unchanged. This
-// deliberately doesn't support Go's less-common 3-index `s[a:b:c]` form - not
-// needed, out of scope for this round (see LANGUAGE.md).
+// atTypeOnlyStart reports whether the current token can only ever begin a
+// type expression, never a value one (`[]T`/`[N]T`, `map[K]V`, `func(...)`,
+// `cfunc(...)`) - the cue parseIndexExpr uses to parse an explicit generic
+// instantiation's argument (`Foo[[]int]`) as a type rather than an
+// expression. A bare identifier or a `*T` pointer type stays ambiguous with
+// indexing and is still parsed as an expression, then reinterpreted as a type
+// by sema (see its typeArgFromNode).
+func (p *Parser) atTypeOnlyStart() bool {
+	switch {
+	case p.at(enums.Lexemes.LeftBracket),
+		p.atKeyword(enums.Keywords.Map),
+		p.atKeyword(enums.Keywords.Func),
+		p.atKeyword(enums.Keywords.CFunc):
+		return true
+	default:
+		return false
+	}
+}
+
+// parseIndexExpr parses both `s[i]` (IndexExpr) and a Go-style slice
+// expression `s[a:b]` / `s[:b]` / `s[a:]` / `s[:]` (SliceExpr) - see
+// LANGUAGE.md's "Slicing" section and ast.Node's own SliceExpr doc comment
+// for the [object, low, high] shape. The two share one `[` infix rule: after
+// `[`, an optional low-bound expression is parsed (skipped entirely when the
+// very next token is already `:`, i.e. the low bound was omitted), then a
+// following `:` disambiguates a slice expression from a plain index - parse
+// an optional high-bound expression (skipped when `]` follows immediately)
+// and build a SliceExpr; with no `:`, the already-parsed expression is the
+// ordinary index. An index that starts type-only (see atTypeOnlyStart) is
+// parsed as a type instead, which covers both an explicit generic
+// instantiation's argument and an array-literal key (`m[[3]int{1,2,3}]`).
+// This deliberately doesn't support Go's less-common 3-index `s[a:b:c]` form -
+// not needed, out of scope for this round (see LANGUAGE.md).
 func parseIndexExpr(p *Parser, target ast.NodeIndex) ast.NodeIndex {
 	p.expect(enums.Lexemes.LeftBracket)
 	p.exprLev++
 
 	low := ast.InvalidNode
-	if !p.at(enums.Lexemes.Colon) {
+	switch {
+	case p.at(enums.Lexemes.Colon):
+	case p.atTypeOnlyStart():
+		low = p.parseTypeExpr()
+		if p.atCompositeLitBody() {
+			// `m[[3]int{1,2,3}]` - an array/map-literal key, not a type
+			// argument; from here it's an ordinary expression again.
+			low = p.continueExpr(p.finishCompositeLit(low), precLowest)
+		}
+	default:
 		low = p.parseExpr(precLowest)
+	}
+
+	// A comma here can only mean a multi-argument explicit instantiation
+	// (`Pair[int, string]`) - no indexing or slicing grammar takes one. Every
+	// remaining argument parses as a plain type; the first already did, one
+	// way or the other, above.
+	if p.at(enums.Lexemes.Comma) {
+		args := []ast.NodeIndex{low}
+		for {
+			if _, ok := p.accept(enums.Lexemes.Comma); !ok {
+				break
+			}
+			if p.at(enums.Lexemes.RightBracket) {
+				break
+			}
+			args = append(args, p.parseTypeExpr())
+		}
+		p.exprLev--
+		closeTok := p.expect(enums.Lexemes.RightBracket)
+		listSpan := ast.Span{
+			Start: p.tree.SpanOf(args[0]).Start,
+			End:   closeTok.End,
+		}
+		list := p.tree.NewNode(enums.NodeKinds.TypeArgList, lexer.Token{}, listSpan, args...)
+		span := ast.Span{
+			Start: p.tree.SpanOf(target).Start,
+			End:   closeTok.End,
+		}
+		return p.finishIndexExpr(p.tree.NewNode(enums.NodeKinds.IndexExpr, lexer.Token{}, span, target, list))
 	}
 
 	if _, ok := p.accept(enums.Lexemes.Colon); ok {
@@ -539,7 +612,23 @@ func parseIndexExpr(p *Parser, target ast.NodeIndex) ast.NodeIndex {
 		Start: p.tree.SpanOf(target).Start,
 		End:   closeTok.End,
 	}
-	return p.tree.NewNode(enums.NodeKinds.IndexExpr, lexer.Token{}, span, target, low)
+	return p.finishIndexExpr(p.tree.NewNode(enums.NodeKinds.IndexExpr, lexer.Token{}, span, target, low))
+}
+
+// atCompositeLitBody reports whether a `{` here starts a composite literal's
+// body rather than a statement block (see exprLev on Parser).
+func (p *Parser) atCompositeLitBody() bool {
+	return p.exprLev >= 0 && p.at(enums.Lexemes.LeftBrace)
+}
+
+// finishIndexExpr extends a just-built IndexExpr with a composite-literal body
+// when one follows (`SlotMap[Entity]{...}` - a generic struct's own
+// construction syntax, see LANGUAGE.md's "Generics" section).
+func (p *Parser) finishIndexExpr(idx ast.NodeIndex) ast.NodeIndex {
+	if p.atCompositeLitBody() {
+		return p.finishCompositeLit(idx)
+	}
+	return idx
 }
 
 func parseMemberExpr(p *Parser, object ast.NodeIndex) ast.NodeIndex {
@@ -551,10 +640,8 @@ func parseMemberExpr(p *Parser, object ast.NodeIndex) ast.NodeIndex {
 	}
 	member := p.tree.NewNode(enums.NodeKinds.MemberExpr, nameTok, span, object)
 	// A package-qualified composite literal (`shapes.Point{...}` - see
-	// LANGUAGE.md's "Imports" section) - same brace-ambiguity guard
-	// parseIdentExpr's own plain-Ident composite-literal check uses (see
-	// exprLev's own doc comment on Parser).
-	if p.exprLev >= 0 && p.at(enums.Lexemes.LeftBrace) {
+	// LANGUAGE.md's "Imports" section).
+	if p.atCompositeLitBody() {
 		return p.finishCompositeLit(member)
 	}
 	return member

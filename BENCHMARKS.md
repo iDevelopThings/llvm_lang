@@ -191,3 +191,33 @@ ever call through `src/compiler`), so only the end-to-end row moves:
   `finishPipeline`'s `RunPasses` call entirely when `optimize` is false
   means that path's own cost is unchanged from the pre-this-round numbers
   above.
+
+## 2026-07-25 update - monomorphized generics
+
+Re-measured after landing generics (see `DECISIONS.md`'s dated entry), same
+machine/fixtures/command, against a same-session pre-change build. Only the
+per-stage lexer/parser/sema/codegen benchmarks are relevant here - neither
+fixture uses generics at all, so this measures the cost this feature adds to
+programs that don't use it:
+
+| Stage | Fixture | B/op (before -> after) | allocs/op (before -> after) |
+|---|---|---:|---:|
+| Parser (`ParseFile`) | Small | 110,937 -> 110,945 | 114 -> 114 |
+| Parser (`ParseFile`) | Large | 3,093,319 -> 3,093,326 | 1,369 -> 1,369 |
+| Sema (`Resolve`+`Check`) | Small | 99,930 -> 101,195 | 312 -> 314 |
+| Sema (`Resolve`+`Check`) | Large | 2,795,819 -> 2,808,429 | 4,793 -> 4,795 |
+| Codegen (`Generate`) | Small | 11,831 -> 11,829 | 167 -> 167 |
+| Codegen (`Generate`) | Large | 236,198 -> 236,205 | 2,928 -> 2,928 |
+
+ns/op is omitted deliberately - every stage's before/after landed inside
+run-to-run noise at this benchtime, with no consistent direction.
+
+- **Flat, as designed.** Neither fixture declares a generic, so no
+  specialization is ever created and the instantiation pass never runs.
+- Parser and codegen move by single-digit B/op with no allocation change at
+  either fixture size - within noise, not an attributable cost.
+- Sema is the only consistently-directional change: +2 allocs/op on both
+  fixtures (constant per package, so it doesn't scale with program size) and
+  ~+1.3% / ~+0.5% B/op on Small / Large. The B/op delta isn't traced to a
+  specific allocation site here; what the numbers do support is that it
+  doesn't grow with the program.

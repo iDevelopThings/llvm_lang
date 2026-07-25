@@ -80,7 +80,7 @@ func TestShortVarDeclSeesOuterNameOnRHS(t *testing.T) {
 	src = "var x int = 1\nfunc f() {\n\tx := x + 1\n}\n"
 	tree, info := resolveSrc(t, src)
 	funcDecl := tree.Children(tree.Root)[1]
-	body := tree.Child(funcDecl, 4)
+	body := tree.Child(funcDecl, 5)
 	shortDecl := tree.Child(body, 0)
 	rhs := tree.Child(shortDecl, 1) // `x + 1`
 	rhsX := tree.Child(rhs, 0)      // the `x` in `x + 1`
@@ -95,7 +95,7 @@ func TestShortVarDeclSeesOuterNameOnRHS(t *testing.T) {
 func TestForLoopVariableScopedToLoop(t *testing.T) {
 	tree, info := resolveSrc(t, "func f() {\n\tfor i := 0; i < 10; i++ {\n\t\tprint(i)\n\t}\n}\n")
 	funcDecl := tree.Children(tree.Root)[0]
-	body := tree.Child(funcDecl, 4)
+	body := tree.Child(funcDecl, 5)
 	forStmt := tree.Child(body, 0)
 	forScope := info.Scopes[forStmt]
 	if forScope == nil {
@@ -125,7 +125,7 @@ func TestMethodAndThisResolve(t *testing.T) {
 	_ = structDecl
 
 	methodDecl := tree.Children(tree.Root)[1]
-	body := tree.Child(methodDecl, 4)
+	body := tree.Child(methodDecl, 5)
 	assign := tree.Child(body, 0)
 	thisExpr := tree.Child(tree.Child(assign, 0), 0) // MemberExpr(x).object = ThisExpr
 	sym, ok := info.Refs[thisExpr]
@@ -187,7 +187,7 @@ func TestCompositeLitKeyNotResolvedValueIs(t *testing.T) {
 		"func f() {\n\tv := 5\n\tp := Point{x: v}\n}\n"
 	tree, info := resolveSrc(t, src)
 	funcDecl := tree.Children(tree.Root)[1]
-	body := tree.Child(funcDecl, 4)
+	body := tree.Child(funcDecl, 5)
 	pDecl := tree.Child(body, 1) // `p := Point{x: v}`
 	lit := tree.Child(pDecl, 1)
 	kv := tree.Child(lit, 1) // the `x: v` KeyValueExpr

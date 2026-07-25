@@ -73,7 +73,7 @@ func TestVarDeclTypeInferredFromInit(t *testing.T) {
 	src := "var a = 5\nfunc f() {\n\tb := a\n}\n"
 	tree, info := checkSrc(t, src)
 	fn := tree.Children(tree.Root)[1]
-	body := tree.Child(fn, 4)
+	body := tree.Child(fn, 5)
 	short := tree.Child(body, 0)
 	bType := info.Types[tree.Child(short, 1)]
 	if bType.Kind != TypeInt {
@@ -787,7 +787,7 @@ func TestStructKeyedCompositeLitResolvesFieldName(t *testing.T) {
 	src := pointSrc + "func f() {\n\tp := Point{x: 1, y: 2}\n}\n"
 	tree, info := checkSrc(t, src)
 	fn := tree.Children(tree.Root)[1]
-	body := tree.Child(fn, 4)
+	body := tree.Child(fn, 5)
 	short := tree.Child(body, 0)
 	lit := tree.Child(short, 1)
 	kv := tree.Child(lit, 1) // `x: 1`
@@ -847,7 +847,7 @@ func TestMemberExprFieldAccessResolvesAndTypes(t *testing.T) {
 	src := pointSrc + "func f() {\n\tp := Point{1, 2}\n\tvar a int = p.x\n}\n"
 	tree, info := checkSrc(t, src)
 	fn := tree.Children(tree.Root)[1]
-	body := tree.Child(fn, 4)
+	body := tree.Child(fn, 5)
 	varDecl := tree.Child(body, 1)
 	member := tree.Child(varDecl, 2)
 
@@ -895,7 +895,7 @@ const pointWithMoveSrc = pointSrc +
 func TestThisTypedAsReceiverStruct(t *testing.T) {
 	tree, info := checkSrc(t, pointWithMoveSrc)
 	methodDecl := tree.Children(tree.Root)[1]
-	body := tree.Child(methodDecl, 4)
+	body := tree.Child(methodDecl, 5)
 	assign := tree.Child(body, 0)
 	member := tree.Child(assign, 0)   // this.x
 	thisExpr := tree.Child(member, 0) // this

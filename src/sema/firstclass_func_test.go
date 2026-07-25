@@ -9,7 +9,7 @@ func TestBareFuncNameIsTypedAsTypeFunc(t *testing.T) {
 		"func f() {\n\tvar fn func(int, int) int = add\n}\n"
 	tree, info := checkSrc(t, src)
 	fDecl := tree.Children(tree.Root)[1]
-	body := tree.Child(fDecl, 4)
+	body := tree.Child(fDecl, 5)
 	varDecl := tree.Child(body, 0)
 	init := tree.Child(varDecl, 2) // the bare `add` reference
 
@@ -99,7 +99,7 @@ func TestIndirectCalleeGetsInfoTypesEntry(t *testing.T) {
 		"func f() {\n\tfn := add\n\tfn(1, 2)\n}\n"
 	tree, info := checkSrc(t, src)
 	fDecl := tree.Children(tree.Root)[1]
-	body := tree.Child(fDecl, 4)
+	body := tree.Child(fDecl, 5)
 	exprStmt := tree.Child(body, 1) // fn(1, 2)
 	call := tree.Child(exprStmt, 0)
 	callee := tree.Child(call, 0) // fn
@@ -151,7 +151,7 @@ func TestCallThroughFuncTypedFieldCalleeGetsInfoTypesEntry(t *testing.T) {
 	src := callbackSrc + "func f() {\n\tcb := Callback{double}\n\tcb.fn(5)\n}\n"
 	tree, info := checkSrc(t, src)
 	fDecl := tree.Children(tree.Root)[2]
-	body := tree.Child(fDecl, 4)
+	body := tree.Child(fDecl, 5)
 	exprStmt := tree.Child(body, 1) // cb.fn(5)
 	call := tree.Child(exprStmt, 0)
 	callee := tree.Child(call, 0) // cb.fn

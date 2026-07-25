@@ -79,3 +79,27 @@ small fixture, ~3.2ms for a large (40x) one - make this comfortably fast
 enough for an interactive editor loop at this project's current scale.
 Revisit only once a real, large `.llx` file actually demonstrates
 reparse-per-edit is too slow in practice - not speculatively ahead of that.
+
+---
+
+## Explicit type arguments on a generic *method* call
+
+`Foo[int](x)` works for a free function (the callee is an `IndexExpr` whose
+`Info.Refs` entry codegen already treats as a direct call), but `p.m[int](x)`
+has no supported spelling: that callee is an `IndexExpr` wrapping a
+`MemberExpr`, which codegen's method-call dispatch doesn't recognize, and
+adding it means teaching `genMethodCall` to see through the instantiation
+wrapper to find the receiver.
+
+**Why this isn't just an oversight:** every method type parameter this
+feature was actually built for is inferable from the call's arguments (see
+`LANGUAGE.md`'s "Generics" section), so there's no known program that needs
+this yet - and it's not obvious whether the right spelling is
+`p.m[int](x)`, or something else entirely, once method values ever become
+a thing.
+
+**Current default:** method type parameters are inference-only, and
+`p.m[int](x)` is rejected by name ("explicit type arguments are not supported
+on a method call - m's type parameters are inferred from its arguments" - see
+sema's `rejectMethodTypeArgs`). Revisit if a real program hits a method type
+parameter that inference genuinely can't reach.

@@ -9,7 +9,7 @@ import "testing"
 func TestSliceDynamicArrayType(t *testing.T) {
 	tree, info := checkSrc(t, "func f() []int {\n\ts := []int{1, 2, 3}\n\treturn s[0:2]\n}\n")
 	fn := tree.Children(tree.Root)[0]
-	body := tree.Child(fn, 4)
+	body := tree.Child(fn, 5)
 	ret := tree.Child(body, 1)
 	sliceExpr := tree.Child(ret, 0)
 	rt := info.Types[sliceExpr]
@@ -22,7 +22,7 @@ func TestSliceDynamicArrayType(t *testing.T) {
 func TestSliceStringType(t *testing.T) {
 	tree, info := checkSrc(t, "func f() string {\n\ts := \"hello world\"\n\treturn s[0:5]\n}\n")
 	fn := tree.Children(tree.Root)[0]
-	body := tree.Child(fn, 4)
+	body := tree.Child(fn, 5)
 	ret := tree.Child(body, 1)
 	sliceExpr := tree.Child(ret, 0)
 	rt := info.Types[sliceExpr]
@@ -37,7 +37,7 @@ func TestSliceStringType(t *testing.T) {
 func TestSliceFixedArrayProducesDynamicArray(t *testing.T) {
 	tree, info := checkSrc(t, "func f() []int {\n\tarr := [5]int{1, 2, 3, 4, 5}\n\treturn arr[1:3]\n}\n")
 	fn := tree.Children(tree.Root)[0]
-	body := tree.Child(fn, 4)
+	body := tree.Child(fn, 5)
 	ret := tree.Child(body, 1)
 	sliceExpr := tree.Child(ret, 0)
 	rt := info.Types[sliceExpr]
@@ -95,7 +95,7 @@ func TestSliceOnNonSliceableTypeIsError(t *testing.T) {
 func TestSliceOmittedBoundsDefaultCorrectly(t *testing.T) {
 	tree, info := checkSrc(t, "func f() []int {\n\ts := []int{1, 2, 3, 4, 5}\n\ta := s[1:3]\n\tb := s[:3]\n\tc := s[1:]\n\td := s[:]\n\treturn s\n}\n")
 	fn := tree.Children(tree.Root)[0]
-	body := tree.Child(fn, 4)
+	body := tree.Child(fn, 5)
 
 	cases := []struct {
 		stmtIdx      int

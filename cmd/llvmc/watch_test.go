@@ -136,6 +136,44 @@ func TestRun_Watch_InitWrongReturnType(t *testing.T) {
 	}
 }
 
+// TestRun_Watch_GenericEntryPoint covers the one shape that would otherwise
+// pass every arity/return-type check and still have no address to call: a
+// generic entry point is only ever a template, never a lowered function.
+func TestRun_Watch_GenericEntryPoint(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{
+			name: "generic Frame",
+			src:  "func Frame[T]() int {\n\treturn 1\n}\n",
+			want: "Frame must not be generic",
+		},
+		{
+			name: "generic Init",
+			src:  "func Init[T]() {\n}\nfunc Frame() int {\n\treturn 1\n}\n",
+			want: "Init must not be generic",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srcPath := filepath.Join(t.TempDir(), "main.llx")
+			if err := os.WriteFile(srcPath, []byte(tc.src), 0o644); err != nil {
+				t.Fatalf("writing source: %v", err)
+			}
+			var stderr bytes.Buffer
+			code := run([]string{"-watch", srcPath}, &stderr)
+			if code != exitCompile {
+				t.Errorf("exit code = %d, want %d, stderr:\n%s", code, exitCompile, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), tc.want) {
+				t.Errorf("stderr = %q, want substring %q", stderr.String(), tc.want)
+			}
+		})
+	}
+}
+
 // TestBinary_Watch_TickExit runs -watch until Frame returns non-zero.
 func TestBinary_Watch_TickExit(t *testing.T) {
 	dir := t.TempDir()
