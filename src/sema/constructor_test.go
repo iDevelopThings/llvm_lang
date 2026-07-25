@@ -88,12 +88,35 @@ func TestConstructorCallArgumentTypeMismatchIsError(t *testing.T) {
 // TestConstructorCallOnZeroConstructorStructIsError is the regression case:
 // a struct with no constructors at all called like a function must remain
 // exactly as illegal as before this feature (falling through unclaimed to
-// checkConversionCall's pre-existing "not a numeric conversion target"
-// handling - see checkConstructorCall's own doc comment). This mirrors the
-// pre-existing TestConversionToNonNumericTypeIsError (numeric_test.go),
-// asserted again here under this feature's own test file for visibility.
+// checkConversionCall's own struct-target rejection - see its doc comment).
+// This mirrors the pre-existing TestConversionToNonNumericTypeIsError
+// (numeric_test.go), asserted again here under this feature's own test file
+// for visibility.
 func TestConstructorCallOnZeroConstructorStructIsError(t *testing.T) {
 	expectCheckErrors(t, pointSrc+"func f() {\n\tPoint(1)\n}\n", 1)
+}
+
+// TestConstructorCallZeroArgsOnZeroConstructorStructNamesTheRealProblem
+// covers a struct with no constructors called with the WRONG argument count
+// (zero, not the one TestConstructorCallOnZeroConstructorStructIsError
+// covers) - checkConversionCall must reject this before ever reaching its
+// own argument-count check, since a struct is never a valid conversion
+// target at any arity: "supply exactly one argument" would be misleading,
+// since one argument wouldn't make Point(1) legal either.
+func TestConstructorCallZeroArgsOnZeroConstructorStructNamesTheRealProblem(t *testing.T) {
+	diags := expectCheckErrors(t, pointSrc+"func f() {\n\tPoint()\n}\n", 1)
+	wantDiag(t, diags.All()[0].Msg, "Point has no constructor")
+}
+
+// TestNewCallOnZeroConstructorStructReportsBothLayers covers `new Point()`
+// wrapping the same zero-constructor struct call: the inner conversion
+// rejection (checkConversionCall) and checkNewExpr's own "new requires a
+// constructor call or composite literal" both fire - two diagnostics, not
+// one - and neither is the misleading argument-count wording.
+func TestNewCallOnZeroConstructorStructReportsBothLayers(t *testing.T) {
+	diags := expectCheckErrors(t, pointSrc+"func f() {\n\tnew Point()\n}\n", 2)
+	wantDiagAmong(t, diags.All(), "Point has no constructor")
+	wantDiagAmong(t, diags.All(), "new requires a struct constructor call or composite literal")
 }
 
 // TestConstructorCompositeLitRegression asserts `Point{...}` composite

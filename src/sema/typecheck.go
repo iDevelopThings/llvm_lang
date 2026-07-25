@@ -5123,6 +5123,15 @@ func (c *checker) checkEnumVariantCall(n, callee ast.NodeIndex, args []ast.NodeI
 // message for `Point(x)` - the real problem is that Point isn't a numeric
 // conversion target, not that it isn't callable).
 //
+// A struct callee only ever reaches here when checkConstructorCall found it
+// has zero declared constructors (any arity mismatch against a struct that
+// *does* have constructors is reported there instead, before this function
+// ever runs - see its own doc comment) - so a struct target is rejected
+// immediately, before the argument-count check below, regardless of how many
+// arguments were given: a struct is never a valid conversion target at any
+// arity, so "supply exactly one argument" would be misleading advice that
+// doesn't actually fix anything.
+//
 // Returns ok=false only for a plain function/method call (an ordinary
 // SymFunc callee, or a MemberExpr) - checkCallExpr falls through to its
 // normal handling in that case. Every other path (right argument count and
@@ -5141,6 +5150,16 @@ func (c *checker) checkConversionCall(n, callee ast.NodeIndex, args []ast.NodeIn
 	}
 
 	target := c.typeFromNode(callee)
+
+	if sym.Kind == SymStruct {
+		c.errorAtNodes(args, n, "%s has no constructor - declare one, or use a composite literal (%s{...}) instead", target, target)
+		for _, a := range args {
+			c.checkValueExpr(a)
+		}
+		c.info.Types[n] = invalidType
+		return invalidType, true
+	}
+
 	if len(args) != 1 {
 		c.errorAtNodes(args, n, "conversion to %s requires exactly one argument, got %d", target, len(args))
 		for _, a := range args {
