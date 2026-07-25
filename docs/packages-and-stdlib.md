@@ -75,7 +75,7 @@ lives on disk.
 | `std:mathutil` | `Sqrt`, `Pow`, `Floor`, `Ceil`, `Fabs`, `Abs`, `Min`, `Max` |
 | `std:strings` | Search, prefix/suffix, trim, split, ASCII case conversion, number formatting |
 | `std:slices` | `Contains`, `IndexOf`, `Reverse`, `Map`, `Filter`, `Reduce` |
-| `std:collections` | Generic `SlotMap` with generation-checked handles |
+| `std:collections` | Generic `SlotMap` with generation-checked handles; `Len`, `Clear`, and `Values`/`Handles` generators to iterate live entries |
 | `std:time` | Performance-counter timing |
 | `std:scheduler` | Timer scheduler for coroutines |
 | `std:test` | Assertions used by `llvmc -test` |
@@ -104,3 +104,4 @@ Try:
 - [`strings_demo.llx`](../examples/strings_demo/strings_demo.llx)
 - [`slices_demo.llx`](../examples/slices_demo/slices_demo.llx)
 - [`collections_demo.llx`](../examples/collections_demo/collections_demo.llx)
+- [`collections_test.llx`](../examples/collections_test/collections_test.llx) - `llvmc -test` assertions covering the full `SlotMap` API

@@ -161,6 +161,39 @@ func main() int {
 	}
 }
 
+// TestRunProgram_PackageQualifiedGeneratorRangeCall covers a real bug fix:
+// ranging over a package-qualified generator call (mathutils.Range(...), not
+// a same-package bare name) used to be rejected outright ("range over a
+// generator requires calling it directly by name... not through a stored
+// function value or any other indirection") even though the call is exactly
+// as direct as a same-package one - directFuncCallSymbol's own callee-shape
+// check only ever recognized an Ident callee, never a MemberExpr one (see
+// src/sema/resolve.go's own doc comment on this fix, and DECISIONS.md).
+func TestRunProgram_PackageQualifiedGeneratorRangeCall(t *testing.T) {
+	prog := loadProgram(t, `
+func Range(a int, b int) yield int {
+	for i := a; i < b; i++ {
+		yield i
+	}
+}
+`, `
+import "../mathutils"
+
+func main() int {
+	sum := 0
+	for v := range mathutils.Range(1, 4) {
+		sum = sum + v
+	}
+	return sum
+}
+`)
+
+	res := RunProgram(prog)
+	if res.HasErrors {
+		t.Fatalf("HasErrors = true, want false; diags = %v", dumpDiags(res))
+	}
+}
+
 func anyDiagHasErrors(res *Result) bool {
 	for _, b := range res.Diags {
 		if b != nil && b.HasErrors() {

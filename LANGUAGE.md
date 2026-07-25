@@ -1875,8 +1875,10 @@ for v := range Range(1, 6) {
 A generator call's own result has no real standalone runtime representation
 under this lowering (see `CODEGEN.md`'s "Generator functions" section for
 why) - it is legal **only** directly as a range-for's own subject
-expression, called directly by name. Every other use is a clean compile-time
-diagnostic, never a panic:
+expression, called directly by name - a package-qualified name
+(`mathutils.Range(1, 10)`) works exactly the same way, since it's just as
+direct a call as a same-package one. Every other use is a clean
+compile-time diagnostic, never a panic:
 
 ```go
 x := Range(1, 10)        // error - a generator's result can't be stored

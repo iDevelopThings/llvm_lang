@@ -85,3 +85,64 @@ func (SlotMap[T]) Remove(h Handle) {
     this.generations[h.Index] = this.generations[h.Index] + 1
     this.freeList = append(this.freeList, h.Index)
 }
+
+// Len returns the number of live entries - len(items) minus however many
+// slots are currently on the free list, not simply len(items) (which also
+// counts a freed-but-not-yet-reused slot).
+func (SlotMap[T]) Len() int {
+    return len(this.items) - len(this.freeList)
+}
+
+// Clear removes every entry, resetting this SlotMap[T] back to empty -
+// every Handle issued before this call becomes stale, the same as if each
+// had been individually Removed.
+func (SlotMap[T]) Clear() {
+    this.items = make([]T, 0)
+    this.generations = make([]i32, 0)
+    this.freeList = make([]int, 0)
+}
+
+// liveSlots returns, for s, a same-length-as-items array marking which
+// slots are still live (true) versus freed (false) - the shared O(len(items)
+// + len(freeList)) groundwork Values/Handles both need to skip freed slots,
+// built once per call rather than re-scanning freeList per slot.
+func liveSlots[T](s *SlotMap[T]) []bool {
+    live := make([]bool, len(s.items))
+    for i := range live {
+        live[i] = true
+    }
+    for i := range s.freeList {
+        live[s.freeList[i]] = false
+    }
+    return live
+}
+
+// Values yields every T currently stored in s, skipping freed slots - in
+// slot order, not insertion order: a reused slot (see Insert) keeps its
+// original, possibly-lower index, so it can yield before an older entry
+// that was never removed at all - only a SlotMap with no Remove calls yet
+// is guaranteed insertion order. A generator can't be a method (see
+// LANGUAGE.md's "Generator functions" section), so this takes s explicitly
+// instead of being declared on SlotMap[T] itself, same as Handles below.
+func Values[T](s *SlotMap[T]) yield T {
+    live := liveSlots(s)
+    for i := range s.items {
+        if live[i] {
+            yield s.items[i]
+        }
+    }
+}
+
+// Handles yields every live Handle in s, skipping freed slots - pair this
+// with s.Get(h) inside the loop body for both the handle and its value
+// together (a generator yields exactly one value - see LANGUAGE.md's
+// "Generator functions" section - so Values and Handles are two separate
+// generators rather than one yielding both).
+func Handles[T](s *SlotMap[T]) yield Handle {
+    live := liveSlots(s)
+    for i := range s.items {
+        if live[i] {
+            yield Handle{i, s.generations[i]}
+        }
+    }
+}

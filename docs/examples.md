@@ -63,6 +63,7 @@ Run a multi-file example by passing its directory:
 | [`strings_demo`](../examples/strings_demo/strings_demo.llx) | `std:strings` |
 | [`slices_demo`](../examples/slices_demo/slices_demo.llx) | `std:slices` |
 | [`collections_demo`](../examples/collections_demo/collections_demo.llx) | `std:collections` |
+| [`collections_test`](../examples/collections_test/collections_test.llx) | `std:collections` covered by real `llvmc -test` assertions, all passing |
 | [`time_demo`](../examples/time_demo/time_demo.llx) | `std:time` |
 | [`scheduler_demo`](../examples/scheduler_demo/scheduler_demo.llx) | `std:scheduler` and coroutines |
 | [`test_demo`](../examples/test_demo/test_demo.llx) | `std:test` and `llvmc -test`; intentionally fails |

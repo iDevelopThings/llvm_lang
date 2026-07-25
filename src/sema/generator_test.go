@@ -121,6 +121,22 @@ func TestGeneratorRangeForIndirectCallIsError(t *testing.T) {
 	expectCheckErrors(t, src, 1)
 }
 
+// TestGeneratorRangeForMethodCallIsError is the regression test for a real
+// gap the required separate review pass caught: directFuncCallSymbol's own
+// widened MemberExpr-callee case (added to let a package-qualified
+// generator call, e.g. collections.Values(&m), work in a range-for - see
+// DECISIONS.md's dated entry) initially assumed a method call could never
+// reach it at all, since a generator function can't be a method - true as a
+// *diagnosed* rule (see TestGeneratorMethodReceiverIsError above), not a
+// structural one: checkFuncDecl reports that error without clearing the
+// method's own return type back off TypeGenerator, so `p.Values()` (a
+// method wrongly declared `yield T`) called in a range-for must still be
+// rejected as an indirect call too - two diagnostics, not silently one.
+func TestGeneratorRangeForMethodCallIsError(t *testing.T) {
+	src := "struct Point {\n\tx int\n}\n\nfunc (Point) Values() yield int {\n\tyield this.x\n}\n\nfunc f() {\n\tp := Point{5}\n\tfor v := range p.Values() {\n\t}\n}\n"
+	expectCheckErrors(t, src, 2)
+}
+
 // --- a generator value used anywhere but a range-for's own subject ---
 
 func TestGeneratorValueStoredInVariableIsError(t *testing.T) {

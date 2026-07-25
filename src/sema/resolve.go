@@ -1100,26 +1100,45 @@ func isGeneratorRangeSubject(tree *ast.Tree, info *Info, subject ast.NodeIndex) 
 }
 
 // directFuncCallSymbol reports whether subject is a direct call to a
-// function declared by name (an Ident callee resolving, via info.Refs, to a
-// SymFunc with a real declaration) - as opposed to any indirection (a call
-// through a stored function-typed variable/parameter, a parenthesized call
-// wrapping one, ...). Shared by isGeneratorRangeSubject above (deciding
-// purely syntactically whether a range-for's subject is a generator call,
-// before type-checking exists) and typecheck.go's checkGeneratorRangeSubject
-// (enforcing the identical "must be direct" rule once TypeGenerator is
-// already known) - mirrors codegen's own isDirectFuncCall distinction one
-// layer up (src/codegen/expr.go).
+// function declared by name - an Ident callee (a same-package generator) or
+// a MemberExpr callee (a package-qualified one, e.g. `collections.Values`),
+// either resolving via info.Refs to a SymFunc with a real declaration - as
+// opposed to any indirection (a call through a stored function-typed
+// variable/parameter, a parenthesized call wrapping one, ...). A MemberExpr
+// callee can otherwise only mean an ordinary method call, which is
+// explicitly excluded below rather than assumed unreachable: a method
+// really can't be a real generator (LANGUAGE.md's "Generator functions"
+// section, "a generator function can't be a method"), but that rule is only
+// ever *diagnosed* by checkFuncDecl, not structurally prevented - a
+// receiver-bearing FuncDecl can still legitimately carry a YieldReturnType
+// node and type as TypeGenerator despite the error already reported for it,
+// so this function cannot assume that combination is impossible to reach.
+// Shared by isGeneratorRangeSubject above (deciding purely syntactically
+// whether a range-for's subject is a generator call, before type-checking
+// exists) and typecheck.go's checkGeneratorRangeSubject (enforcing the
+// identical "must be direct" rule once TypeGenerator is already known) -
+// mirrors codegen's own isDirectFuncCall distinction one layer up
+// (src/codegen/expr.go), though that one doesn't yet cover a MemberExpr
+// callee itself - a separate, ordinary-call optimization concern this
+// doesn't need to touch, since genRangeForGenerator (src/codegen/stmt.go)
+// reads info.Refs[calleeNode] directly rather than going through
+// isDirectFuncCall at all.
 func directFuncCallSymbol(tree *ast.Tree, info *Info, subject ast.NodeIndex) (*Symbol, bool) {
 	if tree.Nodes[subject].Kind != enums.NodeKinds.CallExpr {
 		return nil, false
 	}
 	callee := tree.Child(subject, 0)
-	if tree.Nodes[callee].Kind != enums.NodeKinds.Ident {
+	switch tree.Nodes[callee].Kind {
+	case enums.NodeKinds.Ident, enums.NodeKinds.MemberExpr:
+	default:
 		return nil, false
 	}
 	sym, ok := info.Refs[callee]
 	if !ok || sym.Kind != SymFunc || sym.Decl == ast.InvalidNode {
 		return nil, false
+	}
+	if sym.Tree.FuncReceiver(sym.Decl) != ast.InvalidNode {
+		return nil, false // a method, not a package-qualified free function
 	}
 	return sym, true
 }

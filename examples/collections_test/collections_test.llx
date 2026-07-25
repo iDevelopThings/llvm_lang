@@ -1,0 +1,171 @@
+// collections_test.llx - exercises std/collections's SlotMap[T] via llvmc
+// -test (see docs/compiler.md's "Run language tests" section), covering
+// both its original API (Insert/Get/Valid/Remove) and the newer additions
+// (Len/Clear/Values/Handles) end to end - unlike collections_demo.llx
+// (hand-verifiable print output), every check here is a real Assert*, so
+// this suite genuinely fails if the behavior it covers ever regresses.
+//
+// Run with:
+//   .\llvmc.exe -test examples\collections_test
+
+import "std:collections"
+import "std:test"
+
+func TestInsertGetRoundTrip(t *test.Runner) {
+    m := collections.NewSlotMap[int]()
+    h := m.Insert(42)
+    t.AssertEqual(m.Get(h), 42, "Get returns exactly what Insert stored")
+    t.Assert(m.Valid(h), "a freshly-inserted handle is valid")
+}
+
+func TestRemoveInvalidatesHandle(t *test.Runner) {
+    m := collections.NewSlotMap[int]()
+    h := m.Insert(1)
+    m.Remove(h)
+    t.AssertFalse(m.Valid(h), "Remove invalidates its own handle")
+}
+
+func TestRemoveIsIdempotent(t *test.Runner) {
+    m := collections.NewSlotMap[int]()
+    h := m.Insert(1)
+    m.Remove(h)
+    m.Remove(h) // must not double-free the same slot onto the free list
+    other := m.Insert(2)
+    t.AssertEqual(m.Len(), 1, "double-Remove didn't corrupt the free list")
+    t.Assert(m.Valid(other), "a later Insert after a double-Remove still works")
+}
+
+func TestSlotReuseBumpsGeneration(t *test.Runner) {
+    m := collections.NewSlotMap[int]()
+    old := m.Insert(1)
+    m.Remove(old)
+    reused := m.Insert(2) // reuses old's freed slot
+    t.AssertEqual(reused.Index, old.Index, "the freed slot is reused, not a new one")
+    t.AssertNotEqual(reused.Generation, old.Generation, "reuse bumps the generation")
+    t.AssertFalse(m.Valid(old), "the stale handle stays invalid after reuse")
+    t.Assert(m.Valid(reused), "the new handle for the reused slot is valid")
+    t.AssertEqual(m.Get(reused), 2, "the reused slot holds the new value")
+}
+
+func TestValidRejectsOutOfRangeHandle(t *test.Runner) {
+    m := collections.NewSlotMap[int]()
+    m.Insert(1)
+    t.AssertFalse(m.Valid(collections.Handle{-1, 0}), "a negative index is never valid")
+    t.AssertFalse(m.Valid(collections.Handle{99, 0}), "an index past every real slot is never valid")
+}
+
+func TestValidAndGetOnEmptySlotMap(t *test.Runner) {
+    m := collections.NewSlotMap[int]()
+    t.AssertFalse(m.Valid(collections.Handle{0, 0}), "no slot exists yet on a zero-insert SlotMap")
+    t.AssertEqual(m.Len(), 0, "a zero-insert SlotMap has no live entries")
+}
+
+// TestValuesAndHandlesAfterRemovingEveryEntry covers liveSlots' own free-list
+// walk on a non-empty items array (unlike TestValuesAfterClearYieldsNothing,
+// which resets storage to empty and never actually exercises marking real
+// slots free) - every slot Removed individually, none reused, none Cleared.
+func TestValuesAndHandlesAfterRemovingEveryEntry(t *test.Runner) {
+    m := collections.NewSlotMap[int]()
+    a := m.Insert(1)
+    b := m.Insert(2)
+    c := m.Insert(3)
+    m.Remove(a)
+    m.Remove(b)
+    m.Remove(c)
+
+    valueCount := 0
+    for range collections.Values(&m) {
+        valueCount = valueCount + 1
+    }
+    t.AssertEqual(valueCount, 0, "Values yields nothing once every entry is individually removed")
+
+    handleCount := 0
+    for range collections.Handles(&m) {
+        handleCount = handleCount + 1
+    }
+    t.AssertEqual(handleCount, 0, "Handles yields nothing once every entry is individually removed")
+    t.AssertEqual(m.Len(), 0, "Len agrees: nothing live")
+}
+
+func TestLenTracksLiveEntriesOnly(t *test.Runner) {
+    m := collections.NewSlotMap[int]()
+    t.AssertEqual(m.Len(), 0, "a fresh SlotMap is empty")
+    a := m.Insert(1)
+    m.Insert(2)
+    t.AssertEqual(m.Len(), 2, "Len counts every live insert")
+    m.Remove(a)
+    t.AssertEqual(m.Len(), 1, "Len drops a removed entry, not just len(items)")
+}
+
+func TestClearResetsEverything(t *test.Runner) {
+    m := collections.NewSlotMap[int]()
+    h := m.Insert(1)
+    m.Insert(2)
+    m.Clear()
+    t.AssertEqual(m.Len(), 0, "Clear empties the map")
+    t.AssertFalse(m.Valid(h), "Clear invalidates every previously issued handle")
+}
+
+func TestValuesSkipsRemovedEntries(t *test.Runner) {
+    m := collections.NewSlotMap[int]()
+    m.Insert(10)
+    b := m.Insert(20)
+    m.Insert(30)
+    m.Remove(b)
+
+    sum := 0
+    count := 0
+    for v := range collections.Values(&m) {
+        sum = sum + v
+        count = count + 1
+    }
+    t.AssertEqual(count, 2, "Values yields only the 2 still-live entries")
+    t.AssertEqual(sum, 40, "the removed entry's own value (20) is excluded")
+}
+
+func TestHandlesMatchGetForEveryLiveEntry(t *test.Runner) {
+    m := collections.NewSlotMap[int]()
+    a := m.Insert(10)
+    m.Insert(20)
+    m.Remove(a)
+
+    seen := 0
+    for h := range collections.Handles(&m) {
+        t.Assert(m.Valid(h), "every yielded handle is itself valid")
+        t.AssertEqual(m.Get(h), 20, "the only live handle resolves to the surviving value")
+        seen = seen + 1
+    }
+    t.AssertEqual(seen, 1, "Handles yields exactly the 1 still-live entry")
+}
+
+func TestValuesAfterClearYieldsNothing(t *test.Runner) {
+    m := collections.NewSlotMap[int]()
+    m.Insert(1)
+    m.Insert(2)
+    m.Clear()
+
+    count := 0
+    for range collections.Values(&m) {
+        count = count + 1
+    }
+    t.AssertEqual(count, 0, "Values over a cleared map yields nothing")
+}
+
+struct Point {
+    x int
+    y int
+}
+
+func TestGenericStructElement(t *test.Runner) {
+    m := collections.NewSlotMap[Point]()
+    h := m.Insert(Point{3, 4})
+    got := m.Get(h)
+    t.AssertEqual(got.x, 3, "struct-typed SlotMap preserves field x")
+    t.AssertEqual(got.y, 4, "struct-typed SlotMap preserves field y")
+
+    sum := 0
+    for p := range collections.Values(&m) {
+        sum = sum + p.x + p.y
+    }
+    t.AssertEqual(sum, 7, "Values works for a struct-typed SlotMap too")
+}
