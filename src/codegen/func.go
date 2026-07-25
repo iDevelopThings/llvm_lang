@@ -29,6 +29,7 @@ func (g *Generator) declareFuncSignature(decl ast.NodeIndex) {
 	returnTypeNode := g.tree.FuncReturnType(decl)
 	sym := g.info.Refs[nameNode]
 
+	var receiverSym *sema.Symbol
 	var paramTypes []llvm.Type
 	if receiver != ast.InvalidNode {
 		// The receiver names either a declared struct or a declared enum
@@ -37,10 +38,12 @@ func (g *Generator) declareFuncSignature(decl ast.NodeIndex) {
 		// enum receiver's own implicit pointer parameter always points at
 		// the one shared g.enumValTy, exactly like a pointer's own pointee
 		// type never affects its LLVM representation elsewhere in this
-		// package.
-		receiverName := g.tree.Text(receiver)
-		if structInfo, ok := g.info.Structs[receiverName]; ok {
-			paramTypes = append(paramTypes, llvm.PointerType(g.structLayouts[structInfo].llvmType, 0))
+		// package. Read off the Symbol sema resolved for the receiver clause,
+		// not its source text - a monomorphized struct's methods all share one
+		// declaration's text (see sema's generics.go).
+		receiverSym = g.info.Refs[receiver]
+		if receiverSym.StructInfo != nil {
+			paramTypes = append(paramTypes, llvm.PointerType(g.structLayouts[receiverSym.StructInfo].llvmType, 0))
 		} else {
 			paramTypes = append(paramTypes, llvm.PointerType(g.enumValTy, 0))
 		}
@@ -82,7 +85,7 @@ func (g *Generator) declareFuncSignature(decl ast.NodeIndex) {
 	}
 
 	isMain := receiver == ast.InvalidNode && g.tree.Text(nameNode) == "main"
-	name := g.tree.Text(nameNode)
+	name := sym.Name
 	switch {
 	case isMain:
 		// main's declared return type is already validated by sema
@@ -93,8 +96,8 @@ func (g *Generator) declareFuncSignature(decl ast.NodeIndex) {
 		// CODEGEN.md's "main is the real entry point" section).
 		llvmRet = g.i32Ty
 		name = "main"
-	case receiver != ast.InvalidNode:
-		name = g.tree.Text(receiver) + "." + name
+	case receiverSym != nil:
+		name = receiverSym.Name + "." + name
 	}
 
 	fnType := llvm.FunctionType(llvmRet, paramTypes, false)

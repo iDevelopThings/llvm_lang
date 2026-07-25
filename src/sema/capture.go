@@ -24,7 +24,15 @@ import (
 // and this way nothing needs its own recursive tree-walker just to *find*
 // every candidate first.
 func computeCaptures(tree *ast.Tree, info *Info, bag *diag.Bag) {
-	for idx := 1; idx < len(tree.Nodes); idx++ {
+	computeCapturesFrom(tree, info, bag, 1)
+}
+
+// computeCapturesFrom is computeCaptures restricted to nodes from start
+// onward - the nodes a single generic specialization just appended (see
+// generics.go). Since the tree is append-only, that range is exactly one
+// specialization's own subtree, and every earlier node was already analyzed.
+func computeCapturesFrom(tree *ast.Tree, info *Info, bag *diag.Bag, start int) {
+	for idx := start; idx < len(tree.Nodes); idx++ {
 		n := ast.NodeIndex(idx)
 		switch tree.Nodes[n].Kind {
 		case enums.NodeKinds.FuncLit:

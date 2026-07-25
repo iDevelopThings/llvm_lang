@@ -164,7 +164,7 @@ func f(x int) {
 }
 `)
 	fn := tree.Children(tree.Root)[0]
-	body := tree.Child(fn, 4)
+	body := tree.Child(fn, 5)
 	short := tree.Child(body, 0)
 	matchNode := tree.Child(short, 1)
 	if got := info.Types[matchNode]; got.Kind != TypeString {
@@ -206,7 +206,7 @@ func f(x int) {
 }
 `)
 	fn := tree.Children(tree.Root)[0]
-	body := tree.Child(fn, 4)
+	body := tree.Child(fn, 5)
 	short := tree.Child(body, 0)
 	matchNode := tree.Child(short, 1)
 	if got := info.Types[matchNode]; got.Kind != TypeI32 {
@@ -241,7 +241,7 @@ func f(x int, y int) {
 }
 `)
 	fn := tree.Children(tree.Root)[0]
-	body := tree.Child(fn, 4)
+	body := tree.Child(fn, 5)
 	short := tree.Child(body, 0)
 	outerMatch := tree.Child(short, 1)
 	if got := info.Types[outerMatch]; got.Kind != TypeI32 {

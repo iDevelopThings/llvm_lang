@@ -510,13 +510,65 @@ func (p *Parser) parseMakeArgs() []ast.NodeIndex {
 // ordinary index and this is the existing IndexExpr path, unchanged. This
 // deliberately doesn't support Go's less-common 3-index `s[a:b:c]` form - not
 // needed, out of scope for this round (see LANGUAGE.md).
+// atTypeOnlyStart reports whether the current token can only ever begin a
+// type expression, never a value one (`[]T`/`[N]T`, `map[K]V`, `func(...)`,
+// `cfunc(...)`) - the cue parseIndexExpr uses to parse an explicit generic
+// instantiation's argument (`Foo[[]int]`) as a type rather than an
+// expression. A bare identifier or a `*T` pointer type stays ambiguous with
+// indexing and is still parsed as an expression, then reinterpreted as a type
+// by sema (see its typeFromTypeArgNode).
+func (p *Parser) atTypeOnlyStart() bool {
+	switch {
+	case p.at(enums.Lexemes.LeftBracket),
+		p.atKeyword(enums.Keywords.Map),
+		p.atKeyword(enums.Keywords.Func),
+		p.atKeyword(enums.Keywords.CFunc):
+		return true
+	default:
+		return false
+	}
+}
+
 func parseIndexExpr(p *Parser, target ast.NodeIndex) ast.NodeIndex {
 	p.expect(enums.Lexemes.LeftBracket)
 	p.exprLev++
 
 	low := ast.InvalidNode
-	if !p.at(enums.Lexemes.Colon) {
+	switch {
+	case p.at(enums.Lexemes.Colon):
+	case p.atTypeOnlyStart():
+		low = p.parseTypeExpr()
+	default:
 		low = p.parseExpr(precLowest)
+	}
+
+	// A comma here can only mean a multi-argument explicit instantiation
+	// (`Pair[int, string]`) - no indexing or slicing grammar takes one. Every
+	// remaining argument parses as a plain type; the first already did, one
+	// way or the other, above.
+	if p.at(enums.Lexemes.Comma) {
+		args := []ast.NodeIndex{low}
+		for {
+			if _, ok := p.accept(enums.Lexemes.Comma); !ok {
+				break
+			}
+			if p.at(enums.Lexemes.RightBracket) {
+				break
+			}
+			args = append(args, p.parseTypeExpr())
+		}
+		p.exprLev--
+		closeTok := p.expect(enums.Lexemes.RightBracket)
+		listSpan := ast.Span{
+			Start: p.tree.SpanOf(args[0]).Start,
+			End:   closeTok.End,
+		}
+		list := p.tree.NewNode(enums.NodeKinds.TypeArgList, lexer.Token{}, listSpan, args...)
+		span := ast.Span{
+			Start: p.tree.SpanOf(target).Start,
+			End:   closeTok.End,
+		}
+		return p.finishIndexExpr(p.tree.NewNode(enums.NodeKinds.IndexExpr, lexer.Token{}, span, target, list))
 	}
 
 	if _, ok := p.accept(enums.Lexemes.Colon); ok {
@@ -539,7 +591,18 @@ func parseIndexExpr(p *Parser, target ast.NodeIndex) ast.NodeIndex {
 		Start: p.tree.SpanOf(target).Start,
 		End:   closeTok.End,
 	}
-	return p.tree.NewNode(enums.NodeKinds.IndexExpr, lexer.Token{}, span, target, low)
+	return p.finishIndexExpr(p.tree.NewNode(enums.NodeKinds.IndexExpr, lexer.Token{}, span, target, low))
+}
+
+// finishIndexExpr extends a just-built IndexExpr with a composite-literal body
+// when one follows (`SlotMap[Entity]{...}` - a generic struct's own
+// construction syntax, see LANGUAGE.md's "Generics" section), under exactly
+// the same brace-ambiguity guard parseIdentExpr's plain-Ident case uses.
+func (p *Parser) finishIndexExpr(idx ast.NodeIndex) ast.NodeIndex {
+	if p.exprLev >= 0 && p.at(enums.Lexemes.LeftBrace) {
+		return p.finishCompositeLit(idx)
+	}
+	return idx
 }
 
 func parseMemberExpr(p *Parser, object ast.NodeIndex) ast.NodeIndex {

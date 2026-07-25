@@ -1257,8 +1257,16 @@ func (g *Generator) isMethodCall(calleeNode ast.NodeIndex) bool {
 // of function type (see isMethodCall), or any other expression whose value
 // is itself a function (e.g. a call result) - goes through genIndirectCall
 // instead (see CODEGEN.md's "First-class functions" section).
+// An IndexExpr callee counts too, and only ever means one thing: an explicitly
+// instantiated generic function (`Sum[int](a, b)` - see LANGUAGE.md's
+// "Generics" section), whose Info.Refs entry sema already pointed straight at
+// the monomorphized specialization. Ordinary indexing never produces a
+// SymFunc there.
 func (g *Generator) isDirectFuncCall(calleeNode ast.NodeIndex) bool {
-	if g.tree.Nodes[calleeNode].Kind != enums.NodeKinds.Ident {
+	switch g.tree.Nodes[calleeNode].Kind {
+	case enums.NodeKinds.Ident,
+		enums.NodeKinds.IndexExpr:
+	default:
 		return false
 	}
 	sym, ok := g.info.Refs[calleeNode]

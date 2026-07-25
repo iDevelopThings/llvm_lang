@@ -128,16 +128,42 @@ func (p *Parser) parseTypeExpr() ast.NodeIndex {
 		return p.tree.NewNode(enums.NodeKinds.MapType, lexer.Token{}, span, key, elem)
 	}
 	nameTok := p.expectIdent()
-	ident := p.tree.NewNode(enums.NodeKinds.Ident, nameTok, tokenSpan(nameTok))
+	named := p.tree.NewNode(enums.NodeKinds.Ident, nameTok, tokenSpan(nameTok))
 	if _, ok := p.accept(enums.Lexemes.Dot); ok {
 		fieldTok := p.expectIdent()
 		span := ast.Span{
 			Start: nameTok.Start,
 			End:   fieldTok.End,
 		}
-		return p.tree.NewNode(enums.NodeKinds.MemberExpr, fieldTok, span, ident)
+		named = p.tree.NewNode(enums.NodeKinds.MemberExpr, fieldTok, span, named)
 	}
-	return ident
+	if p.at(enums.Lexemes.LeftBracket) {
+		return p.parseTypeArgs(named)
+	}
+	return named
+}
+
+// parseTypeArgs parses a generic instantiation's `[T]` / `[A, B]` argument
+// list in type position, producing the same IndexExpr shape the expression-
+// position form already does (see parseIndexExpr and ast.Node's TypeArgList
+// doc comment) so sema has exactly one shape to recognize either way.
+func (p *Parser) parseTypeArgs(target ast.NodeIndex) ast.NodeIndex {
+	p.expect(enums.Lexemes.LeftBracket)
+	args := p.parseCommaList(enums.Lexemes.RightBracket, p.parseTypeExpr)
+	closeTok := p.expect(enums.Lexemes.RightBracket)
+	span := ast.Span{
+		Start: p.tree.SpanOf(target).Start,
+		End:   closeTok.End,
+	}
+	if len(args) == 1 {
+		return p.tree.NewNode(enums.NodeKinds.IndexExpr, lexer.Token{}, span, target, args[0])
+	}
+	listSpan := span
+	if len(args) > 0 {
+		listSpan.Start = p.tree.SpanOf(args[0]).Start
+	}
+	list := p.tree.NewNode(enums.NodeKinds.TypeArgList, lexer.Token{}, listSpan, args...)
+	return p.tree.NewNode(enums.NodeKinds.IndexExpr, lexer.Token{}, span, target, list)
 }
 
 // parseFuncType parses a function-type expression: `func(T1, T2) R` (a

@@ -9,7 +9,7 @@ func TestScopeVisible_ShadowingNearerWins(t *testing.T) {
 	tree, info := resolveSrc(t, "var x int = 1\nfunc f() {\n\tvar x int = 2\n\tprint(x)\n}\n")
 
 	funcDecl := tree.Children(tree.Root)[1]
-	body := tree.Child(funcDecl, 4)
+	body := tree.Child(funcDecl, 5)
 	printStmt := tree.Child(body, 1)
 
 	scope := info.EnclosingScope(tree, printStmt)
@@ -49,7 +49,7 @@ func TestEnclosingScope_WalksPastNonOwningNodes(t *testing.T) {
 	tree, info := resolveSrc(t, "func f() {\n\tif true {\n\t\tvar y int = 1\n\t\tprint(y)\n\t}\n}\n")
 
 	funcDecl := tree.Children(tree.Root)[0]
-	body := tree.Child(funcDecl, 4)
+	body := tree.Child(funcDecl, 5)
 	ifStmt := tree.Child(body, 0)
 	ifBody := tree.Child(ifStmt, 1)
 	printStmt := tree.Child(ifBody, 1)

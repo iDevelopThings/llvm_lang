@@ -161,6 +161,7 @@ func TestFuncTypeInVarDeclAndParam(t *testing.T) {
 		"FuncDecl \"func\"\n" +
 		"  <missing>\n" +
 		"  Ident \"apply\"\n" +
+		"  <missing>\n" +
 		"  ParamList\n" +
 		"    Param\n" +
 		"      Ident \"fn\"\n" +

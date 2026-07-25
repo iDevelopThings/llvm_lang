@@ -139,16 +139,23 @@ type Span struct {
 //   - Param, Field: [name, type] - fixed arity (identical shape; which one
 //     a node is depends on its parent - a Param under a ParamList, a Field
 //     under a StructDecl - not on anything intrinsic to the node)
-//   - FuncDecl: [receiver, name, paramList, returnType, body] - fixed
-//     arity; receiver and returnType may be InvalidNode. Params aren't
+//   - FuncDecl: [receiver, name, typeParamList, paramList, returnType, body] -
+//     fixed arity; receiver, typeParamList and returnType may be InvalidNode.
+//     typeParamList is a TypeParamList node naming the function's own type
+//     parameters (see LANGUAGE.md's "Generics" section) - for a method, only
+//     its *own* extra parameters, never the ones its receiver clause already
+//     binds. Params aren't
 //     flattened directly into FuncDecl's own children because they're
 //     variable-arity but followed by more fixed slots (returnType, body) -
 //     ParamList is its own variable-arity node for exactly the reason
 //     CompositeLit's elements or Block's statements are, just wrapped so
 //     FuncDecl itself can stay fixed-arity
-//   - StructDecl: [name, member0, member1, ...] - variable arity, name always
-//     first (same CallExpr-style shape - nothing follows the variable part,
-//     unlike FuncDecl, so no wrapper is needed here). Each member is either a
+//   - StructDecl: [name, typeParamList, member0, member1, ...] - a two-slot
+//     fixed prefix followed by a variable-arity member list. typeParamList is
+//     InvalidNode for a non-generic struct, the same reserve-the-slot
+//     convention every other optional child uses; it's a fixed slot rather
+//     than another leading member because a member list has no place to put
+//     something that isn't a member. Each member is either a
 //     Field, a ConstructorDecl, or a DestructorDecl, interspersed in
 //     declaration order - see ast.Tree's StructFields/StructConstructors/
 //     StructDestructors, which each filter the full member list down to
@@ -399,6 +406,21 @@ type Span struct {
 //     restriction (a generator can't be a method) is a sema concern, not a
 //     grammar one, since parseFuncDecl's return-type parsing doesn't know
 //     yet whether a receiver clause preceded it.
+//   - TypeParamList: [name0, name1, ...] - variable arity, each child a bare
+//     Ident naming one declared type parameter (see LANGUAGE.md's "Generics"
+//     section). Tok is unused in a FuncDecl/StructDecl's own typeParamList
+//     slot; in a FuncDecl's *receiver* slot it instead holds the receiver
+//     type's own name identifier (`func (SlotMap[T]) ...`), so Tree.Text
+//     returns "SlotMap" for a generic receiver clause exactly as it already
+//     does for the plain `(SlotMap)` Ident form - see Tree.ReceiverTypeParams.
+//   - TypeArgList: [type0, type1, ...] - variable arity, each child a bare
+//     type-position node - the *argument* counterpart to TypeParamList, only
+//     ever produced for a multi-argument explicit instantiation
+//     (`Pair[int, string]`), where it occupies an IndexExpr's own single index
+//     slot. A single-argument `Foo[int]` needs no wrapper and stays a plain
+//     IndexExpr. Whether a given IndexExpr is an instantiation at all, rather
+//     than ordinary array/map indexing, is decided entirely by sema - see
+//     Tree.TypeArgNodes.
 //   - a fixed-arity kind may reserve a positional slot as InvalidNode for an
 //     omitted optional child (e.g. VarDecl's type annotation); a
 //     variable-arity kind (Block's statements, CallExpr's arguments) is

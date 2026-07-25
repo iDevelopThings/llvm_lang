@@ -34,7 +34,7 @@ func TestPointerVarDeclType(t *testing.T) {
 func TestAddressOfVariableProducesPointer(t *testing.T) {
 	tree, info := checkSrc(t, "func f() int {\n\tx := 5\n\tp := &x\n\treturn *p\n}\n")
 	fn := tree.Children(tree.Root)[0]
-	body := tree.Child(fn, 4)
+	body := tree.Child(fn, 5)
 	pDecl := tree.Child(body, 1)
 	pt := info.Types[pDecl]
 	if pt.Kind != TypePointer || pt.Elem.Kind != TypeI32 {
@@ -141,7 +141,7 @@ func TestAssignThroughDereferenceWrongTypeIsError(t *testing.T) {
 func TestNewConstructorCallProducesPointer(t *testing.T) {
 	tree, info := checkSrc(t, pointStructSrc+"func f() int {\n\tp := new Point(1, 2)\n\treturn p.x\n}\n")
 	fn := tree.Children(tree.Root)[1]
-	body := tree.Child(fn, 4)
+	body := tree.Child(fn, 5)
 	pDecl := tree.Child(body, 0)
 	pt := info.Types[pDecl]
 	if pt.Kind != TypePointer || pt.Elem.Kind != TypeStruct {
@@ -188,7 +188,7 @@ func TestNewWrappingConversionCallIsError(t *testing.T) {
 func TestAutoDerefFieldAccess(t *testing.T) {
 	tree, info := checkSrc(t, pointStructSrc+"func f() int {\n\tp := new Point(1, 2)\n\treturn p.x + p.y\n}\n")
 	fn := tree.Children(tree.Root)[1]
-	body := tree.Child(fn, 4)
+	body := tree.Child(fn, 5)
 	ret := tree.Child(body, 1)
 	sum := tree.Child(ret, 0)
 	if info.Types[sum].Kind != TypeI32 {

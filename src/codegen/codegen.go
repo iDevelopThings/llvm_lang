@@ -22,6 +22,8 @@
 package codegen
 
 import (
+	"iter"
+
 	"llvm_lang/src/ast"
 	"llvm_lang/src/diag"
 	"llvm_lang/src/enums"
@@ -717,13 +719,13 @@ func (g *Generator) enter(tree *ast.Tree) {
 func (g *Generator) genPackage(trees []*ast.Tree) {
 	for _, tree := range trees {
 		g.enter(tree)
-		for d := range tree.TopLevelDeclsOfKind(enums.NodeKinds.StructDecl) {
+		for d := range g.declsOfKind(enums.NodeKinds.StructDecl) {
 			g.declareStructType(d)
 		}
 	}
 	for _, tree := range trees {
 		g.enter(tree)
-		for d := range tree.TopLevelDeclsOfKind(enums.NodeKinds.StructDecl) {
+		for d := range g.declsOfKind(enums.NodeKinds.StructDecl) {
 			g.defineStructBody(d)
 		}
 	}
@@ -739,29 +741,29 @@ func (g *Generator) genPackage(trees []*ast.Tree) {
 	// declare-then-define split.
 	for _, tree := range trees {
 		g.enter(tree)
-		for d := range tree.TopLevelDeclsOfKind(enums.NodeKinds.EnumDecl) {
+		for d := range g.declsOfKind(enums.NodeKinds.EnumDecl) {
 			g.declareEnumLayout(d)
 		}
 	}
 	for _, tree := range trees {
 		g.enter(tree)
-		for d := range tree.TopLevelDeclsOfKind(enums.NodeKinds.VarDecl) {
+		for d := range g.declsOfKind(enums.NodeKinds.VarDecl) {
 			g.genGlobalVarDecl(d)
 		}
 	}
 	for _, tree := range trees {
 		g.enter(tree)
-		for d := range tree.TopLevelDeclsOfKind(enums.NodeKinds.FuncDecl) {
+		for d := range g.declsOfKind(enums.NodeKinds.FuncDecl) {
 			g.declareFuncSignature(d)
 		}
 		// ExternFuncDecl gets a signature declared here, exactly like an
 		// ordinary FuncDecl - but, deliberately, no corresponding entry in
 		// the "generate every body" pass below: it has no body at all (see
 		// declareExternFuncSignature's own doc comment).
-		for d := range tree.TopLevelDeclsOfKind(enums.NodeKinds.ExternFuncDecl) {
+		for d := range g.declsOfKind(enums.NodeKinds.ExternFuncDecl) {
 			g.declareExternFuncSignature(d)
 		}
-		for d := range tree.TopLevelDeclsOfKind(enums.NodeKinds.StructDecl) {
+		for d := range g.declsOfKind(enums.NodeKinds.StructDecl) {
 			for ctor := range tree.StructConstructors(d) {
 				g.declareConstructorSignature(ctor)
 			}
@@ -769,7 +771,7 @@ func (g *Generator) genPackage(trees []*ast.Tree) {
 				g.declareDestructorSignature(dtor)
 			}
 		}
-		for d := range tree.TopLevelDeclsOfKind(enums.NodeKinds.EnumDecl) {
+		for d := range g.declsOfKind(enums.NodeKinds.EnumDecl) {
 			for dtor := range tree.EnumDestructors(d) {
 				g.declareEnumDestructorSignature(dtor)
 			}
@@ -777,10 +779,10 @@ func (g *Generator) genPackage(trees []*ast.Tree) {
 	}
 	for _, tree := range trees {
 		g.enter(tree)
-		for d := range tree.TopLevelDeclsOfKind(enums.NodeKinds.FuncDecl) {
+		for d := range g.declsOfKind(enums.NodeKinds.FuncDecl) {
 			g.genFuncBody(d)
 		}
-		for d := range tree.TopLevelDeclsOfKind(enums.NodeKinds.StructDecl) {
+		for d := range g.declsOfKind(enums.NodeKinds.StructDecl) {
 			for ctor := range tree.StructConstructors(d) {
 				g.genConstructorBody(ctor)
 			}
@@ -788,7 +790,7 @@ func (g *Generator) genPackage(trees []*ast.Tree) {
 				g.genDestructorBody(dtor)
 			}
 		}
-		for d := range tree.TopLevelDeclsOfKind(enums.NodeKinds.EnumDecl) {
+		for d := range g.declsOfKind(enums.NodeKinds.EnumDecl) {
 			for dtor := range tree.EnumDestructors(d) {
 				g.genEnumDestructorBody(dtor)
 			}
@@ -813,6 +815,36 @@ func (g *Generator) genPackage(trees []*ast.Tree) {
 	g.genCtors()
 }
 
+// declsOfKind yields every declaration of kind the current file contributes to
+// the module: its own parsed top-level declarations, minus any generic
+// template (which has no concrete types to lower at all), plus the
+// monomorphized specializations sema synthesized into the same tree
+// (Info.Specializations - see LANGUAGE.md's "Generics" section). A
+// specialization is an ordinary FuncDecl/StructDecl in every respect, but
+// isn't a child of Tree.Root, so TopLevelDeclsOfKind alone would both skip
+// every specialization and wrongly include every template - which is exactly
+// why every pass in genPackage goes through this instead.
+func (g *Generator) declsOfKind(kind enums.NodeKind) iter.Seq[ast.NodeIndex] {
+	return func(yield func(ast.NodeIndex) bool) {
+		for d := range g.tree.TopLevelDeclsOfKind(kind) {
+			if g.info.IsGenericTemplate(g.tree, d) {
+				continue
+			}
+			if !yield(d) {
+				return
+			}
+		}
+		for _, d := range g.info.Specializations {
+			if g.tree.Nodes[d].Kind != kind {
+				continue
+			}
+			if !yield(d) {
+				return
+			}
+		}
+	}
+}
+
 // errorAt records a codegen-level diagnostic at n's position - see the
 // package doc comment for what still gets a real diagnostic instead of a
 // panic (non-constant global initializers, unsupported print argument
@@ -828,22 +860,26 @@ func (g *Generator) errorAt(n ast.NodeIndex, format string, a ...any) {
 // type A's... well, arrays/values of each other) can each find the other
 // struct's type handle already created, regardless of declaration order.
 func (g *Generator) declareStructType(decl ast.NodeIndex) {
-	nameNode := g.tree.Child(decl, 0)
-	name := g.tree.Text(nameNode)
-	info := g.info.Structs[name]
-
+	info := g.structInfoOf(decl)
 	g.structLayouts[info] = &structLayout{
-		llvmType:   g.ctx.StructCreateNamed(name),
+		llvmType:   g.ctx.StructCreateNamed(info.Symbol.Name),
 		fieldIndex: make(map[*sema.Symbol]int),
 	}
+}
+
+// structInfoOf returns decl's (a StructDecl's) catalog, via the Symbol sema
+// already recorded for its name node - never a lookup keyed by that node's
+// source text, which no longer identifies a struct uniquely: every
+// instantiation of a generic struct is a clone of the same declaration, so
+// they all share the same name text (see sema's generics.go).
+func (g *Generator) structInfoOf(decl ast.NodeIndex) *sema.StructInfo {
+	return g.info.Refs[g.tree.Child(decl, 0)].StructInfo
 }
 
 // defineStructBody fills in decl's struct type body, once every struct's
 // named (opaque) type already exists - see declareStructType.
 func (g *Generator) defineStructBody(decl ast.NodeIndex) {
-	nameNode := g.tree.Child(decl, 0)
-	info := g.info.Structs[g.tree.Text(nameNode)]
-	layout := g.structLayouts[info]
+	layout := g.structLayouts[g.structInfoOf(decl)]
 
 	fieldNodes := g.tree.StructFields(decl)
 	fieldTypes := make([]llvm.Type, len(fieldNodes))

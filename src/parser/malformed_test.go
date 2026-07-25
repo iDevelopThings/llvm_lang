@@ -222,7 +222,7 @@ func TestTrailingCommaInParamList(t *testing.T) {
 	if p.diags.HasErrors() {
 		t.Fatalf("unexpected diagnostics for a trailing comma in a param list: %v", p.diags.All())
 	}
-	params := p.tree.Children(p.tree.Child(n, 2)) // FuncDecl -> ParamList
+	params := p.tree.Children(p.tree.Child(n, 3)) // FuncDecl -> ParamList
 	if len(params) != 2 {
 		t.Fatalf("expected 2 params, got %d\n%s", len(params), p.tree.Dump(n))
 	}

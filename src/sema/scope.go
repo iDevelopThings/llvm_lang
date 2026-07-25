@@ -204,6 +204,12 @@ const (
 	// resolved to" idea SymConstructor's own Info.Refs entry already
 	// captures - see resolve.go's resolveEnumVariantRef.
 	SymEnumVariant
+	// SymTypeParam names one type parameter bound to a concrete type inside a
+	// single instantiation of a generic declaration (see LANGUAGE.md's
+	// "Generics" section) - never declared into any scope the user writes,
+	// only into the synthetic scope generics.go builds per instantiation.
+	// IsType() included: `T` is legal anywhere a type name is.
+	SymTypeParam
 )
 
 func (k SymbolKind) String() string {
@@ -234,6 +240,8 @@ func (k SymbolKind) String() string {
 		return "enum"
 	case SymEnumVariant:
 		return "enum variant"
+	case SymTypeParam:
+		return "type parameter"
 	default:
 		return "symbol"
 	}
@@ -242,7 +250,7 @@ func (k SymbolKind) String() string {
 // IsType reports whether a symbol of this kind can be used in a type
 // position (`var a Kind`, an array element type, a method receiver clause).
 func (k SymbolKind) IsType() bool {
-	return k == SymStruct || k == SymBuiltinType || k == SymEnum
+	return k == SymStruct || k == SymBuiltinType || k == SymEnum || k == SymTypeParam
 }
 
 // Symbol is one declared (or compiler-predeclared) name.
@@ -336,6 +344,20 @@ type Symbol struct {
 	// package's own Info.Enums needed.
 	EnumInfo *EnumInfo
 
+	// Generic is set for a symbol naming a generic declaration's *template* -
+	// a `func Foo[T]`, a `struct Foo[T]`, or a method carrying type parameters
+	// of its own (see LANGUAGE.md's "Generics" section). A template is never
+	// itself resolved, type-checked, or lowered; every use of it goes through
+	// one monomorphized specialization per distinct type-argument list (see
+	// generics.go). nil for every ordinary symbol.
+	Generic *GenericInfo
+
+	// TypeParamBound is set only for a SymTypeParam symbol - the concrete type
+	// that type parameter is bound to inside one specialization. There is no
+	// unbound form: a type parameter only ever becomes a real Symbol at
+	// instantiation time, in that instantiation's own scope.
+	TypeParamBound *Type
+
 	// Variant is set only for a SymEnumVariant symbol - which specific
 	// variant (name, discriminant index, kind, associated-data shape) this
 	// Symbol names, within EnumInfo above.
@@ -427,6 +449,15 @@ type StructInfo struct {
 	Symbol  *Symbol
 	Fields  map[string]*Symbol
 	Methods map[string]*Symbol
+
+	// Generic/TypeArgs are set only for a struct produced by instantiating a
+	// generic one (see LANGUAGE.md's "Generics" section): the template it came
+	// from, and the concrete type arguments it was instantiated with, in
+	// declaration order. Both nil for an ordinary struct. Read by type-argument
+	// inference, which unifies a declared `SlotMap[T]` parameter shape against
+	// an actual argument's own already-instantiated struct type.
+	Generic  *GenericInfo
+	TypeArgs []Type
 
 	// Constructors catalogs each declared `constructor(params) {...}` block
 	// (see LANGUAGE.md's "Constructors" section), keyed by its declared

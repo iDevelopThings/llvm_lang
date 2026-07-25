@@ -127,7 +127,7 @@ func TestUncapturedLocalIsNotMarked(t *testing.T) {
 	}
 
 	fDecl := tree.Children(tree.Root)[0]
-	body := tree.Child(fDecl, 4)
+	body := tree.Child(fDecl, 5)
 	untouchedDecl := tree.Child(body, 0) // untouched := 5
 	untouchedSym := info.Refs[tree.Child(untouchedDecl, 0)]
 	if untouchedSym.Captured {

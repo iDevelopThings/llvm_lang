@@ -25,6 +25,7 @@ func TestFuncDeclYieldReturnTypeShape(t *testing.T) {
 				"FuncDecl \"func\"\n" +
 				"  <missing>\n" +
 				"  Ident \"Range\"\n" +
+				"  <missing>\n" +
 				"  ParamList\n" +
 				"    Param\n" +
 				"      Ident \"a\"\n" +
@@ -43,6 +44,7 @@ func TestFuncDeclYieldReturnTypeShape(t *testing.T) {
 				"FuncDecl \"func\"\n" +
 				"  <missing>\n" +
 				"  Ident \"f\"\n" +
+				"  <missing>\n" +
 				"  ParamList\n" +
 				"  Ident \"int\"\n" +
 				"  Block\n" +

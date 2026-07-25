@@ -191,3 +191,36 @@ ever call through `src/compiler`), so only the end-to-end row moves:
   `finishPipeline`'s `RunPasses` call entirely when `optimize` is false
   means that path's own cost is unchanged from the pre-this-round numbers
   above.
+
+## 2026-07-25 update - monomorphized generics
+
+Re-measured after landing generics (see `DECISIONS.md`'s dated entry), same
+machine/fixtures/command, against a same-session pre-change build. Only the
+per-stage lexer/parser/sema/codegen benchmarks are relevant here - neither
+fixture uses generics at all, so this measures the cost this feature adds to
+programs that don't use it:
+
+| Stage | Fixture | B/op (before -> after) | allocs/op (before -> after) |
+|---|---|---:|---:|
+| Parser (`ParseFile`) | Small | 110,937 -> 110,945 | 114 -> 114 |
+| Parser (`ParseFile`) | Large | 3,093,319 -> 3,093,326 | 1,369 -> 1,369 |
+| Sema (`Resolve`+`Check`) | Small | 99,930 -> 101,195 | 312 -> 314 |
+| Sema (`Resolve`+`Check`) | Large | 2,795,819 -> 2,808,429 | 4,793 -> 4,795 |
+| Codegen (`Generate`) | Small | 11,831 -> 11,829 | 167 -> 167 |
+| Codegen (`Generate`) | Large | 236,198 -> 236,205 | 2,928 -> 2,928 |
+
+ns/op is omitted deliberately - every stage's before/after landed inside
+run-to-run noise at this benchtime, with no consistent direction.
+
+- **Flat, as designed.** A program with no generic declarations creates no
+  specializations, so the whole instantiation pass never runs; what's left is
+  one extra `InvalidNode` child slot per `FuncDecl`/`StructDecl` (the +7/+8
+  B/op in the parser rows, exactly the two fixtures' declaration counts) plus
+  the resolver's own two new package-level maps (the +2 allocs/op in sema,
+  constant per package, which is why Large's +2 matches Small's).
+- **A program that DOES use generics pays per specialization**, not per use:
+  each distinct `(template, type arguments)` pair is resolved and checked
+  exactly once, memoized, and thereafter costs a map lookup. That cost is the
+  same as having hand-written the specialized declaration, which is precisely
+  what monomorphization means - not measured here, since neither shared
+  fixture uses generics.

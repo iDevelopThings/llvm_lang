@@ -30,6 +30,7 @@ func TestDeclShape(t *testing.T) {
 				"FuncDecl \"func\"\n" +
 				"  <missing>\n" +
 				"  Ident \"add\"\n" +
+				"  <missing>\n" +
 				"  ParamList\n" +
 				"    Param\n" +
 				"      Ident \"x\"\n" +
@@ -51,6 +52,7 @@ func TestDeclShape(t *testing.T) {
 				"FuncDecl \"func\"\n" +
 				"  <missing>\n" +
 				"  Ident \"f\"\n" +
+				"  <missing>\n" +
 				"  ParamList\n" +
 				"  <missing>\n" +
 				"  Block\n",
@@ -62,6 +64,7 @@ func TestDeclShape(t *testing.T) {
 				"FuncDecl \"func\"\n" +
 				"  Ident \"Point\"\n" +
 				"  Ident \"translate\"\n" +
+				"  <missing>\n" +
 				"  ParamList\n" +
 				"    Param\n" +
 				"      Ident \"dx\"\n" +
@@ -85,6 +88,7 @@ func TestDeclShape(t *testing.T) {
 			want: "" +
 				"StructDecl \"struct\"\n" +
 				"  Ident \"Point\"\n" +
+				"  <missing>\n" +
 				"  Field\n" +
 				"    Ident \"x\"\n" +
 				"    Ident \"int\"\n" +
@@ -95,7 +99,7 @@ func TestDeclShape(t *testing.T) {
 		{
 			name: "empty struct",
 			src:  "struct Empty { }",
-			want: "StructDecl \"struct\"\n  Ident \"Empty\"\n",
+			want: "StructDecl \"struct\"\n  Ident \"Empty\"\n  <missing>\n",
 		},
 	}
 
@@ -128,6 +132,7 @@ func TestConstructorDeclShape(t *testing.T) {
 			want: "" +
 				"StructDecl \"struct\"\n" +
 				"  Ident \"Point\"\n" +
+				"  <missing>\n" +
 				"  Field\n" +
 				"    Ident \"x\"\n" +
 				"    Ident \"int\"\n",
@@ -138,6 +143,7 @@ func TestConstructorDeclShape(t *testing.T) {
 			want: "" +
 				"StructDecl \"struct\"\n" +
 				"  Ident \"Point\"\n" +
+				"  <missing>\n" +
 				"  Field\n" +
 				"    Ident \"x\"\n" +
 				"    Ident \"int\"\n" +
@@ -159,6 +165,7 @@ func TestConstructorDeclShape(t *testing.T) {
 			want: "" +
 				"StructDecl \"struct\"\n" +
 				"  Ident \"Point\"\n" +
+				"  <missing>\n" +
 				"  Field\n" +
 				"    Ident \"x\"\n" +
 				"    Ident \"int\"\n" +
@@ -213,6 +220,7 @@ func TestDestructorDeclShape(t *testing.T) {
 			want: "" +
 				"StructDecl \"struct\"\n" +
 				"  Ident \"Point\"\n" +
+				"  <missing>\n" +
 				"  Field\n" +
 				"    Ident \"x\"\n" +
 				"    Ident \"int\"\n",
@@ -223,6 +231,7 @@ func TestDestructorDeclShape(t *testing.T) {
 			want: "" +
 				"StructDecl \"struct\"\n" +
 				"  Ident \"Point\"\n" +
+				"  <missing>\n" +
 				"  Field\n" +
 				"    Ident \"x\"\n" +
 				"    Ident \"int\"\n" +
@@ -244,6 +253,7 @@ func TestDestructorDeclShape(t *testing.T) {
 			want: "" +
 				"StructDecl \"struct\"\n" +
 				"  Ident \"Point\"\n" +
+				"  <missing>\n" +
 				"  Field\n" +
 				"    Ident \"x\"\n" +
 				"    Ident \"int\"\n" +

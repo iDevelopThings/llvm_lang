@@ -239,6 +239,14 @@ type checker struct {
 	// type kind over - see structCopyable/computingCopyable's own doc
 	// comments.
 	computingEnumCopyable map[*EnumInfo]bool
+
+	// pending holds each generic specialization's deferred body check (see
+	// enqueueBody, generics.go) - drained once no ordinary body is in
+	// progress, since curFunc/move/loopDepth above all belong to exactly one
+	// body at a time. instantiations counts how many have been created at all,
+	// against maxInstantiations.
+	pending        []func()
+	instantiations int
 }
 
 // enter switches the checker's current-file bookkeeping to tree
@@ -345,6 +353,7 @@ func CheckProgram(trees []*ast.Tree, infos map[*ast.Tree]*Info, treePackage map[
 	}
 
 	c.checkPackage(trees)
+	c.drainPending()
 
 	out := make(map[*ast.Tree]*diag.Bag, len(trees))
 	for _, tree := range trees {
@@ -391,6 +400,9 @@ func (c *checker) checkPackage(trees []*ast.Tree) {
 	for _, tree := range trees {
 		c.enter(tree)
 		for decl := range tree.TopLevelDeclsOfKind(enums.NodeKinds.StructDecl) {
+			if isGenericDecl(tree, c.info.Generics, decl) {
+				continue
+			}
 			c.checkStructDecl(decl)
 		}
 		for decl := range tree.TopLevelDeclsOfKind(enums.NodeKinds.EnumDecl) {
@@ -400,6 +412,11 @@ func (c *checker) checkPackage(trees []*ast.Tree) {
 	for _, tree := range trees {
 		c.enter(tree)
 		for _, decl := range tree.Children(tree.Root) {
+			// A generic template is never checked as written - only its
+			// specializations are (see generics.go).
+			if isGenericDecl(tree, c.info.Generics, decl) {
+				continue
+			}
 			switch tree.Nodes[decl].Kind {
 			case enums.NodeKinds.VarDecl:
 				c.declType(decl)
@@ -1789,7 +1806,21 @@ func (c *checker) computeTypeFromNode(n ast.NodeIndex) Type {
 		if !ok {
 			return invalidType // undefined name; already reported by Resolve
 		}
+		if sym.Generic != nil {
+			c.errorAt(n, "%s is generic - name its type arguments, e.g. %s[%s]",
+				sym.Name, sym.Name, strings.Join(sym.Generic.Params, ", "))
+			return invalidType
+		}
 		return c.typeFromSymbol(sym)
+	case enums.NodeKinds.IndexExpr:
+		// `SlotMap[int]` - a generic instantiation in type position (see
+		// LANGUAGE.md's "Generics" section). Anything else wearing the same
+		// IndexExpr shape isn't a type at all.
+		t, ok := c.checkGenericTypeExpr(n)
+		if !ok {
+			c.errorAt(n, "invalid type expression")
+		}
+		return t
 	case enums.NodeKinds.ArrayType:
 		return c.arrayTypeFromNode(n)
 	case enums.NodeKinds.MapType:
@@ -1920,6 +1951,10 @@ func (c *checker) typeFromSymbol(sym *Symbol) Type {
 			Kind: TypeEnum,
 			Enum: sym.EnumInfo,
 		}
+	case SymTypeParam:
+		// One instantiation's own binding for a type parameter (see
+		// generics.go) - always already concrete.
+		return *sym.TypeParamBound
 	case SymEnumVariant:
 		// A bare EnumName.Variant reached ordinary type position (not a
 		// composite-literal's own type-expr slot, which checkCompositeLit
@@ -3586,6 +3621,13 @@ func (c *checker) checkIdentExpr(n ast.NodeIndex) Type {
 // a MemberExpr this is still correct, since a MemberExpr's own Tok is the
 // field-name token (see ast.Node's doc comment).
 func (c *checker) typeOfSymbolValue(n ast.NodeIndex, sym *Symbol) Type {
+	if sym.Generic != nil {
+		// A template has no signature/layout of its own - only its
+		// specializations do (see LANGUAGE.md's "Generics" section).
+		c.errorAt(n, "%s is generic and cannot be used as a value; instantiate it, e.g. %s[%s]",
+			sym.Name, sym.Name, strings.Join(sym.Generic.Params, ", "))
+		return invalidType
+	}
 	switch sym.Kind {
 	case SymVar, SymParam:
 		// sym may be declared in a different file (or package) than the one
@@ -3647,26 +3689,24 @@ func (c *checker) checkThisExpr(n ast.NodeIndex) Type {
 	if !ok {
 		return invalidType // "this outside a method"; already reported by Resolve
 	}
-	// sym.Decl is the receiver struct's/enum's own StructDecl/EnumDecl node,
-	// which may live in a different file than the method itself (see
-	// Symbol.Tree's doc comment) - read it via sym.Tree, never c.tree, which
-	// is this method's own file and would misinterpret a foreign NodeIndex.
-	name := sym.Tree.Text(sym.Tree.Child(sym.Decl, 0))
-	if info, ok := c.info.Structs[name]; ok {
+	// The receiver's catalog comes straight off the symbol (see
+	// receiverSymbol, resolve.go) rather than a name lookup - a monomorphized
+	// struct's catalog isn't reachable by its declaration's source text at all.
+	if sym.StructInfo != nil {
 		return Type{
 			Kind: TypePointer,
 			Elem: &Type{
 				Kind:   TypeStruct,
-				Struct: info,
+				Struct: sym.StructInfo,
 			},
 		}
 	}
-	if info, ok := c.info.Enums[name]; ok {
+	if sym.EnumInfo != nil {
 		return Type{
 			Kind: TypePointer,
 			Elem: &Type{
 				Kind: TypeEnum,
-				Enum: info,
+				Enum: sym.EnumInfo,
 			},
 		}
 	}
@@ -4164,6 +4204,16 @@ func (c *checker) checkIndexExpr(n ast.NodeIndex) Type {
 	target := c.tree.Child(n, 0)
 	index := c.tree.Child(n, 1)
 
+	// The `Foo[T]` / `arr[i]` shape collision is decided here, once: a target
+	// naming a generic declaration means instantiation, everything else means
+	// indexing. Reaching this in value position means the instantiation isn't
+	// being called or constructed - a type, used as a value.
+	if gi, ok := c.genericRef(target); ok {
+		c.errorAt(n, "an instantiation of %s is not a value here - call it (%s[...](args)) or construct it (%s[...]{...})",
+			gi.Symbol.Name, gi.Symbol.Name, gi.Symbol.Name)
+		return invalidType
+	}
+
 	tt := c.checkValueExpr(target)
 
 	// A map index (`m[k]`) checks its key against the map's own declared key
@@ -4551,6 +4601,9 @@ func (c *checker) checkCallExpr(n ast.NodeIndex) Type {
 	if t, ok := c.checkConversionCall(n, callee, args); ok {
 		return t
 	}
+	if t, ok := c.checkGenericCall(n, callee, args); ok {
+		return t
+	}
 
 	sig, ok := c.funcSigForCall(callee)
 	if !ok {
@@ -4560,29 +4613,7 @@ func (c *checker) checkCallExpr(n ast.NodeIndex) Type {
 		return invalidType
 	}
 
-	if len(args) != len(sig.Params) {
-		c.errorAtNodes(args, n, "wrong number of arguments in call: got %d, want %d", len(args), len(sig.Params))
-		for _, a := range args {
-			c.checkValueExpr(a)
-		}
-		return sig.Return
-	}
-
-	for i, a := range args {
-		at := c.checkValueExpr(a)
-		if c.checkAssignable(a, sig.Params[i], at, fmt.Sprintf("argument %d", i+1)) {
-			// allowFresh=true: passing a freshly-constructed non-copyable
-			// value as an argument is sound with no extra machinery at all -
-			// the callee's own parameter is a plain local exactly like any
-			// other (see pushDestructorEntry, codegen/func.go), and becomes
-			// that fresh value's one and only owner, destructing it at its
-			// own scope exit - only an *existing* value handed in by
-			// reference to another live owner is the real double-destruction
-			// risk (see checkNoIllegalCopy's own doc comment for why return
-			// is different).
-			c.checkNoIllegalCopy(a, sig.Params[i], true, fmt.Sprintf("argument %d", i+1))
-		}
-	}
+	c.checkCallArgs(n, args, nil, sig)
 
 	// Calling an async func (see LANGUAGE.md's "Coroutines" section)
 	// produces a coroutine handle, not its own declared (void, this round)
@@ -4597,6 +4628,44 @@ func (c *checker) checkCallExpr(n ast.NodeIndex) Type {
 		return Type{Kind: TypeCoroutine, Elem: &ret}
 	}
 	return sig.Return
+}
+
+// checkCallArgs checks a call's argument count and each argument's type
+// against sig. argTypes, when non-nil, is each argument's already-computed
+// type (checkExpr isn't memoized, so a caller that had to type the arguments
+// before it could pick the callee - a generic call's own inference - passes
+// them here rather than re-checking and double-reporting).
+func (c *checker) checkCallArgs(n ast.NodeIndex, args []ast.NodeIndex, argTypes []Type, sig funcSignature) {
+	argType := func(i int) Type {
+		if argTypes != nil {
+			return argTypes[i]
+		}
+		return c.checkValueExpr(args[i])
+	}
+
+	if len(args) != len(sig.Params) {
+		c.errorAtNodes(args, n, "wrong number of arguments in call: got %d, want %d", len(args), len(sig.Params))
+		for i := range args {
+			argType(i)
+		}
+		return
+	}
+
+	for i, a := range args {
+		at := argType(i)
+		if c.checkAssignable(a, sig.Params[i], at, fmt.Sprintf("argument %d", i+1)) {
+			// allowFresh=true: passing a freshly-constructed non-copyable
+			// value as an argument is sound with no extra machinery at all -
+			// the callee's own parameter is a plain local exactly like any
+			// other (see pushDestructorEntry, codegen/func.go), and becomes
+			// that fresh value's one and only owner, destructing it at its
+			// own scope exit - only an *existing* value handed in by
+			// reference to another live owner is the real double-destruction
+			// risk (see checkNoIllegalCopy's own doc comment for why return
+			// is different).
+			c.checkNoIllegalCopy(a, sig.Params[i], true, fmt.Sprintf("argument %d", i+1))
+		}
+	}
 }
 
 // calleeIsAsyncFunc reports whether callee names a declared async func (see
@@ -4906,6 +4975,17 @@ func (c *checker) checkArgsCall(n ast.NodeIndex, args []ast.NodeIndex) Type {
 func (c *checker) checkConstructorCall(n, callee ast.NodeIndex, args []ast.NodeIndex) (Type, bool) {
 	switch c.tree.Nodes[callee].Kind {
 	case enums.NodeKinds.Ident, enums.NodeKinds.MemberExpr:
+	case enums.NodeKinds.IndexExpr:
+		// `Box[int](args)` - a generic struct's own constructor call.
+		// Instantiating it first is all that's needed; from here on this is an
+		// ordinary constructor call on an ordinary concrete struct.
+		resolved, isGenericStruct := c.resolveGenericStructCallee(callee)
+		if !isGenericStruct {
+			return invalidType, false
+		}
+		if !resolved {
+			return invalidType, true // already reported
+		}
 	default:
 		return invalidType, false
 	}

@@ -142,7 +142,7 @@ func TestMapTwoResultIndexTypes(t *testing.T) {
 	src := "func f() {\n\tm := make(map[string]int)\n\tv, ok := m[\"a\"]\n\tprint(v)\n\tprint(ok)\n}\n"
 	tree, info := checkSrc(t, src)
 	fn := tree.Children(tree.Root)[0]
-	body := tree.Child(fn, 4)
+	body := tree.Child(fn, 5)
 	decl := tree.Children(body)[1] // [0]=make short-var-decl, [1]=multi-short-var-decl
 	names := tree.MultiShortVarDeclNames(decl)
 	if got := info.Types[names[0]]; got.Kind != TypeI32 {

@@ -2168,6 +2168,100 @@ same-package visibility (see the "Multi-file packages" section above) -
 `Exported`/export enforcement only ever applies to a name reached through an
 actual package qualifier.
 
+## Generics
+
+Functions and structs may declare type parameters in square brackets, Go-style:
+
+```go
+func Sum[T](a T, b T) T {
+	return a + b
+}
+
+struct SlotMap[T] {
+	items       []T
+	generations []i32
+	freeList    []int
+}
+```
+
+**No constraints, checked per instantiation.** This language has no
+interfaces, and generics add none: a type parameter is unconstrained, and a
+generic body is type-checked separately for each concrete instantiation the
+program actually reaches, against that instantiation's real types. So
+`Sum(1, 2)` and `Sum("a", "b")` both compile, `Sum(p, p)` for a struct `P`
+with no `+` is an ordinary "operator + not defined for P and P" diagnostic
+reported at that call's own instantiation, and a generic nobody ever
+instantiates is never checked at all. See `DECISIONS.md` for why this model
+was chosen over Go's, and `CODEGEN.md` for how it lowers.
+
+**Type arguments are inferred at call sites**, by matching each declared
+parameter's type against the corresponding argument's already-known type -
+through slices, pointers, maps, function types, and other generic structs
+alike:
+
+```go
+func Head[T](items []T) T { return items[0] }
+
+s := make([]int, 1)
+print(Head(s))   // T = int
+```
+
+A type parameter used inconsistently across two parameter positions is an
+inference failure, not a silent pick: `func Pair[T](a T, b T)` called as
+`Pair(1, "x")` is an error. Untyped numeric constants contribute their
+default type (`Sum(1, 2)` infers `int`, `Sum(1.5, 2.5)` infers `f64`).
+
+**Explicit instantiation** is the escape hatch for anything inference can't
+solve - most commonly a type parameter that appears only in the return type,
+or a generic struct constructed with no arguments to infer from:
+
+```go
+func NewSlotMap[T]() SlotMap[T] {
+	return SlotMap[T]{make([]T, 0), make([]i32, 0), make([]int, 0)}
+}
+
+ints := NewSlotMap[int]()      // required - T is unreachable from the arguments
+b := SlotMap[Entity]{...}      // a generic struct's own construction/type syntax
+var m SlotMap[int]             // and its type-position spelling
+```
+
+`Foo[T]` is deliberately the same syntax as array indexing; which one a given
+`Foo[T]` is depends purely on whether `Foo` names a generic declaration, and
+is decided once, during type-checking.
+
+**Multiple type parameters** are allowed and inferred independently:
+`func Pair[A, B](a A, b B) A`, `struct Pair[A, B] { ... }`,
+`Pair[int, string](1, "a")`.
+
+**Methods.** A struct's methods implicitly share its type parameters - the
+receiver clause names them, and may spell them differently than the struct's
+own declaration does (they're positional):
+
+```go
+func (SlotMap[T]) Insert(v T) int { ... }
+func (SlotMap[E]) Get(i int) E    { ... }   // same parameter, different name
+```
+
+A method may **also** declare type parameters of its own, independent of its
+receiver's - including on a completely non-generic struct:
+
+```go
+func (Entity) Describe[T](tag T) T { ... }  // T is inferred per call
+func (Box[T]) Map[U](f U) T       { ... }   // T from the receiver, U per call
+```
+
+A method's own type parameter may not reuse a name its receiver clause
+already binds (`func (Box[T]) Get[T](...)`) - that's an error, not shadowing:
+the body would have no way to name the outer one, and the two are genuinely
+different types.
+
+**Not supported this round:** generic enums, explicit type arguments on a
+*method* call (`p.m[int](x)` has no spelling - method type parameters are
+inference-only), and using a generic name as a value without instantiating it
+(`f := Id`). A generic that instantiates itself at an ever-larger type
+(`F[T]` calling `F[Box[T]]`) has no finite set of instantiations and is
+rejected with a "too many generic instantiations" diagnostic.
+
 ## External functions (FFI)
 
 `extern func Name(params) RetType` declares a function this compiler doesn't

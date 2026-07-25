@@ -45,13 +45,31 @@ import (
 // CODEGEN.md's "Lambdas" section), so this is a slice, not a set, even though
 // membership is also all analyzeFuncLitCaptures itself needs to decide -
 // nil/missing for a FuncLit that captures nothing.
+// Generics is package-shared exactly like Structs/Enums, and holds every
+// generic declaration's template, keyed by name (see LANGUAGE.md's "Generics"
+// section). Specializations is per-file and is filled in by Check, not
+// Resolve: the monomorphized FuncDecl/StructDecl nodes sema synthesized into
+// this file's Tree, in creation order - ordinary declarations in every
+// respect, just not reachable from Tree.Root, so codegen walks them alongside
+// Tree.TopLevelDeclsOfKind rather than instead of it.
+//
+// PkgScope/FileScope are this file's own already-built scopes, kept so
+// instantiation (which happens during Check, long after Resolve returned) can
+// resolve a specialization in the same scope its template would have been
+// resolved in.
 type Info struct {
 	Refs     map[ast.NodeIndex]*Symbol
 	Scopes   map[ast.NodeIndex]*Scope
 	Structs  map[string]*StructInfo
 	Enums    map[string]*EnumInfo
+	Generics map[string]*GenericInfo
 	Types    map[ast.NodeIndex]Type
 	Captures map[ast.NodeIndex][]*Symbol
+
+	Specializations []ast.NodeIndex
+
+	PkgScope  *Scope
+	FileScope *Scope
 }
 
 // boundImport is one file's own import binding with its target already
@@ -76,9 +94,10 @@ type resolver struct {
 	infos map[*ast.Tree]*Info
 	bags  map[*ast.Tree]*diag.Bag
 
-	pkg     *Scope                 // shared package scope, every file's top-level names
-	structs map[string]*StructInfo // shared struct catalog, every file's structs
-	enums   map[string]*EnumInfo   // shared enum catalog, every file's enums
+	pkg      *Scope                  // shared package scope, every file's top-level names
+	structs  map[string]*StructInfo  // shared struct catalog, every file's structs
+	enums    map[string]*EnumInfo    // shared enum catalog, every file's enums
+	generics map[string]*GenericInfo // shared generic-template catalog, every file's generic funcs/structs
 
 	// fileImports is this package's input (nil for a plain single-package
 	// ResolvePackage call, which has no imports at all): each file's own
@@ -165,6 +184,7 @@ func resolveOnePackage(name string, trees []*ast.Tree, fileImports map[*ast.Tree
 		bags:        make(map[*ast.Tree]*diag.Bag, len(trees)),
 		structs:     make(map[string]*StructInfo),
 		enums:       make(map[string]*EnumInfo),
+		generics:    make(map[string]*GenericInfo),
 		fileImports: fileImports,
 		fileScopes:  make(map[*ast.Tree]*Scope, len(trees)),
 	}
@@ -177,7 +197,9 @@ func resolveOnePackage(name string, trees []*ast.Tree, fileImports map[*ast.Tree
 			Scopes:   make(map[ast.NodeIndex]*Scope),
 			Structs:  r.structs,
 			Enums:    r.enums,
+			Generics: r.generics,
 			Captures: make(map[ast.NodeIndex][]*Symbol),
+			PkgScope: r.pkg,
 		}
 		r.bags[tree] = diag.NewBag()
 	}
@@ -274,6 +296,13 @@ func (r *resolver) resolvePackage(trees []*ast.Tree) {
 		r.enterFile(tree)
 		fileScope := r.fileScopes[tree]
 		for _, decl := range tree.Children(tree.Root) {
+			// A generic declaration's own template is never resolved: its type
+			// parameters name nothing yet (see LANGUAGE.md's "Generics"
+			// section). One clone per instantiation is resolved instead, by
+			// Check, in a scope that binds them (generics.go).
+			if isGenericDecl(tree, r.generics, decl) {
+				continue
+			}
 			switch tree.Nodes[decl].Kind {
 			case enums.NodeKinds.VarDecl:
 				r.resolveVarDeclBody(fileScope, decl)
@@ -305,6 +334,7 @@ func (r *resolver) resolvePackage(trees []*ast.Tree) {
 func (r *resolver) buildFileScope(tree *ast.Tree) {
 	fileScope := newScope(ScopeFile, r.pkg, tree.Root)
 	r.fileScopes[tree] = fileScope
+	r.info.FileScope = fileScope
 
 	imports := r.fileImports[tree]
 	idx := 0
@@ -355,6 +385,14 @@ func (r *resolver) declareStruct(pkg *Scope, decl ast.NodeIndex) {
 	nameNode := r.tree.Child(decl, 0)
 	sym := r.declareLocal(pkg, decl, nameNode, SymStruct)
 
+	// A generic struct declares no StructInfo of its own: it has no concrete
+	// fields until instantiated (see LANGUAGE.md's "Generics" section), so
+	// only the template is catalogued here - one real StructInfo per
+	// instantiation is built later, by Check.
+	if _, ok := r.declareGeneric(sym, decl, r.tree.StructTypeParamList(decl)); ok {
+		return
+	}
+
 	info := &StructInfo{
 		Symbol:       sym,
 		Fields:       make(map[string]*Symbol),
@@ -363,7 +401,15 @@ func (r *resolver) declareStruct(pkg *Scope, decl ast.NodeIndex) {
 	}
 	sym.StructInfo = info
 	r.info.Structs[sym.Name] = info
+	r.declareStructMembers(info, decl)
+}
 
+// declareStructMembers catalogs decl's fields, constructors and destructors
+// into info - shared by declareStruct and by a generic struct's own
+// instantiation, which builds its StructInfo itself (its name isn't decl's own
+// source text) but needs the identical member cataloguing.
+func (r *resolver) declareStructMembers(info *StructInfo, decl ast.NodeIndex) {
+	sym := info.Symbol
 	for _, field := range r.tree.StructFields(decl) {
 		fieldNameNode := r.tree.Child(field, 0)
 		fieldName := r.tree.Text(fieldNameNode)
@@ -372,7 +418,7 @@ func (r *resolver) declareStruct(pkg *Scope, decl ast.NodeIndex) {
 			Kind:     SymField,
 			Decl:     field,
 			Tree:     r.tree,
-			Scope:    pkg,
+			Scope:    sym.Scope,
 			Exported: isExportedName(fieldName),
 		}
 		if _, exists := info.Fields[fieldName]; exists {
@@ -588,13 +634,7 @@ func (r *resolver) resolveEnumDestructorBody(pkg *Scope, info *EnumInfo, dtor as
 
 	fnScope := newScope(ScopeFunc, pkg, dtor)
 	r.info.Scopes[dtor] = fnScope
-	fnScope.Receiver = &Symbol{
-		Name:  "this",
-		Kind:  SymReceiver,
-		Decl:  info.Symbol.Decl,
-		Tree:  info.Symbol.Tree,
-		Scope: fnScope,
-	}
+	fnScope.Receiver = receiverSymbol(info.Symbol, fnScope)
 
 	for _, param := range r.tree.Children(paramList) {
 		r.declareLocal(fnScope, param, r.tree.Child(param, 0), SymParam)
@@ -632,13 +672,7 @@ func (r *resolver) resolveConstructorBody(pkg *Scope, info *StructInfo, ctor ast
 
 	fnScope := newScope(ScopeFunc, pkg, ctor)
 	r.info.Scopes[ctor] = fnScope
-	fnScope.Receiver = &Symbol{
-		Name:  "this",
-		Kind:  SymReceiver,
-		Decl:  info.Symbol.Decl,
-		Tree:  info.Symbol.Tree,
-		Scope: fnScope,
-	}
+	fnScope.Receiver = receiverSymbol(info.Symbol, fnScope)
 
 	for _, param := range r.tree.Children(paramList) {
 		r.declareLocal(fnScope, param, r.tree.Child(param, 0), SymParam)
@@ -679,13 +713,7 @@ func (r *resolver) resolveDestructorBody(pkg *Scope, info *StructInfo, dtor ast.
 
 	fnScope := newScope(ScopeFunc, pkg, dtor)
 	r.info.Scopes[dtor] = fnScope
-	fnScope.Receiver = &Symbol{
-		Name:  "this",
-		Kind:  SymReceiver,
-		Decl:  info.Symbol.Decl,
-		Tree:  info.Symbol.Tree,
-		Scope: fnScope,
-	}
+	fnScope.Receiver = receiverSymbol(info.Symbol, fnScope)
 
 	for _, param := range r.tree.Children(paramList) {
 		r.declareLocal(fnScope, param, r.tree.Child(param, 0), SymParam)
@@ -704,7 +732,8 @@ func (r *resolver) declareFunc(pkg *Scope, decl ast.NodeIndex) {
 	nameNode := r.tree.FuncName(decl)
 
 	if receiver == ast.InvalidNode {
-		r.declareLocal(pkg, decl, nameNode, SymFunc)
+		sym := r.declareLocal(pkg, decl, nameNode, SymFunc)
+		r.declareGeneric(sym, decl, r.tree.FuncTypeParamList(decl))
 		return
 	}
 
@@ -717,7 +746,16 @@ func (r *resolver) declareFunc(pkg *Scope, decl ast.NodeIndex) {
 		Exported: isExportedName(name),
 	}
 	r.info.Refs[nameNode] = sym
+	if gi, ok := r.generics[r.tree.Text(receiver)]; ok {
+		r.addGenericStructMethod(gi, receiver, decl, sym)
+		return
+	}
 	r.addMethod(receiver, sym)
+	if gi, ok := r.declareGeneric(sym, decl, r.tree.FuncTypeParamList(decl)); ok {
+		// A generic method of a NON-generic type: its receiver is already
+		// concrete, so the template carries it directly (see GenericInfo).
+		gi.OwnerSym = r.info.Refs[receiver]
+	}
 }
 
 // declareExternFunc registers an `extern func Name(params) RetType` top-level
@@ -770,6 +808,11 @@ func (r *resolver) resolveExternFuncDecl(scope *Scope, decl ast.NodeIndex) {
 // struct or enum" error if the name is neither.
 func (r *resolver) addMethod(receiver ast.NodeIndex, sym *Symbol) {
 	receiverName := r.tree.Text(receiver)
+	// A `[T]` on a non-generic receiver's clause binds nothing - reject it
+	// here rather than silently ignoring the parameter names.
+	if params := r.tree.ReceiverTypeParams(receiver); len(params) > 0 {
+		r.errorAt(receiver, "%s is not a generic type, so its receiver clause cannot declare type parameters", receiverName)
+	}
 	if info, ok := r.info.Structs[receiverName]; ok {
 		r.info.Refs[receiver] = info.Symbol
 		sym.Scope = info.Symbol.Scope
@@ -793,6 +836,25 @@ func (r *resolver) addMethod(receiver ast.NodeIndex, sym *Symbol) {
 	r.errorAt(receiver, "undefined: %s (method receiver must be a declared struct or enum)", receiverName)
 }
 
+// receiverSymbol builds the `this` Symbol for a method/constructor/destructor
+// body whose receiver type is typeSym (a SymStruct or SymEnum). Decl/Tree name
+// typeSym's own declaration - which may live in a different file than the
+// method (see Symbol.Tree) - while StructInfo/EnumInfo carry the catalog
+// directly, so reading `this`'s type never needs a name lookup (a
+// monomorphized struct's catalog isn't reachable by its declaration's own
+// source text at all - see generics.go).
+func receiverSymbol(typeSym *Symbol, fnScope *Scope) *Symbol {
+	return &Symbol{
+		Name:       "this",
+		Kind:       SymReceiver,
+		Decl:       typeSym.Decl,
+		Tree:       typeSym.Tree,
+		Scope:      fnScope,
+		StructInfo: typeSym.StructInfo,
+		EnumInfo:   typeSym.EnumInfo,
+	}
+}
+
 // resolveVarDeclBody resolves a VarDecl's type (as a type reference) and
 // initializer (as a value) - shared between top-level and local var decls.
 func (r *resolver) resolveVarDeclBody(scope *Scope, decl ast.NodeIndex) {
@@ -814,30 +876,12 @@ func (r *resolver) resolveFuncBody(pkg *Scope, decl ast.NodeIndex) {
 	r.info.Scopes[decl] = fnScope
 
 	if receiver != ast.InvalidNode {
-		receiverName := r.tree.Text(receiver)
-		var receiverDecl ast.NodeIndex
-		var receiverTree *ast.Tree
-		if info, ok := r.info.Structs[receiverName]; ok {
-			receiverDecl, receiverTree = info.Symbol.Decl, info.Symbol.Tree
-		} else if info, ok := r.info.Enums[receiverName]; ok {
-			receiverDecl, receiverTree = info.Symbol.Decl, info.Symbol.Tree
+		// addMethod already recorded which declared struct/enum the receiver
+		// clause names (Info.Refs[receiver]); an unresolved one was reported
+		// there and simply leaves `this` unbound here.
+		if typeSym, ok := r.info.Refs[receiver]; ok {
+			fnScope.Receiver = receiverSymbol(typeSym, fnScope)
 		}
-		if receiverTree != nil {
-			fnScope.Receiver = &Symbol{
-				Name: "this",
-				Kind: SymReceiver,
-				Decl: receiverDecl,
-				// The receiver struct/enum may be declared in a different
-				// file than the method itself (see Symbol.Tree's doc
-				// comment) - this must be the receiver's own owning tree, not
-				// r.tree (this method's file), so a later cross-file
-				// dereference (sema/typecheck.go's checkThisExpr) reads the
-				// right one.
-				Tree:  receiverTree,
-				Scope: fnScope,
-			}
-		}
-		// else: already reported by addMethod during declaration.
 	}
 
 	for _, param := range r.tree.Children(paramList) {
@@ -1245,6 +1289,15 @@ func (r *resolver) resolveType(scope *Scope, n ast.NodeIndex) {
 		r.info.Refs[n] = sym
 	case enums.NodeKinds.MemberExpr:
 		r.resolveTypeMemberExpr(scope, n)
+	case enums.NodeKinds.IndexExpr:
+		// A generic instantiation in type position (`SlotMap[int]` - see
+		// LANGUAGE.md's "Generics" section): the target names the template,
+		// every argument is an ordinary nested type position. Whether the
+		// target actually IS generic is Check's call, not Resolve's.
+		r.resolveType(scope, r.tree.Child(n, 0))
+		for _, arg := range r.tree.TypeArgNodes(n) {
+			r.resolveType(scope, arg)
+		}
 	case enums.NodeKinds.ArrayType:
 		if size := r.tree.Child(n, 0); size != ast.InvalidNode {
 			r.resolveExpr(scope, size)
@@ -1252,6 +1305,13 @@ func (r *resolver) resolveType(scope *Scope, n ast.NodeIndex) {
 		r.resolveType(scope, r.tree.Child(n, 1))
 	case enums.NodeKinds.PointerType:
 		r.resolveType(scope, r.tree.Child(n, 0))
+	case enums.NodeKinds.UnaryExpr:
+		// `*T` reaching type position from expression-position parsing - only
+		// an explicit type argument (`Foo[*T]`) can do that; see the parser's
+		// atTypeOnlyStart for why `*` stays ambiguous there.
+		if r.tree.Nodes[n].Tok.Lexeme == enums.Lexemes.Asterisk {
+			r.resolveType(scope, r.tree.Child(n, 0))
+		}
 	case enums.NodeKinds.MapType:
 		// `map[K]V` (see LANGUAGE.md's "Maps" section) - both K and V are
 		// ordinary type positions, resolved exactly like any other nested
@@ -1387,7 +1447,17 @@ func (r *resolver) resolveExpr(scope *Scope, n ast.NodeIndex) {
 			r.resolveExpr(scope, c)
 		}
 	case enums.NodeKinds.IndexExpr:
-		r.resolveExpr(scope, r.tree.Child(n, 0))
+		target := r.tree.Child(n, 0)
+		r.resolveExpr(scope, target)
+		// `Foo[int](...)` / `SlotMap[int]{...}` - the same IndexExpr shape
+		// ordinary indexing uses, told apart here (and again in Check) purely
+		// by whether the target names a generic declaration.
+		if sym, ok := r.info.Refs[target]; ok && sym.Generic != nil {
+			for _, arg := range r.tree.TypeArgNodes(n) {
+				r.resolveType(scope, arg)
+			}
+			return
+		}
 		r.resolveExpr(scope, r.tree.Child(n, 1))
 	case enums.NodeKinds.SliceExpr:
 		// [object, low, high] (see LANGUAGE.md's "Slicing" section) - low/high
