@@ -1,0 +1,81 @@
+// slices.llx - std/slices: generic algorithms over dynamic arrays ([]T),
+// built entirely as ordinary .llx code on top of this language's own
+// monomorphized generics (LANGUAGE.md's "Generics" section) - no compiler
+// changes, no extern func anywhere. Each function is type-checked separately
+// per instantiation, so e.g. Contains only compiles for a T that actually
+// supports == when some call site instantiates it that way; no constraint
+// is declared or needed.
+//
+// Map/Filter/Reduce additionally take a first-class function value
+// (LANGUAGE.md's "First-class functions"/"Lambdas" sections) as their last
+// argument - either a plain named function or a lambda literal both work,
+// since both are just ordinary func-typed values at the call site.
+
+// Contains reports whether v occurs anywhere in s.
+func Contains[T](s []T, v T) bool {
+    return IndexOf(s, v) >= 0
+}
+
+// IndexOf returns the index of v's first occurrence in s, or -1 if absent.
+func IndexOf[T](s []T, v T) int {
+    i := 0
+    for i < len(s) {
+        if s[i] == v {
+            return i
+        }
+        i++
+    }
+    return -1
+}
+
+// Reverse reverses s in place, swapping outside-in. A no-op for an empty or
+// single-element s.
+func Reverse[T](s []T) {
+    i := 0
+    j := len(s) - 1
+    for i < j {
+        tmp := s[i]
+        s[i] = s[j]
+        s[j] = tmp
+        i++
+        j--
+    }
+}
+
+// Map returns a new slice holding f(s[i]) for every i, same length as s.
+func Map[T, U](s []T, f func(T) U) []U {
+    result := make([]U, len(s))
+    i := 0
+    for i < len(s) {
+        result[i] = f(s[i])
+        i++
+    }
+    return result
+}
+
+// Filter returns a new slice holding s's elements for which pred returns
+// true, in order.
+func Filter[T](s []T, pred func(T) bool) []T {
+    result := make([]T, 0)
+    i := 0
+    for i < len(s) {
+        if pred(s[i]) {
+            result = append(result, s[i])
+        }
+        i++
+    }
+    return result
+}
+
+// Reduce left-folds s into a single value: starting from init, f combines
+// the running accumulator with each element in order. Returns init
+// unchanged for an empty s.
+func Reduce[T, U](s []T, init U, f func(U, T) U) U {
+    acc := init
+    i := 0
+    for i < len(s) {
+        acc = f(acc, s[i])
+        i++
+    }
+    return acc
+}

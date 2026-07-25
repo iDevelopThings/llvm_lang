@@ -2500,15 +2500,18 @@ helper package:
 import "../../std/mathutil"
 import "../../std/strings"
 import "../../std/time"
+import "../../std/slices"
+import "../../std/collections"
 ```
 
 **What's available so far:**
 
 - **`std/mathutil`** - thin wrappers around five libc `<math.h>` functions
   (`Sqrt`, `Pow`, `Floor`, `Ceil`, `Fabs`, all `f64`-in/`f64`-out, bound via
-  `extern func` - see "External functions (FFI)" above), plus five pure-`.llx`
-  helpers needing no libc call at all: `AbsInt`, `MinInt`, `MaxInt` (`int`),
-  and `MinF64`/`MaxF64` (`f64`, comparison-based). Named "mathutil", not
+  `extern func` - see "External functions (FFI)" above), plus three generic
+  (see "Generics" above) pure-`.llx` helpers needing no libc call at all:
+  `Abs[T]`, `Min[T]`, `Max[T]` (comparison-based, instantiated in this
+  project's own examples at both `int` and `f64`). Named "mathutil", not
   "mathutils", to read distinctly from `examples/imports`'s own unrelated
   same-named demo fixture - not that a real collision was ever possible,
   since imports here resolve by relative path, not a global package
@@ -2545,6 +2548,22 @@ import "../../std/time"
   only ever takes an already-built `*Entry`, never a bare `coroutine`, since
   this language's non-copyable rule has no move semantics to hand one off
   through an ordinary parameter (see `DECISIONS.md`'s dated entry).
+- **`std/slices`** - generic algorithms over dynamic arrays (see "Generics"
+  above): `Contains[T]`, `IndexOf[T]` (`-1` when absent), `Reverse[T]`
+  (in place), and three that also take a first-class function value (see
+  "First-class functions"/"Lambdas" above) - `Map[T, U]`, `Filter[T]`,
+  `Reduce[T, U]` (left fold). Each is checked per instantiation, same as any
+  other generic: `Contains` only compiles for a `T` some call site actually
+  instantiates with a comparable type.
+- **`std/collections`** - `SlotMap[T]`, a generational-handle container:
+  `Insert(v T) Handle`, `Get(h Handle) T`, `Remove(h Handle)`,
+  `Valid(h Handle) bool`. A `Handle{Index, Generation}` outlives its own
+  slot's reuse safely - `Remove` bumps that slot's generation, so a `Handle`
+  issued before the removal reads back as invalid (`Valid` false) even after
+  a later `Insert` reuses the same index. Promoted from the same shape
+  `examples/generics/generics.llx` first proved out; that example is left
+  untouched, this is an additive package on top of it (same reasoning
+  `std/time`'s own entry above gives for `examples/scope_timer`).
 
 **Deliberately deferred, not built this round:** Unicode-aware string
 handling (everything above is ASCII-only, matching this language having no

@@ -56,42 +56,33 @@ func Fabs(x f64) f64 {
     return fabs(x)
 }
 
-// AbsInt/MinInt/MaxInt/MinF64/MaxF64 below need no libc call at all - plain
-// comparison-based arithmetic, exactly as cheap in this language as in any
-// other, so there's no reason to route them through an extern the way the
-// five functions above have to (there's no libc "int abs" this project could
-// bind that's any cheaper than the comparison itself, and no min/max at all
-// in <math.h> for either int or float widths).
+// Abs/Min/Max below need no libc call at all - plain comparison-based
+// arithmetic, generic over T (LANGUAGE.md's "Generics" section) instead of
+// this file's former hand-duplicated AbsInt/MinInt/MaxInt/MinF64/MaxF64. No
+// constraint is declared or needed: each is only checked against whatever T
+// an actual call site instantiates it with, so e.g. Abs[T] simply fails to
+// compile with an ordinary diagnostic if ever instantiated with a T that has
+// no unary `-`/`<` (a struct, say) - that's expected per-instantiation
+// behavior, not a gap to guard against here.
 
-func AbsInt(x int) int {
+// Abs returns x's absolute value.
+func Abs[T](x T) T {
     if x < 0 {
         return -x
     }
     return x
 }
 
-func MinInt(a int, b int) int {
+// Min returns whichever of a/b is smaller.
+func Min[T](a T, b T) T {
     if a < b {
         return a
     }
     return b
 }
 
-func MaxInt(a int, b int) int {
-    if a > b {
-        return a
-    }
-    return b
-}
-
-func MinF64(a f64, b f64) f64 {
-    if a < b {
-        return a
-    }
-    return b
-}
-
-func MaxF64(a f64, b f64) f64 {
+// Max returns whichever of a/b is larger.
+func Max[T](a T, b T) T {
     if a > b {
         return a
     }
