@@ -157,3 +157,34 @@ func TestLoadProgram_SinglePackageNoImports(t *testing.T) {
 		t.Errorf("entry file imports = %+v, want none", prog.Entry.Files[0].Imports)
 	}
 }
+
+// TestLoadProgram_FileWithTooManyParseErrorsDoesNotPanic is the regression
+// test for a real crash: a file broken enough to hit the parser's own
+// maxErrors bailout used to come back from parser.ParseFile as a nil
+// *ast.Tree, and loadPackage's own import scan (tree.Children(tree.Root))
+// dereferenced it unconditionally - a genuinely malformed source file
+// (a WIP FFI-binding generator, in the real report) crashed the whole
+// loader instead of just carrying its own real diagnostics, taking down
+// analysis for every OTHER file in the same package/directory along with
+// it. Fixed in src/parser (Run recovers into the parser's own partial tree,
+// not a nil zero value) - this confirms the fix from the loader's own side,
+// the actual call site that used to crash in production.
+func TestLoadProgram_FileWithTooManyParseErrorsDoesNotPanic(t *testing.T) {
+	fs := afero.NewMemMapFs()
+	var broken strings.Builder
+	for range 12 {
+		broken.WriteString("func f() !bad\n")
+	}
+	writeFiles(t, fs, map[string]string{
+		join("root", "good.llx"):   `func main() {}`,
+		join("root", "broken.llx"): broken.String(),
+	})
+
+	prog, err := LoadProgram(fs, join("root"))
+	if err != nil {
+		t.Fatalf("LoadProgram: %v", err)
+	}
+	if len(prog.Entry.Files) != 2 {
+		t.Fatalf("Entry.Files = %+v, want both good.llx and broken.llx still loaded", prog.Entry.Files)
+	}
+}

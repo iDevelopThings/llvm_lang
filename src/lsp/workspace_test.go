@@ -39,12 +39,13 @@ func main() int {
 }
 
 // TestWorkspace_OpenOrChange_MalformedDestructorSurvives is the didOpen-
-// equivalent regression case for a loader crash: an unclosed call with a
-// dangling member access inside a destructor body, followed by a further
-// top-level declaration, drives the parser past its own maxErrors bailout,
-// leaving ParseFile's result at a nil *ast.Tree that loader.loadPackage then
-// dereferences. OpenOrChange must survive this as a returned error via
-// safeLoadProgram, not a panic that takes the whole server down.
+// equivalent regression case for a real loader crash: an unclosed call with
+// a dangling member access inside a destructor body, followed by a further
+// top-level declaration, drives the parser past its own maxErrors bailout.
+// parser.Run now recovers into the parser's own partial tree rather than a
+// nil *ast.Tree (see parser.go), so this is no longer even an error - just
+// an ordinary analysis carrying the real parse diagnostics, same as any
+// other malformed-but-non-panicking source.
 func TestWorkspace_OpenOrChange_MalformedDestructorSurvives(t *testing.T) {
 	w := newTestWorkspace()
 	path := filepath.Join(string(filepath.Separator), "prog", "main.llx")
@@ -60,15 +61,20 @@ func other() int {
 }
 `
 	out, err := w.OpenOrChange(path, src)
-	if err == nil {
-		t.Fatalf("OpenOrChange result = %+v, want a non-nil error (malformed source hits the parser's maxErrors bailout)", out)
+	if err != nil {
+		t.Fatalf("OpenOrChange: %v, want no error - a broken parse now degrades to diagnostics, not a panic/error", err)
+	}
+	fa := out[path]
+	if fa == nil || fa.Diags == nil || !fa.Diags.HasErrors() {
+		t.Fatalf("OpenOrChange result for %s = %+v, want a populated FileAnalysis carrying real parse errors", path, fa)
 	}
 }
 
-// TestWorkspace_OpenOrChange_RecoversForNextEdit proves a crash-inducing edit
-// doesn't wedge the Workspace: a following well-formed edit on the same path
-// must still analyze normally, exactly like a real editor session recovering
-// after the user finishes typing past the malformed intermediate state.
+// TestWorkspace_OpenOrChange_RecoversForNextEdit proves a maxErrors-bailout
+// edit doesn't wedge the Workspace: a following well-formed edit on the same
+// path must still analyze normally, exactly like a real editor session
+// recovering after the user finishes typing past the malformed intermediate
+// state.
 func TestWorkspace_OpenOrChange_RecoversForNextEdit(t *testing.T) {
 	w := newTestWorkspace()
 	path := filepath.Join(string(filepath.Separator), "prog", "main.llx")
@@ -82,8 +88,8 @@ func TestWorkspace_OpenOrChange_RecoversForNextEdit(t *testing.T) {
 func other() int {
 	return 1
 }
-`); err == nil {
-		t.Fatal("expected the malformed edit to return an error")
+`); err != nil {
+		t.Fatalf("OpenOrChange on the malformed edit: %v, want no error", err)
 	}
 
 	out, err := w.OpenOrChange(path, `

@@ -273,12 +273,20 @@ func (p *Parser) parseSemiList(close enums.Lexeme, parseElem func() ast.NodeInde
 // panic so a hopelessly broken parse returns normally instead of crashing
 // the caller. Any other panic is a real bug, not ours to swallow, and
 // propagates as usual.
+//
+// On a bailout, result recovers to p.tree (a real, non-nil *ast.Tree from
+// the moment New builds it, Root simply left at InvalidNode) rather than
+// T's own zero value - for ParseFile that's the difference between a caller
+// safely reading an empty tree and dereferencing a nil one.
 func Run[T any](file *lexer.File, fn func(p *Parser) T) (result T, diags *diag.Bag) {
 	p := New(file)
 	defer func() {
 		if r := recover(); r != nil {
 			if _, ok := r.(bailout); !ok {
 				panic(r)
+			}
+			if tree, ok := any(p.tree).(T); ok {
+				result = tree
 			}
 		}
 		diags = p.diags
