@@ -2617,8 +2617,12 @@ error if it can't be found.
   replacement for it. The tick frequency is cached once via a non-constant
   top-level `var` initializer (see "Global `var` initializers" above).
 - **`std/scheduler`** - a Unity-`StartCoroutine`-style timer scheduler built
-  on top of the `coroutine` type (see "Coroutines" above): `Scheduler.Schedule(e *Entry, initialDelay f64)`,
-  `Scheduler.Tick(dt f64)`, `Scheduler.HasPending() bool`. `Entry` owns one
+  on top of the `coroutine` type (see "Coroutines" above): `Scheduler.Schedule(e *Entry)`
+  (honors whatever `e`'s coroutine already wrote into `e.NextWait`),
+  `Scheduler.ScheduleDelayed(e *Entry, initialDelay f64)` (overrides just the
+  first resume's timing - see `std/scheduler/scheduler.llx`'s own doc comment for why
+  this is split out rather than one function), `Scheduler.Tick(dt f64)`,
+  `Scheduler.HasPending() bool`. `Entry` owns one
   coroutine handle plus its own resume timing, always held behind a pointer
   (`[]*Entry`, never by value - see "Destructors"' dynamic-array rule).
   `Entry.Handle`/`Entry.NextWait` are exported so the calling package can

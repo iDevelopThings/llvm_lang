@@ -26,7 +26,10 @@ struct Scheduler {
 	clock f64
 }
 
-func (Scheduler) Schedule(e *Entry, initialDelay f64) {
+// ScheduleDelayed only - every test in this file needs precise, explicit
+// control over each entry's first resume time (see std/scheduler/scheduler.llx's own
+// Schedule/ScheduleDelayed split for the real package's safe default).
+func (Scheduler) ScheduleDelayed(e *Entry, initialDelay f64) {
 	e.resumeAt = this.clock + initialDelay
 	this.pending = append(this.pending, e)
 }
@@ -96,7 +99,7 @@ func testEntryNotYetDue() bool {
 	var sched Scheduler
 	e := new Entry{}
 	e.Handle = CoroNotDue(&e.NextWait)
-	sched.Schedule(e, 5.0)
+	sched.ScheduleDelayed(e, 5.0)
 	sched.Tick(1.0)
 	return sched.HasPending()
 }
@@ -129,7 +132,7 @@ func testEntryDueFinishesOneResume() bool {
 	var sched Scheduler
 	e := new Entry{}
 	e.Handle = CoroFinishOne(&e.NextWait)
-	sched.Schedule(e, 1.0)
+	sched.ScheduleDelayed(e, 1.0)
 	sched.Tick(1.0)
 	return sched.HasPending()
 }
@@ -167,7 +170,7 @@ func pendingD() bool { return schedD.HasPending() }
 func setupD() {
 	e := new Entry{}
 	e.Handle = CoroD(&e.NextWait)
-	schedD.Schedule(e, 1.0)
+	schedD.ScheduleDelayed(e, 1.0)
 }
 
 // clock after each call: 0.5, 1.0, 2.0, 3.0 - the first resume fires at
@@ -228,11 +231,11 @@ func testMultipleSimultaneousDue() bool {
 	var sched Scheduler
 	e1 := new Entry{}
 	e1.Handle = CoroE1(&e1.NextWait)
-	sched.Schedule(e1, 2.0)
+	sched.ScheduleDelayed(e1, 2.0)
 
 	e2 := new Entry{}
 	e2.Handle = CoroE2(&e2.NextWait)
-	sched.Schedule(e2, 2.0)
+	sched.ScheduleDelayed(e2, 2.0)
 
 	sched.Tick(2.0)
 	return sched.HasPending()
@@ -297,15 +300,15 @@ func pendingF() bool { return schedF.HasPending() }
 func setupF() {
 	e1 := new Entry{}
 	e1.Handle = CoroF1(&e1.NextWait)
-	schedF.Schedule(e1, 1.0)
+	schedF.ScheduleDelayed(e1, 1.0)
 
 	e2 := new Entry{}
 	e2.Handle = CoroF2(&e2.NextWait)
-	schedF.Schedule(e2, 1.0)
+	schedF.ScheduleDelayed(e2, 1.0)
 
 	e3 := new Entry{}
 	e3.Handle = CoroF3(&e3.NextWait)
-	schedF.Schedule(e3, 1.0)
+	schedF.ScheduleDelayed(e3, 1.0)
 }
 
 func tickF1() { schedF.Tick(1.0) }

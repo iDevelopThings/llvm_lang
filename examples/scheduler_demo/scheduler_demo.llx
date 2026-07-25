@@ -37,7 +37,7 @@ func main() int {
 
     e := new scheduler.Entry{}
     e.Handle = Countdown(&e.NextWait)
-    sched.Schedule(e, 1.0)
+    sched.Schedule(e)
 
     ticks := 0
     for sched.HasPending() {

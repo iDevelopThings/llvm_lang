@@ -38,12 +38,21 @@
 //       var sched scheduler.Scheduler
 //       e := new scheduler.Entry{}
 //       e.Handle = Countdown(&e.NextWait)   // fresh call, straight into the field
-//       sched.Schedule(e, 3.0)
+//       sched.Schedule(e)
 //       for sched.HasPending() {
 //           sched.Tick(0.5)
 //       }
 //       return 0
 //   }
+//
+// In a continuous real-time loop (a game's own per-frame update, not a
+// one-shot program), call Tick exactly ONCE per frame with the real frame
+// delta - never drain-loop `for HasPending() { Tick(fixedStep) }` there: that
+// pattern fast-forwards the scheduler's own virtual clock synchronously,
+// with no real time elapsing between iterations, so every pending entry
+// resolves within that single frame regardless of how long it asked to
+// wait. The one-shot `main()` above is the only case where drain-looping is
+// actually correct, since it has nothing else to do but finish the schedule.
 
 // Entry owns exactly one coroutine handle plus its own next-resume timing -
 // always behind a pointer (`new`'d, held only as `*Entry` in Scheduler.pending
@@ -73,11 +82,24 @@ struct Scheduler {
 }
 
 // Schedule registers e - already holding a live handle, constructed by the
-// caller (see this file's own top-of-file usage example) - initialDelay is
-// how long from now e's first resume should fire, since the underlying
-// async call already ran eagerly up to its own first `await` before
-// Schedule ever sees it.
-func (Scheduler) Schedule(e *Entry, initialDelay f64) {
+// caller (see this file's own top-of-file usage example) - honoring
+// whatever e's own coroutine body already wrote into e.NextWait during its
+// eager run up to its first `await`, before Schedule ever sees it. This is
+// the safe default: the caller never has to separately restate a delay the
+// coroutine itself already decided. Use ScheduleDelayed instead only when
+// the first resume genuinely needs to fire at a DIFFERENT time than what
+// the coroutine itself requested.
+func (Scheduler) Schedule(e *Entry) {
+    this.ScheduleDelayed(e, e.NextWait)
+}
+
+// ScheduleDelayed is Schedule, but overriding e's own first-requested wait
+// with an explicit initialDelay instead of honoring it - every resume AFTER
+// the first still uses e.NextWait exactly like Schedule (see Tick below),
+// only the first one differs. Reach for Schedule unless you specifically
+// need the first delay to differ from the coroutine's own - see
+// DECISIONS.md's dated entry for why this is split out at all.
+func (Scheduler) ScheduleDelayed(e *Entry, initialDelay f64) {
     e.resumeAt = this.clock + initialDelay
     this.pending = append(this.pending, e)
 }
