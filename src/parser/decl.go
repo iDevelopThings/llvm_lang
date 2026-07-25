@@ -127,7 +127,29 @@ func (p *Parser) parseFuncDecl() ast.NodeIndex {
 		p.expect(enums.Lexemes.RightParen)
 	}
 
-	nameTok := p.expectIdent()
+	// A free function's own name can stand alone as a bare called value
+	// (`add(1, 2)`), so it goes through expectIdent same as a var/type name
+	// - see that function's own doc comment for why a keyword can't be
+	// reused there. A method's name is only ever reached through
+	// `receiver.name(...)`, exactly like a struct field - see
+	// expectMemberName's own doc comment for why that has no such
+	// restriction - except for constructor/destructor specifically: those
+	// two already name a completely different, unnamed struct-level
+	// construct (see LANGUAGE.md's "Constructors"/"Destructors" sections),
+	// so a method ALSO answering to one of those names would silently
+	// coexist with, and be trivially confused with, that real mechanism -
+	// reported the same way expectIdent rejects any other reserved name.
+	var nameTok lexer.Token
+	switch {
+	case receiver == ast.InvalidNode:
+		nameTok = p.expectIdent()
+	case p.atKeyword(enums.Keywords.Constructor), p.atKeyword(enums.Keywords.Destructor):
+		nameTok = p.tok
+		p.errorAtSpan(nameTok.Start, nameTok.End, "%s is reserved for a struct's own constructor/destructor block, not a method name", p.describe(nameTok))
+		p.advance()
+	default:
+		nameTok = p.expectMemberName()
+	}
 	name := p.tree.NewNode(enums.NodeKinds.Ident, nameTok, tokenSpan(nameTok))
 
 	typeParams := ast.InvalidNode
@@ -353,7 +375,7 @@ func (p *Parser) parseStructMember() ast.NodeIndex {
 }
 
 func (p *Parser) parseField() ast.NodeIndex {
-	nameTok := p.expectIdent()
+	nameTok := p.expectMemberName()
 	name := p.tree.NewNode(enums.NodeKinds.Ident, nameTok, tokenSpan(nameTok))
 	typ := p.parseTypeExpr()
 	span := ast.Span{

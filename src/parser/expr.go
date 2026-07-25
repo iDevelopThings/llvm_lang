@@ -633,7 +633,7 @@ func (p *Parser) finishIndexExpr(idx ast.NodeIndex) ast.NodeIndex {
 
 func parseMemberExpr(p *Parser, object ast.NodeIndex) ast.NodeIndex {
 	p.expect(enums.Lexemes.Dot)
-	nameTok := p.expectIdent()
+	nameTok := p.expectMemberName()
 	span := ast.Span{
 		Start: p.tree.SpanOf(object).Start,
 		End:   nameTok.End,

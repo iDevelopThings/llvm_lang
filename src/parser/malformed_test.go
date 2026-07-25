@@ -30,9 +30,55 @@ func TestKeywordRejectedAsTypeName(t *testing.T) {
 	}
 }
 
-func TestKeywordRejectedAsMemberField(t *testing.T) {
+// TestKeywordAllowedAsMemberField covers expectMemberName's own contract
+// (see its doc comment): a member-access name after `.` is never confused
+// with any keyword's own expression-position grammar (there's no `if x.y`
+// ambiguity the way a bare `var if = 5`/`if` used as a value would create),
+// so `a.if` parses cleanly as a real MemberExpr rather than being rejected
+// the way TestKeywordRejectedAsVarName's own `var if = 5` still is.
+func TestKeywordAllowedAsMemberField(t *testing.T) {
 	p := New(lexer.NewFile("t.ll", "a.if"))
-	p.parseExpr(precLowest)
+	n := p.parseExpr(precLowest)
+	if p.diags.ErrorCount() != 0 {
+		t.Fatalf("ErrorCount = %d, want 0: %v", p.diags.ErrorCount(), p.diags.All())
+	}
+	if p.tree.Nodes[n].Kind != enums.NodeKinds.MemberExpr {
+		t.Fatalf("Kind = %s, want MemberExpr", p.tree.Nodes[n].Kind)
+	}
+	if got := p.tree.Text(n); got != "if" {
+		t.Errorf("member name text = %q, want %q", got, "if")
+	}
+}
+
+// TestKeywordRejectedAsMethodConstructorOrDestructor covers the one
+// exclusion within expectMemberName's own relaxation (see parseFuncDecl's
+// doc comment): `constructor`/`destructor` already name a completely
+// different, unnamed struct-level construct, so a METHOD (unlike a plain
+// field, or any other keyword-spelled method name) still can't be named
+// either one - caught by review before landing; found by hands-on testing
+// that `func (Point) constructor(...)` silently compiled and coexisted
+// with a struct's own real constructor block with zero diagnostic.
+func TestKeywordRejectedAsMethodConstructorOrDestructor(t *testing.T) {
+	for _, kw := range []string{"constructor", "destructor"} {
+		p := New(lexer.NewFile("t.ll", "func (Point) "+kw+"() {}"))
+		p.parseFuncDecl()
+		if p.diags.ErrorCount() != 1 {
+			t.Errorf("%s: ErrorCount = %d, want 1: %v", kw, p.diags.ErrorCount(), p.diags.All())
+		}
+	}
+}
+
+// TestKeywordRejectedAsFreeFuncName covers the boundary expectMemberName's
+// own doc comment draws: unlike a method (only ever reached through
+// `receiver.name(...)`), a free function's own name can stand alone as a
+// bare called value (`move()`) - and `move` always dispatches to its own
+// MoveExpr prefix rule wherever a bare identifier could appear as a value
+// (parseIdentExpr), so a free function literally named `move` would make
+// `move` itself uncallable as a value ever again. parseFuncDecl must still
+// reject this via expectIdent, exactly like a var name.
+func TestKeywordRejectedAsFreeFuncName(t *testing.T) {
+	p := New(lexer.NewFile("t.ll", "func move() {}"))
+	p.parseTopLevelItem()
 	if p.diags.ErrorCount() != 1 {
 		t.Fatalf("ErrorCount = %d, want 1: %v", p.diags.ErrorCount(), p.diags.All())
 	}

@@ -97,6 +97,47 @@ func TestDeclShape(t *testing.T) {
 				"    Ident \"int\"\n",
 		},
 		{
+			// See expectMemberName's own doc comment: a field/method name is
+			// never confused with any keyword's own expression grammar the
+			// way a var/free-function name would be, so `move` - otherwise
+			// a reserved word (see LANGUAGE.md's "Destructors" section) - is
+			// legal here.
+			name: "method named with a keyword",
+			src:  "func (Point) move(dx int, dy int) { this.x = this.x + dx }",
+			want: "" +
+				"FuncDecl \"func\"\n" +
+				"  Ident \"Point\"\n" +
+				"  Ident \"move\"\n" +
+				"  <missing>\n" +
+				"  ParamList\n" +
+				"    Param\n" +
+				"      Ident \"dx\"\n" +
+				"      Ident \"int\"\n" +
+				"    Param\n" +
+				"      Ident \"dy\"\n" +
+				"      Ident \"int\"\n" +
+				"  <missing>\n" +
+				"  Block\n" +
+				"    AssignStmt \"=\"\n" +
+				"      MemberExpr \"x\"\n" +
+				"        ThisExpr \"this\"\n" +
+				"      BinaryExpr \"+\"\n" +
+				"        MemberExpr \"x\"\n" +
+				"          ThisExpr \"this\"\n" +
+				"        Ident \"dx\"\n",
+		},
+		{
+			name: "struct field named with a keyword",
+			src:  "struct Entry {\n\tmove int\n}",
+			want: "" +
+				"StructDecl \"struct\"\n" +
+				"  Ident \"Entry\"\n" +
+				"  <missing>\n" +
+				"  Field\n" +
+				"    Ident \"move\"\n" +
+				"    Ident \"int\"\n",
+		},
+		{
 			name: "empty struct",
 			src:  "struct Empty { }",
 			want: "StructDecl \"struct\"\n  Ident \"Empty\"\n  <missing>\n",

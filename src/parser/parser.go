@@ -163,9 +163,16 @@ func (p *Parser) expect(lex enums.Lexeme) lexer.Token {
 // expectIdent consumes and returns the current token if it's a plain
 // identifier - Lexeme.Identifier with no Keyword set - reporting an error
 // otherwise. Plain expect(Identifier) alone isn't enough for a
-// name-binding position (a var/type/field name): every keyword also lexes
-// as Lexeme.Identifier (see Token.Keyword), so it would silently accept
-// `var if = 5`. Unlike expect, this always advances even on a mismatch:
+// name-binding position that can stand alone as a bare value (a var, a free
+// function, a struct/enum type name): every keyword also lexes as
+// Lexeme.Identifier (see Token.Keyword), so it would silently accept `var
+// if = 5` - and, more subtly, a keyword like `move` always dispatches to
+// its own dedicated prefix rule wherever a bare identifier could otherwise
+// appear as a value (parseIdentExpr's own Keyword switch), so a var/func
+// named `move` would make `move` itself uncallable as a value ever again.
+// A struct field or method name has no such ambiguity - see
+// expectMemberName below - so this is reserved for the positions that
+// genuinely do. Unlike expect, this always advances even on a mismatch:
 // there's no alternative grammar path a caller branches on by leaving a
 // clearly-wrong name-position token in place (unlike, say, expect(Colon) in
 // parseIfStmt, where leaving it unconsumed lets the caller try the brace
@@ -175,6 +182,32 @@ func (p *Parser) expect(lex enums.Lexeme) lexer.Token {
 func (p *Parser) expectIdent() lexer.Token {
 	tok := p.tok
 	if tok.Lexeme != enums.Lexemes.Identifier || tok.Keyword != "" {
+		p.errorAtSpan(tok.Start, tok.End, "expected identifier, found %s", p.describe(tok))
+	}
+	p.advance()
+	return tok
+}
+
+// expectMemberName consumes and returns the current token if it's
+// identifier-shaped (Lexeme.Identifier), keyword or not - the
+// expectIdent counterpart for a struct field name or a method name (only
+// when there's a receiver clause - a free function still goes through
+// expectIdent, see parseFuncDecl), and for a member-access name after `.`
+// (parseMemberExpr). Unlike a var/free-function/type name, none of these
+// positions can ever be referenced as a bare value on their own - a field
+// or method is only ever reached through `.name`, and a struct's own
+// member list is never confused with an expression - so there's no
+// grammar ambiguity a keyword spelling could create here the way `move`
+// becoming un-callable as a value would for expectIdent's own positions
+// (see its own doc comment). `struct { move int }`, `func (Point)
+// move(...)`, and `p.move`/`this.move` are all legal for exactly this
+// reason. Constructor/destructor's own struct-member-start dispatch
+// (parseStructMember) already routes those two keywords to their own
+// grammar before a field name is ever attempted, so no exclusion is needed
+// here for them either.
+func (p *Parser) expectMemberName() lexer.Token {
+	tok := p.tok
+	if tok.Lexeme != enums.Lexemes.Identifier {
 		p.errorAtSpan(tok.Start, tok.End, "expected identifier, found %s", p.describe(tok))
 	}
 	p.advance()

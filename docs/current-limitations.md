@@ -10,6 +10,9 @@ This is a quick list of deliberate limits, not a roadmap.
 - There is no tuple type, variadic function syntax, argument spreading, or
   general blank identifier.
 - Dynamic arrays, maps, and functions are not comparable.
+- A struct field or method may be named with a reserved word (`move`,
+  `new`, ...), but a keyed composite literal can't construct it that way
+  (`Point{move: 1}`) - use a positional literal instead.
 
 ## Collections
 
@@ -51,7 +54,8 @@ This is a quick list of deliberate limits, not a roadmap.
 
 ## Packages, interop, and tools
 
-- Imports use relative paths and cannot be aliased.
+- Imports use relative paths, or the `std:`/`lib:` schemes; `lib:` isn't
+  backed by anything yet, and imports cannot be aliased.
 - The compiler and C interop currently target Windows with mingw64.
 - FFI has no external variables, variadic functions, or symbol aliases.
 - JIT-run programs see an empty `args()` array; standalone executables receive

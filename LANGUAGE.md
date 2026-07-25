@@ -498,6 +498,8 @@ func (Point) move(dx int, dy int) {
 }
 ```
 
+**A struct field or method may be named with a reserved word** (`move` above is one - see "Destructors" below) - unlike a `var`, a free function, or a type name, a field/method is only ever reached through `receiver.name`, or declared inside a struct's own member list, never as a bare value on its own, so there's no grammar ambiguity a keyword spelling could create there. A **keyed** composite literal is the one exception: `Point{move: 1}` doesn't work, since a keyed element's own key is parsed as an ordinary expression first (mirroring Go's own `CompositeLit` shape) - and a keyword like `move` always means the start of its own construct wherever a bare value could appear (`move x`, "Destructors" below), never a plain reference to a field of that name. A **positional** literal (`Point{1}`) is unaffected either way.
+
 ## Constructors
 
 A struct may also declare one or more `constructor(params) { body }` blocks, nested directly inside the struct declaration - a deliberate, narrow exception to "structs are data-only, methods declared separately" above:
