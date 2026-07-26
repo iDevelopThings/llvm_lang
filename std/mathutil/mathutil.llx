@@ -37,23 +37,23 @@ extern func ceil(x f64) f64
 extern func fabs(x f64) f64
 
 func Sqrt(x f64) f64 {
-    return sqrt(x)
+	return sqrt(x)
 }
 
 func Pow(base f64, exp f64) f64 {
-    return pow(base, exp)
+	return pow(base, exp)
 }
 
 func Floor(x f64) f64 {
-    return floor(x)
+	return floor(x)
 }
 
 func Ceil(x f64) f64 {
-    return ceil(x)
+	return ceil(x)
 }
 
 func Fabs(x f64) f64 {
-    return fabs(x)
+	return fabs(x)
 }
 
 // Abs/Min/Max below need no libc call at all - plain comparison-based
@@ -67,24 +67,41 @@ func Fabs(x f64) f64 {
 
 // Abs returns x's absolute value.
 func Abs[T](x T) T {
-    if x < 0 {
-        return -x
-    }
-    return x
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 // Min returns whichever of a/b is smaller.
 func Min[T](a T, b T) T {
-    if a < b {
-        return a
-    }
-    return b
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // Max returns whichever of a/b is larger.
 func Max[T](a T, b T) T {
-    if a > b {
-        return a
-    }
-    return b
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func Clamp[T](x T, min T, max T) T {
+	if x < min {
+		return min
+	}
+	if x > max {
+		return max
+	}
+	return x
+}
+
+func Normalize2D[T](x T, y T) (T, T) {
+	xf := f64(x)
+	yf := f64(y)
+	mag := sqrt(xf*xf + yf*yf)
+	return T(xf / mag), T(yf / mag)
 }

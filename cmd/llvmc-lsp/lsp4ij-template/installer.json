@@ -11,7 +11,7 @@
   "run": {
     "exec": {
       "name": "Build llvmc-lsp",
-      "workingDir": "$PROJECT_DIR$",
+      "workingDir": "F:\\Go\\llvm_lang",
       "ignoreStderr": true,
       "command": {
         "windows": "go build -o llvmc-lsp.exe ./cmd/llvmc-lsp",
@@ -21,8 +21,8 @@
         "configureServer": {
           "name": "Configure llvmc-lsp command",
           "command": {
-            "windows": "$PROJECT_DIR$/llvmc-lsp.exe",
-            "default": "$PROJECT_DIR$/llvmc-lsp"
+            "windows": "F:\\Go\\llvm_lang/llvmc-lsp.exe",
+            "default": "F:\\Go\\llvm_lang/llvmc-lsp"
           },
           "update": true
         }

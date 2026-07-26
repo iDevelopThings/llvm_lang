@@ -73,6 +73,9 @@ func (SlotMap[T]) Valid(h Handle) bool {
 func (SlotMap[T]) Get(h Handle) T {
     return this.items[h.Index]
 }
+func (SlotMap[T]) GetPtr(h Handle) *T {
+    return &this.items[h.Index]
+}
 
 // Remove frees h's slot, bumping its generation so every Handle issued
 // before this call becomes stale (Valid returns false for them from now on)

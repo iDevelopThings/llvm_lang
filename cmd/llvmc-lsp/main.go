@@ -234,6 +234,7 @@ func hover(context *glsp.Context, params *protocol.HoverParams) (*protocol.Hover
 	if err != nil {
 		return nil, err
 	}
+
 	return workspace.Hover(path, params.Position), nil
 }
 
