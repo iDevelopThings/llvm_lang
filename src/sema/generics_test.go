@@ -19,6 +19,93 @@ func TestGenericFuncInferredFromArguments(t *testing.T) {
 		"func main() {\n\tprint(Sum(1, 2))\n}\n")
 }
 
+// findCallExprByCalleeText returns the sole CallExpr node under root whose
+// callee is a bare Ident with the given text, or fails the test - a small
+// tree-walk since a generic instantiation's own cloned body has no other
+// stable way to name one specific node from a test.
+func findCallExprByCalleeText(t *testing.T, tree *ast.Tree, root ast.NodeIndex, calleeText string) ast.NodeIndex {
+	t.Helper()
+	var found ast.NodeIndex
+	var walk func(n ast.NodeIndex)
+	walk = func(n ast.NodeIndex) {
+		if n == ast.InvalidNode {
+			return
+		}
+		if tree.Nodes[n].Kind == enums.NodeKinds.CallExpr {
+			callee := tree.Child(n, 0)
+			if tree.Nodes[callee].Kind == enums.NodeKinds.Ident && tree.Text(callee) == calleeText {
+				found = n
+			}
+		}
+		for _, c := range tree.Children(n) {
+			walk(c)
+		}
+	}
+	walk(root)
+	if found == ast.InvalidNode {
+		t.Fatalf("no CallExpr with callee %q found under node %d", calleeText, root)
+	}
+	return found
+}
+
+// TestGenericFuncConvertsToAndFromTypeParam is the regression case for a
+// real bug: `T(x)`/converting TO a generic type parameter inside its own
+// body crashed codegen ("identifier T has no storage") - checkConversionCall
+// never recognized a SymTypeParam callee at all, despite typeFromNode
+// already fully resolving one to its instantiation's concrete bound type.
+//
+// Asserting zero Check errors alone doesn't prove this: the pre-fix code
+// ALSO produced zero diagnostics for `T(x)` - it silently fell through
+// checkCallExpr's whole dispatch chain unclaimed, with no error and no
+// resolved Type either, only crashing later at codegen. So this asserts
+// directly on info.Types for the `T(xf)` node in each instantiation's own
+// cloned body, confirming it actually resolved to that instantiation's
+// concrete bound type (f32 vs f64), not merely that Check "succeeded".
+func TestGenericFuncConvertsToAndFromTypeParam(t *testing.T) {
+	tree, info := checkSrc(t, "func Bridge[T](x T) T {\n"+
+		"\txf := f64(x)\n"+
+		"\treturn T(xf)\n"+
+		"}\n"+
+		"func main() {\n\tprint(Bridge(f32(1.5)))\n\tprint(Bridge(2.5))\n}\n")
+	wantSpecializations(t, tree, info, "Bridge[f32]", "Bridge[f64]")
+
+	for _, spec := range info.Specializations {
+		nameNode := tree.FuncName(spec)
+		sym, ok := info.Refs[nameNode]
+		if !ok {
+			continue
+		}
+		call := findCallExprByCalleeText(t, tree, spec, "T")
+		got := info.Types[call]
+		switch sym.Name {
+		case "Bridge[f32]":
+			if got.Kind != TypeF32 {
+				t.Errorf("Bridge[f32]'s own T(xf) resolved to %v, want f32", got)
+			}
+		case "Bridge[f64]":
+			if got.Kind != TypeF64 {
+				t.Errorf("Bridge[f64]'s own T(xf) resolved to %v, want f64", got)
+			}
+		}
+	}
+}
+
+// TestGenericFuncConvertToTypeParamBoundToStructIsCleanError covers the
+// sibling case found while fixing the above: T(x) where T is instantiated
+// with a struct type must still fail cleanly (the struct-has-no-constructor
+// diagnostic, naming the concrete struct), not silently succeed or crash -
+// checked via target.Kind (the resolved concrete type), not sym.Kind (which
+// is SymTypeParam here, never SymStruct directly), since checkConversionCall
+// only has sym.Kind to gate entry but must reason about the resolved target
+// from there on.
+func TestGenericFuncConvertToTypeParamBoundToStructIsCleanError(t *testing.T) {
+	src := "struct Point {\n\tx int\n}\n" +
+		"func ToT[T](v int) T {\n\treturn T(v)\n}\n" +
+		"func main() {\n\tp := ToT[Point](5)\n\tprint(p.x)\n}\n"
+	diags := expectCheckErrors(t, src, 1)
+	wantDiag(t, diags.All()[0].Msg, "Point has no constructor")
+}
+
 func TestGenericFuncTwoInstantiationsCoexist(t *testing.T) {
 	tree, info := checkSrc(t, "func Sum[T](a T, b T) T {\n\treturn a + b\n}\n"+
 		"func main() {\n\tprint(Sum(1, 2))\n\tprint(Sum(1.5, 2.5))\n}\n")

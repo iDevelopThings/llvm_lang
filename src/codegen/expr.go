@@ -1502,10 +1502,10 @@ func (g *Generator) genNewExpr(n ast.NodeIndex) llvm.Value {
 
 // isConversionCall mirrors sema's own recognition of `T(x)` as an explicit
 // numeric conversion rather than an ordinary call (see
-// sema/typecheck.go's checkConversionCall): the callee is a plain Ident
-// whose Info.Refs resolution is a type symbol, not a function. On a tree
-// that already passed sema.Check, this can only ever be SymBuiltinType - a
-// non-numeric conversion target (SymStruct) would already have been
+// sema/typecheck.go's checkConversionCall, and DECISIONS.md's dated entry
+// for why SymTypeParam is accepted here too - `T(x)` inside a generic body):
+// the callee is a plain Ident whose Info.Refs resolution is a type symbol,
+// not a function. A non-numeric conversion target would already have been
 // rejected by sema and so can never reach codegen at all (see the package
 // doc comment).
 func (g *Generator) isConversionCall(calleeNode ast.NodeIndex) bool {
@@ -1513,7 +1513,7 @@ func (g *Generator) isConversionCall(calleeNode ast.NodeIndex) bool {
 		return false
 	}
 	sym, ok := g.info.Refs[calleeNode]
-	return ok && sym.Kind == sema.SymBuiltinType
+	return ok && (sym.Kind == sema.SymBuiltinType || sym.Kind == sema.SymTypeParam)
 }
 
 // genConversion lowers a validated conversion `T(x)`: either a numeric

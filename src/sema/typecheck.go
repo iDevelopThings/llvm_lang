@@ -5346,7 +5346,10 @@ func (c *checker) checkEnumVariantCall(n, callee ast.NodeIndex, args []ast.NodeI
 // immediately, before the argument-count check below, regardless of how many
 // arguments were given: a struct is never a valid conversion target at any
 // arity, so "supply exactly one argument" would be misleading advice that
-// doesn't actually fix anything.
+// doesn't actually fix anything. Checked via target.Kind rather than sym.Kind
+// so this also catches a SymTypeParam callee (`T(x)` inside a generic body -
+// see DECISIONS.md's dated entry) whose instantiation binds T to a struct
+// type; sym.Kind is SymTypeParam there, never SymStruct directly.
 //
 // Returns ok=false only for a plain function/method call (an ordinary
 // SymFunc callee, or a MemberExpr) - checkCallExpr falls through to its
@@ -5361,13 +5364,13 @@ func (c *checker) checkConversionCall(n, callee ast.NodeIndex, args []ast.NodeIn
 		return invalidType, false
 	}
 	sym, ok := c.info.Refs[callee]
-	if !ok || (sym.Kind != SymBuiltinType && sym.Kind != SymStruct) {
+	if !ok || (sym.Kind != SymBuiltinType && sym.Kind != SymStruct && sym.Kind != SymTypeParam) {
 		return invalidType, false
 	}
 
 	target := c.typeFromNode(callee)
 
-	if sym.Kind == SymStruct {
+	if target.Kind == TypeStruct {
 		c.errorAtNodes(args, n, "%s has no constructor - declare one, or use a composite literal (%s{...}) instead", target, target)
 		for _, a := range args {
 			c.checkValueExpr(a)

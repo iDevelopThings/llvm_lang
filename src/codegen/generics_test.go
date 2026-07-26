@@ -34,6 +34,33 @@ func main() {
 	}
 }
 
+// TestGenericFuncConversionToTypeParamAcrossInstantiations is the JIT-level
+// regression test for a real crash: `T(x)` inside a generic body ("identifier
+// T has no storage") - see sema/generics_test.go's own regression test for
+// the Check-phase half of this fix. Two instantiations (f32 and f64) of the
+// same T(x)-using function must each compute the numerically correct result,
+// not just "compile without crashing".
+func TestGenericFuncConversionToTypeParamAcrossInstantiations(t *testing.T) {
+	jm := compileAndJIT(t, `
+func Bridge[T](x T) T {
+	xf := f64(x)
+	return T(xf * 2.0)
+}
+
+func main() {
+	print(Bridge(f32(1.5)))
+	print(Bridge(2.5))
+}
+`)
+	out := captureStdout(t, func() {
+		jm.runInt32(t, "main")
+	})
+	want := "3.000000\n5.000000\n"
+	if out != want {
+		t.Fatalf("captured stdout = %q, want %q", out, want)
+	}
+}
+
 // The struct counterpart to the test above: two instantiations of one generic
 // struct, each with its own layout and its own copy of the same method.
 func TestGenericStructTwoInstantiationsProduceIndependentResults(t *testing.T) {
