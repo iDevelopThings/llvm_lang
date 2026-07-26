@@ -1,0 +1,47 @@
+// variadic.llx - demonstrates variadic parameters (see LANGUAGE.md's
+// "Variadic parameters" section): a function's last parameter marked
+// `...T` collects any number of trailing arguments into an ordinary []T,
+// and an existing []T can be forwarded directly with a trailing `...`
+// (spread) instead of being re-collected.
+//
+// Run with:
+//   .\llvmc.exe examples\variadic\variadic.llx
+//   echo $LASTEXITCODE   # (PowerShell) -> 42
+
+// Sum collects any number of ints - inside the body, nums is an ordinary
+// []int: len/indexing/range all work exactly like any other dynamic array.
+func Sum(nums ...int) int {
+	total := 0
+	for i := range nums {
+		total = total + nums[i]
+	}
+	return total
+}
+
+// Join combines a fixed leading parameter with a variadic one.
+func Join(sep string, parts ...string) string {
+	result := ""
+	for i := range parts {
+		if i > 0 {
+			result = result + sep
+		}
+		result = result + parts[i]
+	}
+	return result
+}
+
+func main() int {
+	print(Sum())        // 0 - zero trailing arguments is legal
+	print(Sum(5))        // 5
+	print(Sum(1, 2, 3))  // 6
+
+	print(Join(", ", "a", "b", "c")) // "a, b, c"
+
+	// Spread: forward an existing []int directly instead of collecting a
+	// fresh one - `nums...` passes the slice itself as the argument.
+	nums := []int{10, 11, 12, 13}
+	spread := Sum(nums...)
+	print(spread) // 46
+
+	return Sum(1, 2, 3) + spread - 10 // 42
+}

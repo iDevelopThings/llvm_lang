@@ -262,3 +262,21 @@ func TestNumberForms(t *testing.T) {
 		}
 	}
 }
+
+// TestEllipsisToken covers the new `...` token (see LANGUAGE.md's "Variadic
+// parameters" section) - a plain `.` must stay unaffected, and `...` must
+// scan as one single DotDotDot token, not three separate Dots.
+func TestEllipsisToken(t *testing.T) {
+	toks, file := collect(t, "a.b\nc...\n")
+	L := enums.Lexemes
+	check(t, toks, file, []wantTok{
+		{L.Identifier, "", "a"},
+		{L.Dot, "", "."},
+		{L.Identifier, "", "b"},
+		{L.Semicolon, "", ""}, // inserted
+		{L.Identifier, "", "c"},
+		{L.DotDotDot, "", "..."},
+		// no ASI after `...` - it's punctuation, like Dot/Comma/LeftParen
+		{L.EOF, "", ""},
+	})
+}

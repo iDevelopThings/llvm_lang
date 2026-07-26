@@ -345,6 +345,22 @@ func (t *Tree) FuncIsAsync(decl NodeIndex) bool {
 	return t.Nodes[decl].Tok.Keyword == enums.Keywords.Async
 }
 
+// ParamIsVariadic reports whether param (a Param node) is a variadic
+// parameter - `parts ...string` (see LANGUAGE.md's "Variadic parameters"
+// section) - carried in param's own Tok (the `...` token) rather than a
+// child node, the same convention FuncIsAsync already uses.
+func (t *Tree) ParamIsVariadic(param NodeIndex) bool {
+	return t.Nodes[param].Tok.Lexeme == enums.Lexemes.DotDotDot
+}
+
+// CallHasSpread reports whether call (a CallExpr node) passes its own last
+// argument via the spread form (`Join(",", parts...)` - see LANGUAGE.md's
+// "Variadic parameters" section) rather than collecting one - carried in
+// call's own Tok (the `...` token), mirroring ParamIsVariadic.
+func (t *Tree) CallHasSpread(call NodeIndex) bool {
+	return t.Nodes[call].Tok.Lexeme == enums.Lexemes.DotDotDot
+}
+
 // ExternFuncName returns decl's (an ExternFuncDecl's) name child - see
 // Node's own ExternFuncDecl doc comment for the [name, paramList, returnType]
 // shape these three accessors index into. A deliberately separate, parallel

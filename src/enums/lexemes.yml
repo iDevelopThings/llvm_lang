@@ -31,6 +31,8 @@ values:
     char: ","
   - name: Dot
     char: "."
+  - name: DotDotDot
+    char: "..."
   - name: Colon
     char: ":"
   - name: Semicolon

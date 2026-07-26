@@ -1730,6 +1730,86 @@ a call), which remains out of scope and still a compile error (see above) -
 closing over some receiver, so the same restriction never applied to it in
 the first place.
 
+## Variadic parameters
+
+A function's **last** parameter may be marked variadic by writing `...`
+before its type:
+
+```go
+func Join(sep string, parts ...string) string {
+    result := ""
+    for i := range parts {
+        if i > 0 {
+            result = result + sep
+        }
+        result = result + parts[i]
+    }
+    return result
+}
+```
+
+**Inside the function body, the variadic parameter is an ordinary `[]T`** -
+a ready-made, real dynamic array (see "Dynamic arrays" above): indexing,
+`len`, `range`, passing it to another `[]T`-typed parameter, all work
+completely unchanged. There is no new value representation and no new
+codegen for the function's own declaration or body - a variadic function
+lowers exactly like an ordinary function whose last parameter happens to be
+`[]T`; only its call sites need anything new (see below).
+
+Only the last parameter in a parameter list may be variadic - `func
+F(a ...int, b int)` is rejected ("only the last parameter may be variadic"),
+reported right at the parameter list itself.
+
+### Calling a variadic function
+
+Two forms, both reusing the ordinary call-expression grammar - `...` only
+ever appears after a call's own last argument:
+
+- **Collect** (the common case) - every argument from the variadic
+  parameter's own position onward, each individually checked against `T`
+  using this language's normal, no-implicit-conversion assignability rule,
+  is collected into a freshly built `[]T` value passed as the underlying
+  function's real last argument. Supplying zero trailing arguments is legal
+  and produces an empty `[]T`:
+
+  ```go
+  Join(", ")                  // "" - zero variadic arguments
+  Join(", ", "a")              // "a"
+  Join(", ", "a", "b", "c")    // "a, b, c"
+  ```
+
+- **Spread** (Go-style forwarding) - `parts...` after an already-existing
+  `[]T` value passes that slice directly as the variadic argument instead of
+  collecting a fresh one. The spread argument's own type must be **exactly**
+  `[]T` (the variadic parameter's own element type) - a clear diagnostic
+  otherwise, the same rule every other assignability check in this language
+  already follows:
+
+  ```go
+  words := []string{"x", "y", "z"}
+  Join(", ", words...)   // "x, y, z" - forwards words directly
+  ```
+
+  `...` is only legal as a call's own last argument, and only when the
+  callee itself is a variadic function - using it anywhere else (a call to a
+  non-variadic function, or any argument position but the last) is a clean
+  diagnostic, never a panic or a silently-ignored token.
+
+Everything else about a variadic call composes for free once collection/
+spread itself works: multi-return, being one of several arguments, a method
+whose last parameter is variadic, and a generic function whose last
+parameter is variadic (`func F[T](items ...T)`, `T` inferred from every
+collected argument, or from a spread argument's own element type) all just
+work, since the call already looks like an ordinary one from here on.
+
+### Not supported
+
+A variadic function referenced as a bare value (`f := Join`, not
+`Join(...)`) is rejected ("... is a variadic function and cannot be used as
+a value, only called directly") - the same out-of-scope precedent "First-
+class functions" above already sets for a bound method value. Only a direct
+*call* to a variadic function is meaningful this round.
+
 ## Lambdas (function-literal expressions)
 
 A function value doesn't have to be a *reference* to an already-declared

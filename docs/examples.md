@@ -49,6 +49,7 @@ Run a multi-file example by passing its directory:
 | Example | Shows |
 | --- | --- |
 | [`first_class_functions`](../examples/first_class_functions/first_class_functions.llx) | Passing and returning functions |
+| [`variadic`](../examples/variadic/variadic.llx) | Variadic parameters, collect and spread calls |
 | [`closures`](../examples/closures/closures.llx) | Lambdas with captured state |
 | [`generics`](../examples/generics/generics.llx) | Generic functions, structs, and methods |
 | [`generators`](../examples/generators/generators.llx) | Yielding values into range loops |

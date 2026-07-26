@@ -370,7 +370,7 @@ func (g *Generator) genLambdaFunc(n ast.NodeIndex, captures []*sema.Symbol, ctxT
 	paramTypes := make([]llvm.Type, len(paramNodes)+1)
 	paramTypes[0] = g.ptrTy
 	for i, paramNode := range paramNodes {
-		paramTypes[i+1] = g.llvmType(g.info.Types[g.tree.Child(paramNode, 1)])
+		paramTypes[i+1] = g.llvmType(g.info.Types[paramNode])
 	}
 	fnType := llvm.FunctionType(g.llvmType(retType), paramTypes, false)
 
@@ -393,7 +393,7 @@ func (g *Generator) genLambdaFunc(n ast.NodeIndex, captures []*sema.Symbol, ctxT
 
 	for i, paramNode := range paramNodes {
 		psym := g.info.Refs[g.tree.Child(paramNode, 0)]
-		ptype := g.info.Types[g.tree.Child(paramNode, 1)]
+		ptype := g.info.Types[paramNode]
 		addr := g.allocLocalSlot(psym, g.llvmType(ptype), psym.Name)
 		g.builder.CreateStore(fn.Param(i+1), addr)
 		g.locals[psym] = addr
@@ -1208,11 +1208,11 @@ func (g *Generator) genCallExpr(n ast.NodeIndex) llvm.Value {
 		// unlike an ordinary method call - genFuncCall is exactly the same
 		// direct-call lowering a same-package free function call already
 		// uses.
-		return g.genFuncCall(calleeNode, argNodes)
+		return g.genFuncCall(n, calleeNode, argNodes)
 	case g.isMethodCall(calleeNode):
-		return g.genMethodCall(calleeNode, argNodes)
+		return g.genMethodCall(n, calleeNode, argNodes)
 	case g.isDirectFuncCall(calleeNode):
-		return g.genFuncCall(calleeNode, argNodes)
+		return g.genFuncCall(n, calleeNode, argNodes)
 	case g.isCFuncCall(calleeNode):
 		return g.genCFuncCall(calleeNode, argNodes)
 	default:
@@ -1584,8 +1584,12 @@ func (g *Generator) genConversion(n, argNode ast.NodeIndex) llvm.Value {
 // ever happens for an extern func's own struct-by-value parameter/return
 // (see ffi.go's own doc comment for why, and DECISIONS.md's dated entry for
 // what this scopes out: an ordinary call's declared and natural types are
-// always identical, so every branch below is a no-op there).
-func (g *Generator) genFuncCall(calleeNode ast.NodeIndex, argNodes []ast.NodeIndex) llvm.Value {
+// always identical, so every branch below is a no-op there). n is the whole
+// CallExpr - only needed to check a spread argument (see genCallArgValues);
+// an extern func can never be variadic (LANGUAGE.md's FFI type restriction
+// already rejects a bare []T parameter), so genCallArgValues is a no-op
+// beyond plain per-argument evaluation for that case.
+func (g *Generator) genFuncCall(n, calleeNode ast.NodeIndex, argNodes []ast.NodeIndex) llvm.Value {
 	sym := g.info.Refs[calleeNode]
 	entry := g.funcs[sym]
 
@@ -1597,12 +1601,13 @@ func (g *Generator) genFuncCall(calleeNode ast.NodeIndex, argNodes []ast.NodeInd
 		paramOffset = 1
 	}
 
-	args := make([]llvm.Value, len(argNodes)+paramOffset)
+	argValues := g.genCallArgValues(n, sym.Tree, sym.Decl, argNodes)
+	args := make([]llvm.Value, len(argValues)+paramOffset)
 	if entry.sretReturn {
 		args[0] = sretSlot
 	}
-	for i, a := range argNodes {
-		args[i+paramOffset] = g.coerceExternArg(g.genExpr(a), declaredParams[i+paramOffset])
+	for i, v := range argValues {
+		args[i+paramOffset] = g.coerceExternArg(v, declaredParams[i+paramOffset])
 	}
 
 	result := g.builder.CreateCall(entry.fnType, entry.fn, args, "")
@@ -1629,19 +1634,79 @@ func (g *Generator) genFuncCall(calleeNode ast.NodeIndex, argNodes []ast.NodeInd
 // becomes the call's hidden first argument. genReceiverAddr auto-derefs a
 // pointer-typed receiver (`ptr.translate(...)` where ptr is `*Point` - see
 // LANGUAGE.md's "Pointers" section), so this needs no awareness of the
-// distinction itself.
-func (g *Generator) genMethodCall(calleeNode ast.NodeIndex, argNodes []ast.NodeIndex) llvm.Value {
+// distinction itself. n is the whole CallExpr, passed through to
+// genCallArgValues for a method with a variadic last parameter (see
+// genFuncCall's own doc comment).
+func (g *Generator) genMethodCall(n, calleeNode ast.NodeIndex, argNodes []ast.NodeIndex) llvm.Value {
 	objNode := g.tree.Child(calleeNode, 0)
 	sym := g.info.Refs[calleeNode]
 	entry := g.funcs[sym]
 
 	receiverAddr, _ := g.genReceiverAddr(objNode)
-	args := make([]llvm.Value, len(argNodes)+1)
+	argValues := g.genCallArgValues(n, sym.Tree, sym.Decl, argNodes)
+	args := make([]llvm.Value, len(argValues)+1)
 	args[0] = receiverAddr
-	for i, a := range argNodes {
-		args[i+1] = g.genExpr(a)
-	}
+	copy(args[1:], argValues)
 	return g.builder.CreateCall(entry.fnType, entry.fn, args, "")
+}
+
+// isVariadicFuncDecl reports whether decl (declared in tree) is a FuncDecl
+// with a variadic last parameter (`...T` - see LANGUAGE.md's "Variadic
+// parameters" section) - a purely structural, AST-level check
+// (Tree.ParamIsVariadic) needing no sema.Info, mirroring how
+// isDirectFuncCall/isConversionCall already mirror sema's own structural
+// dispatch (see CODEGEN.md). Always false for an ExternFuncDecl - LANGUAGE.md's
+// FFI type restriction already rejects a bare []T parameter, so an extern
+// func can never actually be variadic.
+func isVariadicFuncDecl(tree *ast.Tree, decl ast.NodeIndex) bool {
+	if tree.Nodes[decl].Kind != enums.NodeKinds.FuncDecl {
+		return false
+	}
+	paramNodes := tree.Children(tree.FuncParamList(decl))
+	return len(paramNodes) > 0 && tree.ParamIsVariadic(paramNodes[len(paramNodes)-1])
+}
+
+// genCallArgValues builds the real LLVM argument list for a direct call
+// (genFuncCall/genMethodCall) to declTree/declNode's own declared parameters,
+// from argNodes exactly as sema already checked them (see sema's
+// checkVariadicCallArgs) - n is the whole CallExpr, read only for
+// Tree.CallHasSpread. An ordinary call just evaluates each argNode in
+// order; a variadic one (see LANGUAGE.md's "Variadic parameters" section)
+// additionally collects every trailing argument into a freshly built []T -
+// the exact same arena allocation genDynArrayLitInto already builds for a
+// `[]T{...}` composite literal - or, for a spread call, passes an existing
+// []T value straight through with no allocation at all. Either way this is
+// the only codegen this feature needs: the callee's own declared LLVM
+// signature already has an ordinary []T as its real last parameter (see
+// declareFuncSignature), so the call instruction itself, and the function's
+// own body, need no further awareness of variadic-ness whatsoever.
+func (g *Generator) genCallArgValues(n ast.NodeIndex, declTree *ast.Tree, declNode ast.NodeIndex, argNodes []ast.NodeIndex) []llvm.Value {
+	if !isVariadicFuncDecl(declTree, declNode) {
+		args := make([]llvm.Value, len(argNodes))
+		for i, a := range argNodes {
+			args[i] = g.genExpr(a)
+		}
+		return args
+	}
+
+	paramNodes := declTree.Children(declTree.FuncParamList(declNode))
+	fixedCount := len(paramNodes) - 1
+	args := make([]llvm.Value, fixedCount+1)
+	for i := range fixedCount {
+		args[i] = g.genExpr(argNodes[i])
+	}
+
+	tail := argNodes[fixedCount:]
+	if g.tree.CallHasSpread(n) {
+		args[fixedCount] = g.genExpr(tail[0])
+		return args
+	}
+
+	sliceType := g.infos[declTree].Types[paramNodes[fixedCount]]
+	dst := g.createEntryAlloca(g.dynArrTy, "variadic")
+	g.genDynArrayLitInto(dst, sliceType, tail)
+	args[fixedCount] = g.builder.CreateLoad(g.dynArrTy, dst, "")
+	return args
 }
 
 // genOperatorCall lowers a resolved operator-overload use (see sema's

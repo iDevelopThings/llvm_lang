@@ -82,7 +82,17 @@ type Span struct {
 //     the operator token exactly like unary `-`/`!`, distinguished purely by
 //     Tok.Lexeme, no new node kind needed for either (see LANGUAGE.md's
 //     "Pointers" section)
-//   - everything else (File, Block, ParamList, Param, Field, CallExpr,
+//   - Param: the zero Token for an ordinary parameter, or the `...` token
+//     for the last parameter of a variadic function (`parts ...string` - see
+//     LANGUAGE.md's "Variadic parameters" section) - the same "reuse Tok for
+//     a per-node flag" convention FuncDecl's own async marker already uses;
+//     Tree.ParamIsVariadic reads this rather than every call site comparing
+//     Tok.Lexeme directly.
+//   - CallExpr: the zero Token for an ordinary call, or the `...` token when
+//     the call's own last argument is a spread (`Join(",", parts...)` - see
+//     LANGUAGE.md's "Variadic parameters" section) - Tree.CallHasSpread reads
+//     this.
+//   - everything else (File, Block, ParamList, Field,
 //     ParenExpr, IndexExpr, ArrayType, PointerType, CompositeLit,
 //     KeyValueExpr, ExprStmt, ParamTypeList, MapType, MultiReturnType,
 //     MultiValueExpr, MatchArm): unused, left as the zero Token

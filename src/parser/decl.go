@@ -360,11 +360,22 @@ func (p *Parser) parseExternFuncDecl() ast.NodeIndex {
 // parseParamList parses a comma-separated `(name Type, ...)` list, wrapped
 // in its own variable-arity node so FuncDecl itself stays fixed-arity (it
 // has fixed slots both before and after the params: receiver/name, then
-// returnType/body).
+// returnType/body). A trailing `...T` (see parseParam and LANGUAGE.md's
+// "Variadic parameters" section) is only legal on the LAST parameter - the
+// grammar accepts one on any parameter (parseParam has no notion of "am I
+// last"), so this rejects one found anywhere else, the same "grammar accepts
+// the general shape, this pass narrows it" division of labor a duplicate-
+// arity constructor already uses.
 func (p *Parser) parseParamList() ast.NodeIndex {
 	openTok := p.expect(enums.Lexemes.LeftParen)
 	params := p.parseCommaList(enums.Lexemes.RightParen, p.parseParam)
 	closeTok := p.expect(enums.Lexemes.RightParen)
+	for _, param := range params[:max(0, len(params)-1)] {
+		if p.tree.ParamIsVariadic(param) {
+			span := p.tree.SpanOf(param)
+			p.errorAtSpan(span.Start, span.End, "only the last parameter may be variadic")
+		}
+	}
 	span := ast.Span{
 		Start: openTok.Start,
 		End:   closeTok.End,
@@ -372,15 +383,25 @@ func (p *Parser) parseParamList() ast.NodeIndex {
 	return p.tree.NewNode(enums.NodeKinds.ParamList, lexer.Token{}, span, params...)
 }
 
+// parseParam parses `name Type`, or - only legal on a parameter list's own
+// last entry, see parseParamList - `name ...Type` (LANGUAGE.md's "Variadic
+// parameters" section): the leading `...` is captured as the node's own Tok
+// (see ast.Node's own Param doc comment and Tree.ParamIsVariadic) rather than
+// a child, since it's a whole-parameter marker, not part of the type itself.
 func (p *Parser) parseParam() ast.NodeIndex {
 	nameTok := p.expectIdent()
 	name := p.tree.NewNode(enums.NodeKinds.Ident, nameTok, tokenSpan(nameTok))
+	variadicTok, variadic := p.accept(enums.Lexemes.DotDotDot)
 	typ := p.parseTypeExpr()
+	tok := lexer.Token{}
+	if variadic {
+		tok = variadicTok
+	}
 	span := ast.Span{
 		Start: nameTok.Start,
 		End:   p.tree.SpanOf(typ).End,
 	}
-	return p.tree.NewNode(enums.NodeKinds.Param, lexer.Token{}, span, name, typ)
+	return p.tree.NewNode(enums.NodeKinds.Param, tok, span, name, typ)
 }
 
 // parseStructDecl parses `struct Name { field Type ... }` - data-only aside

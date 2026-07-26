@@ -46,6 +46,50 @@ result := apply(double, 21)
 
 Bound method values such as `point.move` are not supported.
 
+## Variadic parameters
+
+A function's last parameter may take any number of trailing arguments by
+marking it with `...`:
+
+```go
+func Sum(nums ...int) int {
+    total := 0
+    for i := range nums {
+        total = total + nums[i]
+    }
+    return total
+}
+
+Sum()           // 0
+Sum(1)          // 1
+Sum(1, 2, 3)    // 6
+```
+
+Inside the function, `nums` is an ordinary `[]int` - see
+[Dynamic arrays](collections.md#dynamic-arrays) for what that means (`len`,
+indexing, `range`, passing it on to another `[]int` parameter, all work
+unchanged). Each collected argument is checked against the element type with
+this language's usual no-implicit-conversion rule.
+
+Forward an existing slice instead of collecting a new one with a trailing
+`...` after the argument:
+
+```go
+parts := []string{"a", "b", "c"}
+joined := Join(",", parts...)
+```
+
+`parts...` passes `parts` itself as the variadic argument; its type must be
+exactly `[]string` for a `...string` parameter. `...` is only legal on a
+call's last argument, and only when the callee's own last parameter is
+variadic.
+
+Only the last parameter may be variadic. A variadic function referenced as a
+bare value (`f := Sum`, not `Sum(...)`) is not supported - see
+[Current limitations](current-limitations.md).
+
+Try: [`variadic.llx`](../examples/variadic/variadic.llx)
+
 ## Lambdas and closures
 
 Function literals use the same `func` syntax:

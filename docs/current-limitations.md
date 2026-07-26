@@ -7,8 +7,7 @@ This is a quick list of deliberate limits, not a roadmap.
 - `if condition: statement` has no `else`; use braces when you need one.
 - Fixed-array sizes must be positive integer literals.
 - Numeric types do not convert implicitly.
-- There is no tuple type, variadic function syntax, argument spreading, or
-  general blank identifier.
+- There is no tuple type or general blank identifier.
 - Dynamic arrays, maps, and functions are not comparable.
 - A struct field or method may be named with a reserved word (`move`,
   `new`, ...), but a keyed composite literal can't construct it that way
@@ -30,7 +29,8 @@ This is a quick list of deliberate limits, not a roadmap.
 ## Functions and types
 
 - Only free functions have first-class function values; bound method values
-  are not supported.
+  are not supported. A variadic function cannot be used as a value either -
+  only called directly.
 - Lambdas cannot capture a method's `this`.
 - Generic enums are not supported.
 - Explicit type arguments work on free-function calls, but not method calls.

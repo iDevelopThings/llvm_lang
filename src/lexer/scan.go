@@ -189,6 +189,10 @@ func (l *Lexer) matchOperator(c byte) (enums.Lexeme, bool) {
 	case ',':
 		return enums.Lexemes.Comma, true
 	case '.':
+		if l.peek() == '.' && l.peek2() == '.' {
+			l.pos += 2
+			return enums.Lexemes.DotDotDot, true
+		}
 		return enums.Lexemes.Dot, true
 	case ':':
 		return two('=', enums.Lexemes.ColonEqual, enums.Lexemes.Colon), true

@@ -47,6 +47,7 @@ short; this index makes the less-common features easy to find.
 | Multiple returns and immediate unpacking | [Multiple return values](functions-and-generics.md#multiple-return-values) | [`multireturn`](../examples/multireturn/multireturn.llx) |
 | Parallel assignment | [Multiple return values](functions-and-generics.md#multiple-return-values) | [`multi_assign`](../examples/multi_assign/multi_assign.llx) |
 | Function types and first-class free functions | [Function values](functions-and-generics.md#function-values) | [`first_class_functions`](../examples/first_class_functions/first_class_functions.llx) |
+| Variadic parameters and spread calls | [Variadic parameters](functions-and-generics.md#variadic-parameters) | [`variadic`](../examples/variadic/variadic.llx) |
 | Lambdas, closures, and capture rules | [Lambdas and closures](functions-and-generics.md#lambdas-and-closures) | [`closures`](../examples/closures/closures.llx) |
 | Generic functions, structs, and methods | [Generics](functions-and-generics.md#generics) | [`generics`](../examples/generics/generics.llx) |
 

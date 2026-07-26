@@ -21,9 +21,19 @@ import (
 // callee turns out to be - a funcSignature never becomes an expression's
 // own Type; only a real Type (TypeFunc, for a bare function reference or a
 // function-typed variable) does that. See funcSigForCall.
+//
+// Variadic marks a declared function/method whose last parameter is
+// `...T` (see LANGUAGE.md's "Variadic parameters" section) - Params' own
+// last entry is already the ordinary `[]T` dynamic-array Type in that case
+// (computeDeclType wraps it), so nothing here duplicates the element type;
+// checkCallArgs reads *Params[len(Params)-1].Elem for it. Always false for
+// an indirect call's own funcSignature (built from a TypeFunc's Params via
+// funcType) - a variadic function can never be referenced as a value in the
+// first place (see typeOfSymbolValue), so that shape never arises.
 type funcSignature struct {
-	Params []Type
-	Return Type
+	Params   []Type
+	Return   Type
+	Variadic bool
 }
 
 // funcType builds the Type (Kind: TypeFunc) describing sig - used when a
@@ -911,6 +921,7 @@ func (c *checker) buildSigFromParamListAndReturnType(paramList, returnTypeNode a
 			validate(param, t, "parameter")
 		}
 	}
+	variadic := len(paramNodes) > 0 && c.tree.ParamIsVariadic(paramNodes[len(paramNodes)-1])
 
 	ret := voidType
 	if returnTypeNode != ast.InvalidNode {
@@ -920,8 +931,9 @@ func (c *checker) buildSigFromParamListAndReturnType(paramList, returnTypeNode a
 		}
 	}
 	return funcSignature{
-		Params: params,
-		Return: ret,
+		Params:   params,
+		Return:   ret,
+		Variadic: variadic,
 	}
 }
 
@@ -1130,6 +1142,13 @@ func (c *checker) declType(decl ast.NodeIndex) Type {
 	return t
 }
 
+// paramIsLastInList reports whether param is the last child of its own
+// ParamList - see computeDeclType's Param case.
+func (c *checker) paramIsLastInList(param ast.NodeIndex) bool {
+	children := c.tree.Children(c.tree.Parent(param))
+	return len(children) > 0 && children[len(children)-1] == param
+}
+
 func (c *checker) computeDeclType(decl ast.NodeIndex) Type {
 	switch c.tree.Nodes[decl].Kind {
 	case enums.NodeKinds.VarDecl:
@@ -1139,7 +1158,21 @@ func (c *checker) computeDeclType(decl ast.NodeIndex) Type {
 	case enums.NodeKinds.MultiShortVarDecl:
 		return c.checkMultiShortVarDeclNode(decl)
 	case enums.NodeKinds.Param:
-		return c.typeFromNode(c.tree.Child(decl, 1))
+		// `...T` (see LANGUAGE.md's "Variadic parameters" section): the
+		// declared type node names T, the element type - the parameter's own
+		// real, effective type is []T, an ordinary dynamic array from here
+		// on (codegen's declared LLVM parameter type, a reference to the
+		// parameter inside the body, everything reads this wrapped Type, not
+		// the bare element one - see Tree.ParamIsVariadic). Only wraps when
+		// this is really the list's last parameter (paramIsLastInList) -
+		// parseParamList already reports "only the last parameter may be
+		// variadic" for any other position, so this avoids compounding that
+		// one diagnostic with a confusing, cascading type mismatch.
+		elem := c.typeFromNode(c.tree.Child(decl, 1))
+		if c.tree.ParamIsVariadic(decl) && c.paramIsLastInList(decl) {
+			return Type{Kind: TypeArray, Dynamic: true, Elem: &elem}
+		}
+		return elem
 	default:
 		return invalidType
 	}
@@ -3770,6 +3803,14 @@ func (c *checker) typeOfSymbolValue(n ast.NodeIndex, sym *Symbol) Type {
 		restore := c.pushTree(sym.Tree)
 		sig := c.funcSigForDecl(sym.Decl)
 		restore()
+		if sig.Variadic {
+			// See LANGUAGE.md's "Variadic parameters" section: out of scope
+			// this round - a variadic function's own real call-site sugar
+			// (collect/spread) only exists for a direct call, never for an
+			// indirect one through a plain func(...)-typed value.
+			c.errorAt(n, "%s is a variadic function and cannot be used as a value, only called directly", c.tree.Text(n))
+			return invalidType
+		}
 		return funcType(sig)
 	case SymStruct, SymBuiltinType, SymEnum:
 		c.errorAt(n, "%s is a type, not a value", c.tree.Text(n))
@@ -4828,6 +4869,21 @@ func (c *checker) checkCallExpr(n ast.NodeIndex) Type {
 	children := c.tree.Children(n)
 	callee, args := children[0], children[1:]
 
+	// A spread argument (`f(x...)` - see LANGUAGE.md's "Variadic parameters"
+	// section) only ever makes sense reaching an ordinary or generic direct
+	// function call, both of which route through checkCallArgs below and
+	// check it there against that callee's own real Variadic-ness. Every
+	// other callable shape below (a builtin, a conversion, a constructor, an
+	// enum variant) can never be variadic, so a spread there is diagnosed
+	// right here instead of silently accepted.
+	if c.tree.CallHasSpread(n) && c.calleeNeverVariadic(callee) {
+		c.errorAt(n, "... (spread) is only legal in a call to a variadic function")
+		for _, a := range args {
+			c.checkValueExpr(a)
+		}
+		return invalidType
+	}
+
 	if c.isPrintCall(callee) {
 		return c.checkPrintCall(n, args)
 	}
@@ -4903,6 +4959,19 @@ func (c *checker) checkCallArgs(n ast.NodeIndex, args []ast.NodeIndex, argTypes 
 		return c.checkValueExpr(args[i])
 	}
 
+	if sig.Variadic {
+		c.checkVariadicCallArgs(n, args, argType, sig)
+		return
+	}
+
+	if c.tree.CallHasSpread(n) {
+		c.errorAt(n, "... (spread) is only legal in a call to a variadic function")
+		for i := range args {
+			argType(i)
+		}
+		return
+	}
+
 	if len(args) != len(sig.Params) {
 		c.errorAtNodes(args, n, "wrong number of arguments in call: got %d, want %d", len(args), len(sig.Params))
 		for i := range args {
@@ -4925,6 +4994,89 @@ func (c *checker) checkCallArgs(n ast.NodeIndex, args []ast.NodeIndex, argTypes 
 			// is different).
 			c.checkNoIllegalCopy(a, sig.Params[i], true, fmt.Sprintf("argument %d", i+1))
 		}
+	}
+}
+
+// checkVariadicCallArgs is checkCallArgs's own variadic-signature case (see
+// LANGUAGE.md's "Variadic parameters" section): every fixed leading
+// parameter checks exactly like an ordinary call, then the trailing
+// arguments from the variadic position onward are handled one of two ways -
+// a spread call (Tree.CallHasSpread) requires exactly one trailing argument,
+// checked against the declared `[]T` parameter type itself (so its own type
+// must be EXACTLY []T, the same no-implicit-conversion rule checkAssignable
+// already enforces everywhere else); otherwise each trailing argument is
+// checked individually against T, the element type, and collected at the
+// call site (see codegen's genCallArgValues).
+func (c *checker) checkVariadicCallArgs(n ast.NodeIndex, args []ast.NodeIndex, argType func(int) Type, sig funcSignature) {
+	fixed := sig.Params[:len(sig.Params)-1]
+	sliceType := sig.Params[len(sig.Params)-1]
+	elemType := *sliceType.Elem
+
+	if len(args) < len(fixed) {
+		c.errorAtNodes(args, n, "wrong number of arguments in call: got %d, want at least %d", len(args), len(fixed))
+		for i := range args {
+			argType(i)
+		}
+		return
+	}
+
+	for i, p := range fixed {
+		at := argType(i)
+		if c.checkAssignable(args[i], p, at, fmt.Sprintf("argument %d", i+1)) {
+			c.checkNoIllegalCopy(args[i], p, true, fmt.Sprintf("argument %d", i+1))
+		}
+	}
+
+	tail := args[len(fixed):]
+	spread := c.tree.CallHasSpread(n)
+	if spread && len(tail) != 1 {
+		c.errorAtNodes(tail, n, "... (spread) requires a single argument for the variadic parameter, got %d", len(tail))
+		spread = false
+	}
+
+	if spread {
+		i := len(fixed)
+		at := argType(i)
+		if c.checkAssignable(args[i], sliceType, at, fmt.Sprintf("argument %d", i+1)) {
+			c.checkNoIllegalCopy(args[i], sliceType, true, fmt.Sprintf("argument %d", i+1))
+		}
+		return
+	}
+
+	for j, a := range tail {
+		i := len(fixed) + j
+		at := argType(i)
+		if c.checkAssignable(a, elemType, at, fmt.Sprintf("argument %d", i+1)) {
+			c.checkNoIllegalCopy(a, elemType, true, fmt.Sprintf("argument %d", i+1))
+		}
+	}
+}
+
+// calleeNeverVariadic reports whether callee names a callable form that can
+// never be variadic - a builtin (print/make/append/len/args/remove/resume/
+// done), an explicit conversion, a struct constructor, or an enum variant
+// construction - none of which ever reach checkCallArgs' own Variadic check
+// (see checkCallExpr's own spread guard, above). A callee that isn't one of
+// these (an ordinary or generic function/method, still unresolved, or
+// invalid) reports false, deferring to checkCallArgs.
+func (c *checker) calleeNeverVariadic(callee ast.NodeIndex) bool {
+	if c.isPrintCall(callee) {
+		return true
+	}
+	for _, name := range [...]string{"make", "append", "len", "args", "remove", "resume", "done"} {
+		if c.isBuiltinCall(callee, name) {
+			return true
+		}
+	}
+	sym, ok := c.info.Refs[callee]
+	if !ok || sym.Generic != nil {
+		return false
+	}
+	switch sym.Kind {
+	case SymBuiltinType, SymStruct, SymEnumVariant:
+		return true
+	default:
+		return false
 	}
 }
 

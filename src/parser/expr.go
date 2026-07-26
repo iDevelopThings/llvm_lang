@@ -444,12 +444,13 @@ func parseCallExpr(p *Parser, callee ast.NodeIndex) ast.NodeIndex {
 	p.expect(enums.Lexemes.LeftParen)
 	p.exprLev++
 	var args []ast.NodeIndex
+	var spreadTok lexer.Token
 	if isMakeCallee(p, callee) {
 		args = append([]ast.NodeIndex{callee}, p.parseMakeArgs()...)
 	} else {
-		args = append([]ast.NodeIndex{callee}, p.parseCommaList(enums.Lexemes.RightParen, func() ast.NodeIndex {
-			return p.parseExpr(precLowest)
-		})...)
+		callArgs, spread := p.parseCallArgs()
+		args = append([]ast.NodeIndex{callee}, callArgs...)
+		spreadTok = spread
 	}
 	p.exprLev--
 	closeTok := p.expect(enums.Lexemes.RightParen)
@@ -457,7 +458,37 @@ func parseCallExpr(p *Parser, callee ast.NodeIndex) ast.NodeIndex {
 		Start: p.tree.SpanOf(callee).Start,
 		End:   closeTok.End,
 	}
-	return p.tree.NewNode(enums.NodeKinds.CallExpr, lexer.Token{}, span, args...)
+	return p.tree.NewNode(enums.NodeKinds.CallExpr, spreadTok, span, args...)
+}
+
+// parseCallArgs parses an ordinary call's comma-separated argument list, plus
+// the trailing spread form (`Join(",", parts...)` - see LANGUAGE.md's
+// "Variadic parameters" section): a `...` immediately after the LAST argument
+// marks a spread call, forwarding that argument's own slice value directly as
+// the variadic parameter rather than collecting a fresh one (see
+// ast.Node's own CallExpr doc comment and Tree.CallHasSpread). Bespoke rather
+// than parseCommaList, for the same reason parseMakeArgs already has its own
+// loop: `...` must only be recognized right after an argument, and only when
+// no further argument follows - parseCommaList's own per-element callback
+// shape has no way to express that. A `...` followed by another argument is
+// reported here and then simply treated as if no spread were written, so the
+// remaining arguments still parse normally.
+func (p *Parser) parseCallArgs() (args []ast.NodeIndex, spreadTok lexer.Token) {
+	for !p.at(enums.Lexemes.RightParen) && !p.at(enums.Lexemes.EOF) {
+		args = append(args, p.parseExpr(precLowest))
+		if tok, ok := p.accept(enums.Lexemes.DotDotDot); ok {
+			if _, ok := p.accept(enums.Lexemes.Comma); ok && !p.at(enums.Lexemes.RightParen) {
+				p.errorAtSpan(tok.Start, tok.End, "... (spread) is only legal after a call's last argument")
+				continue
+			}
+			spreadTok = tok
+			break
+		}
+		if _, ok := p.accept(enums.Lexemes.Comma); !ok {
+			break
+		}
+	}
+	return args, spreadTok
 }
 
 // isMakeCallee reports whether callee is a bare reference to the

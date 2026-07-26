@@ -805,8 +805,22 @@ func (c *checker) checkGenericCall(n, callee ast.NodeIndex, args []ast.NodeIndex
 
 	// Arity first: it's the same for every specialization, and a wrong count
 	// is a far more useful answer than the inference failure it would cause.
-	if want := len(gi.Tree.Children(gi.Tree.FuncParamList(gi.Decl))); len(args) != want {
-		c.errorAtNodes(args, n, "wrong number of arguments in call: got %d, want %d", len(args), want)
+	// A variadic template's own last parameter (`...T` - see LANGUAGE.md's
+	// "Variadic parameters" section) only ever demands a minimum, mirroring
+	// checkVariadicCallArgs' identical relaxation for an ordinary (non-
+	// generic) variadic call.
+	paramNodes := gi.Tree.Children(gi.Tree.FuncParamList(gi.Decl))
+	variadic := len(paramNodes) > 0 && gi.Tree.ParamIsVariadic(paramNodes[len(paramNodes)-1])
+	fixedCount := len(paramNodes)
+	if variadic {
+		fixedCount--
+	}
+	switch {
+	case variadic && len(args) < fixedCount:
+		c.errorAtNodes(args, n, "wrong number of arguments in call: got %d, want at least %d", len(args), fixedCount)
+		return invalidType, true
+	case !variadic && len(args) != fixedCount:
+		c.errorAtNodes(args, n, "wrong number of arguments in call: got %d, want %d", len(args), fixedCount)
 		return invalidType, true
 	}
 
@@ -898,6 +912,14 @@ func (c *checker) genericCallee(callee ast.NodeIndex) (gi *GenericInfo, explicit
 // argument's already-concrete type. A parameter appearing in no parameter
 // position at all (only in the return type, say) can't be inferred and needs
 // explicit instantiation instead.
+//
+// A variadic template's own last parameter (`...T` - see LANGUAGE.md's
+// "Variadic parameters" section) unifies its declared element-type node
+// against every trailing argument's own type individually (the collect
+// case), or against a spread argument's own []T element type alone (the
+// spread case, Tree.CallHasSpread) - either way, exactly the same two shapes
+// checkVariadicCallArgs checks an ordinary (non-generic) variadic call
+// against.
 func (c *checker) inferTypeArgs(gi *GenericInfo, argTypes []Type, at ast.NodeIndex) ([]Type, bool) {
 	u := &unifier{
 		tree:   gi.Tree,
@@ -913,11 +935,35 @@ func (c *checker) inferTypeArgs(gi *GenericInfo, argTypes []Type, at ast.NodeInd
 	}
 
 	paramNodes := gi.Tree.Children(gi.Tree.FuncParamList(gi.Decl))
-	for i, paramNode := range paramNodes {
+	variadic := len(paramNodes) > 0 && gi.Tree.ParamIsVariadic(paramNodes[len(paramNodes)-1])
+	fixedCount := len(paramNodes)
+	if variadic {
+		fixedCount--
+	}
+
+	unifyArg := func(i int) {
 		if i >= len(argTypes) || argTypes[i].IsInvalid() {
-			continue
+			return
 		}
-		u.unify(gi.Tree.Child(paramNode, 1), c.concreteArgType(argTypes[i]))
+		u.unify(gi.Tree.Child(paramNodes[i], 1), c.concreteArgType(argTypes[i]))
+	}
+	for i := range fixedCount {
+		unifyArg(i)
+	}
+	if variadic {
+		elemNode := gi.Tree.Child(paramNodes[fixedCount], 1)
+		if c.tree.CallHasSpread(at) && len(argTypes) > fixedCount {
+			last := argTypes[len(argTypes)-1]
+			if !last.IsInvalid() && last.Kind == TypeArray && last.Elem != nil {
+				u.unify(elemNode, c.concreteArgType(*last.Elem))
+			}
+		} else {
+			for i := fixedCount; i < len(argTypes); i++ {
+				if !argTypes[i].IsInvalid() {
+					u.unify(elemNode, c.concreteArgType(argTypes[i]))
+				}
+			}
+		}
 	}
 
 	if u.conflict != "" {

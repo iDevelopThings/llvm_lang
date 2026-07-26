@@ -26,35 +26,36 @@ const (
 	LexemeRightParen       Lexeme = 10
 	LexemeComma            Lexeme = 11
 	LexemeDot              Lexeme = 12
-	LexemeColon            Lexeme = 13
-	LexemeSemicolon        Lexeme = 14
-	LexemeEqual            Lexeme = 15
-	LexemeLessThan         Lexeme = 16
-	LexemeGreaterThan      Lexeme = 17
-	LexemeLessThanEqual    Lexeme = 18
-	LexemeGreaterThanEqual Lexeme = 19
-	LexemeNotEqual         Lexeme = 20
-	LexemeAnd              Lexeme = 21
-	LexemeOr               Lexeme = 22
-	LexemeNot              Lexeme = 23
-	LexemeQuestion         Lexeme = 24
-	LexemeLeftBracket      Lexeme = 25
-	LexemeRightBracket     Lexeme = 26
-	LexemeLeftBrace        Lexeme = 27
-	LexemeRightBrace       Lexeme = 28
-	LexemeColonEqual       Lexeme = 29
-	LexemeEqualEqual       Lexeme = 30
-	LexemeFatArrow         Lexeme = 31
-	LexemePlusPlus         Lexeme = 32
-	LexemeMinusMinus       Lexeme = 33
-	LexemePlusEqual        Lexeme = 34
-	LexemeMinusEqual       Lexeme = 35
-	LexemeAsteriskEqual    Lexeme = 36
-	LexemeSlashEqual       Lexeme = 37
-	LexemeAmpersand        Lexeme = 38
-	LexemePipe             Lexeme = 39
-	LexemeEOF              Lexeme = 40
-	LexemeIllegal          Lexeme = 41
+	LexemeDotDotDot        Lexeme = 13
+	LexemeColon            Lexeme = 14
+	LexemeSemicolon        Lexeme = 15
+	LexemeEqual            Lexeme = 16
+	LexemeLessThan         Lexeme = 17
+	LexemeGreaterThan      Lexeme = 18
+	LexemeLessThanEqual    Lexeme = 19
+	LexemeGreaterThanEqual Lexeme = 20
+	LexemeNotEqual         Lexeme = 21
+	LexemeAnd              Lexeme = 22
+	LexemeOr               Lexeme = 23
+	LexemeNot              Lexeme = 24
+	LexemeQuestion         Lexeme = 25
+	LexemeLeftBracket      Lexeme = 26
+	LexemeRightBracket     Lexeme = 27
+	LexemeLeftBrace        Lexeme = 28
+	LexemeRightBrace       Lexeme = 29
+	LexemeColonEqual       Lexeme = 30
+	LexemeEqualEqual       Lexeme = 31
+	LexemeFatArrow         Lexeme = 32
+	LexemePlusPlus         Lexeme = 33
+	LexemeMinusMinus       Lexeme = 34
+	LexemePlusEqual        Lexeme = 35
+	LexemeMinusEqual       Lexeme = 36
+	LexemeAsteriskEqual    Lexeme = 37
+	LexemeSlashEqual       Lexeme = 38
+	LexemeAmpersand        Lexeme = 39
+	LexemePipe             Lexeme = 40
+	LexemeEOF              Lexeme = 41
+	LexemeIllegal          Lexeme = 42
 )
 
 type LexemeContainer struct {
@@ -71,6 +72,7 @@ type LexemeContainer struct {
 	RightParen       Lexeme
 	Comma            Lexeme
 	Dot              Lexeme
+	DotDotDot        Lexeme
 	Colon            Lexeme
 	Semicolon        Lexeme
 	Equal            Lexeme
@@ -117,6 +119,7 @@ var Lexemes = LexemeContainer{
 	RightParen:       LexemeRightParen,
 	Comma:            LexemeComma,
 	Dot:              LexemeDot,
+	DotDotDot:        LexemeDotDotDot,
 	Colon:            LexemeColon,
 	Semicolon:        LexemeSemicolon,
 	Equal:            LexemeEqual,
@@ -220,6 +223,11 @@ var lexemeInfos = map[Lexeme]LexemeInfo{
 		Lexeme: LexemeDot,
 		Name:   "Dot",
 		Char:   ".",
+	},
+	LexemeDotDotDot: {
+		Lexeme: LexemeDotDotDot,
+		Name:   "DotDotDot",
+		Char:   "...",
 	},
 	LexemeColon: {
 		Lexeme: LexemeColon,
@@ -382,6 +390,7 @@ var lexemeValues = []Lexeme{
 	LexemeRightParen,
 	LexemeComma,
 	LexemeDot,
+	LexemeDotDotDot,
 	LexemeColon,
 	LexemeSemicolon,
 	LexemeEqual,
@@ -427,6 +436,7 @@ var lexemeByName = map[string]Lexeme{
 	"rightparen":       LexemeRightParen,
 	"comma":            LexemeComma,
 	"dot":              LexemeDot,
+	"dotdotdot":        LexemeDotDotDot,
 	"colon":            LexemeColon,
 	"semicolon":        LexemeSemicolon,
 	"equal":            LexemeEqual,

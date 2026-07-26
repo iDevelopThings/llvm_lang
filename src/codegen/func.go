@@ -48,8 +48,14 @@ func (g *Generator) declareFuncSignature(decl ast.NodeIndex) {
 			paramTypes = append(paramTypes, llvm.PointerType(g.enumValTy, 0))
 		}
 	}
+	// A Param node's own Info.Types entry (sema's declType), not its type
+	// child's - identical for an ordinary parameter, but for a variadic one
+	// (`...T` - see LANGUAGE.md's "Variadic parameters" section) the node's
+	// own entry is already the real, effective `[]T` (the child's own entry
+	// is still bare T) - so this needs no variadic-awareness of its own at
+	// all, the real point of that representation choice.
 	for _, paramNode := range g.tree.Children(paramListNode) {
-		paramTypes = append(paramTypes, g.llvmType(g.info.Types[g.tree.Child(paramNode, 1)]))
+		paramTypes = append(paramTypes, g.llvmType(g.info.Types[paramNode]))
 	}
 
 	retType := sema.Type{Kind: sema.TypeVoid}
@@ -166,7 +172,7 @@ func (g *Generator) declareExternFuncSignature(decl ast.NodeIndex) {
 		paramTypes = append(paramTypes, g.ptrTy)
 	}
 	for _, paramNode := range g.tree.Children(paramListNode) {
-		paramTypes = append(paramTypes, g.externParamType(g.info.Types[g.tree.Child(paramNode, 1)]))
+		paramTypes = append(paramTypes, g.externParamType(g.info.Types[paramNode]))
 	}
 
 	fnType := llvm.FunctionType(llvmRetType, paramTypes, false)
@@ -305,7 +311,7 @@ func (g *Generator) genFuncBody(decl ast.NodeIndex) {
 	}
 	for i, paramNode := range paramNodes {
 		psym := g.info.Refs[g.tree.Child(paramNode, 0)]
-		ptype := g.info.Types[g.tree.Child(paramNode, 1)]
+		ptype := g.info.Types[paramNode]
 		addr := g.allocLocalSlot(psym, g.llvmType(ptype), psym.Name)
 		g.builder.CreateStore(g.curFn.Param(offset+i), addr)
 		g.locals[psym] = addr
@@ -480,7 +486,7 @@ func (g *Generator) declareConstructorSignature(ctor ast.NodeIndex) {
 	paramTypes := make([]llvm.Type, 0, len(paramNodes)+1)
 	paramTypes = append(paramTypes, llvm.PointerType(layout.llvmType, 0))
 	for _, paramNode := range paramNodes {
-		paramTypes = append(paramTypes, g.llvmType(g.info.Types[g.tree.Child(paramNode, 1)]))
+		paramTypes = append(paramTypes, g.llvmType(g.info.Types[paramNode]))
 	}
 
 	fnType := llvm.FunctionType(g.voidTy, paramTypes, false)
@@ -512,7 +518,7 @@ func (g *Generator) genConstructorBody(ctor ast.NodeIndex) {
 
 	for i, paramNode := range g.tree.Children(paramListNode) {
 		psym := g.info.Refs[g.tree.Child(paramNode, 0)]
-		ptype := g.info.Types[g.tree.Child(paramNode, 1)]
+		ptype := g.info.Types[paramNode]
 		addr := g.allocLocalSlot(psym, g.llvmType(ptype), psym.Name)
 		g.builder.CreateStore(g.curFn.Param(1+i), addr)
 		g.locals[psym] = addr
@@ -621,7 +627,7 @@ func (g *Generator) declareOperatorSignature(op ast.NodeIndex) {
 	paramTypes := make([]llvm.Type, 0, len(paramNodes)+1)
 	paramTypes = append(paramTypes, llvm.PointerType(layout.llvmType, 0))
 	for _, paramNode := range paramNodes {
-		paramTypes = append(paramTypes, g.llvmType(g.info.Types[g.tree.Child(paramNode, 1)]))
+		paramTypes = append(paramTypes, g.llvmType(g.info.Types[paramNode]))
 	}
 
 	retType := g.info.Types[returnTypeNode]
@@ -650,7 +656,7 @@ func (g *Generator) genOperatorBody(op ast.NodeIndex) {
 
 	for i, paramNode := range g.tree.Children(paramListNode) {
 		psym := g.info.Refs[g.tree.Child(paramNode, 0)]
-		ptype := g.info.Types[g.tree.Child(paramNode, 1)]
+		ptype := g.info.Types[paramNode]
 		addr := g.allocLocalSlot(psym, g.llvmType(ptype), psym.Name)
 		g.builder.CreateStore(g.curFn.Param(1+i), addr)
 		g.locals[psym] = addr

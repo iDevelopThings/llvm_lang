@@ -38,11 +38,20 @@ func (t *Tree) OperatorSignatureText(decl NodeIndex, renderType func(NodeIndex) 
 
 // paramListSignatureText is the shared child-shape walk behind
 // FuncSignatureText/OperatorSignatureText: given a resolved paramList and
-// returnType child, render "(name Type, ...) Return".
+// returnType child, render "(name Type, ...) Return". A variadic last
+// parameter (`parts ...string` - see LANGUAGE.md's "Variadic parameters"
+// section) renders with its own leading `...`, matching source - renderType
+// itself only ever sees the declared element type node (T, not []T), so the
+// marker is prepended here rather than folded into whatever renderType
+// produces.
 func (t *Tree) paramListSignatureText(paramList, returnType NodeIndex, renderType func(NodeIndex) string) string {
 	var params []string
 	for _, p := range t.Children(paramList) {
-		params = append(params, t.Text(t.Child(p, 0))+" "+renderTypeNode(t.Child(p, 1), renderType))
+		prefix := ""
+		if t.ParamIsVariadic(p) {
+			prefix = "..."
+		}
+		params = append(params, t.Text(t.Child(p, 0))+" "+prefix+renderTypeNode(t.Child(p, 1), renderType))
 	}
 	sig := "(" + strings.Join(params, ", ") + ")"
 	if returnType != InvalidNode {
