@@ -170,10 +170,39 @@ func (g *Generator) declareExternFuncSignature(decl ast.NodeIndex) {
 	}
 
 	fnType := llvm.FunctionType(llvmRetType, paramTypes, false)
-	fn := llvm.AddFunction(g.mod, g.tree.Text(nameNode), fnType)
-	if sretReturn {
-		sretAttr := g.ctx.CreateTypeAttribute(llvm.AttributeKindID("sret"), g.llvmType(retType))
-		fn.AddAttributeAtIndex(1, sretAttr)
+	name := g.tree.Text(nameNode)
+
+	// Reuse an already-declared function of the same real linked name rather
+	// than ever adding a second declaration - LLVM would silently rename the
+	// second one (e.g. to "printf.1"), a symbol name the JIT's own absolute-
+	// symbol binding (keyed on the exact, unsuffixed name) can never resolve.
+	// This is the same precedent strlenExtern (runtime.go) already
+	// established for a compiler-synthesized extern; two user `extern func`
+	// declarations reaching codegen under the identical name is otherwise
+	// rare, but does happen when the same package is loaded into the
+	// program twice under two different import routes (see DECISIONS.md).
+	//
+	// A mismatched signature on the existing declaration means two extern
+	// funcs, from two different packages, name the exact same real symbol
+	// but disagree about its type - reusing it anyway would silently miscall
+	// whichever package's own call sites are built against the wrong
+	// funcType, worse than the old renamed-symbol behavior this replaces
+	// (that at least failed loudly at JIT time). Sema never checks this
+	// across packages, so it's a real, if rare, user-reachable case, not an
+	// internal invariant.
+	fn := g.mod.NamedFunction(name)
+	switch {
+	case fn.IsNil():
+		fn = llvm.AddFunction(g.mod, name, fnType)
+		if sretReturn {
+			sretAttr := g.ctx.CreateTypeAttribute(llvm.AttributeKindID("sret"), g.llvmType(retType))
+			fn.AddAttributeAtIndex(1, sretAttr)
+		}
+	case fn.GlobalValueType() != fnType:
+		panic(fmt.Sprintf(
+			"codegen: extern func %q declared with conflicting signatures across the program (%s vs %s)",
+			name, fn.GlobalValueType(), fnType,
+		))
 	}
 	g.funcs[sym] = funcEntry{
 		fn:         fn,

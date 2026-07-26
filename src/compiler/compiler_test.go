@@ -1,6 +1,7 @@
 package compiler
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -104,6 +105,132 @@ func main() int {
 	if len(res.Trees) != 2 {
 		t.Errorf("len(Trees) = %d, want 2", len(res.Trees))
 	}
+}
+
+// TestCompileProgram_DuplicateExternAcrossPackagesReusesOneDeclaration covers
+// two independent packages each declaring their own `extern func abs(...)` -
+// a perfectly legal, real-world shape (two unrelated packages happening to
+// bind the same libc symbol), unrelated to any one loader quirk. Before
+// declareExternFuncSignature's own NamedFunction reuse (codegen/func.go),
+// LLVM would silently rename the second declaration (e.g. "abs.1") - a
+// symbol name the JIT's absolute-symbol binding (keyed on the exact,
+// unsuffixed name) can never resolve, so it must never appear in the IR.
+func TestCompileProgram_DuplicateExternAcrossPackagesReusesOneDeclaration(t *testing.T) {
+	fs := afero.NewMemMapFs()
+	sep := string(filepath.Separator)
+	writeFile := func(path, src string) {
+		if err := afero.WriteFile(fs, path, []byte(src), 0o644); err != nil {
+			t.Fatalf("writing %s: %v", path, err)
+		}
+	}
+	writeFile(filepath.Join(sep, "prog", "liba", "liba.llx"), `
+extern func abs(x i32) i32
+
+func LibAAbs(x i32) i32 {
+	return abs(x)
+}
+`)
+	writeFile(filepath.Join(sep, "prog", "libb", "libb.llx"), `
+extern func abs(x i32) i32
+
+func LibBAbs(x i32) i32 {
+	return abs(x)
+}
+`)
+	writeFile(filepath.Join(sep, "prog", "app", "main.llx"), `
+import "../liba"
+import "../libb"
+
+func main() int {
+	return liba.LibAAbs(-5) + libb.LibBAbs(-3)
+}
+`)
+
+	prog, err := loader.LoadProgram(fs, filepath.Join(sep, "prog", "app"))
+	if err != nil {
+		t.Fatalf("LoadProgram: %v", err)
+	}
+
+	// Unoptimized: an optimizing pass recognizes abs() as the llvm.abs.i32
+	// intrinsic and can constant-fold the whole call away, which would hide
+	// the very declaration this test exists to check.
+	res := CompileProgram(prog, false)
+	t.Cleanup(func() {
+		if res.Module != nil {
+			res.Module.Dispose()
+			res.TargetMachine.Dispose()
+		}
+	})
+	if res.Module == nil {
+		t.Fatalf("Module = nil, want a real module; VerifyErr = %v, diags = %v", res.VerifyErr, dumpDiags(res))
+	}
+
+	ir := res.Module.LLVM.String()
+	if strings.Contains(ir, "@abs.1") || strings.Contains(ir, `"abs.1"`) {
+		t.Errorf("extern symbol collision regressed - a second, renamed @abs declaration exists:\n%s", ir)
+	}
+	if got := strings.Count(ir, "declare i32 @abs(i32)"); got != 1 {
+		t.Errorf("declare i32 @abs(i32) appears %d times, want exactly 1:\n%s", got, ir)
+	}
+}
+
+// TestCompileProgram_ConflictingExternSignaturesAcrossPackagesPanics covers
+// the boundary declareExternFuncSignature's own NamedFunction reuse
+// (codegen/func.go) must NOT silently paper over: two packages naming the
+// same real symbol ("abs") with two different, genuinely conflicting
+// signatures. Blindly reusing the first declaration here (instead of
+// checking GlobalValueType against the freshly computed signature) would
+// silently miscompile whichever package's own call sites are built against
+// the wrong funcType - worse than the pre-fix behavior (a renamed symbol
+// that at least failed loudly at JIT time). This must panic instead.
+func TestCompileProgram_ConflictingExternSignaturesAcrossPackagesPanics(t *testing.T) {
+	fs := afero.NewMemMapFs()
+	sep := string(filepath.Separator)
+	writeFile := func(path, src string) {
+		if err := afero.WriteFile(fs, path, []byte(src), 0o644); err != nil {
+			t.Fatalf("writing %s: %v", path, err)
+		}
+	}
+	writeFile(filepath.Join(sep, "prog", "liba", "liba.llx"), `
+extern func abs(x i32) i32
+
+func LibAAbs(x i32) i32 {
+	return abs(x)
+}
+`)
+	writeFile(filepath.Join(sep, "prog", "libb", "libb.llx"), `
+extern func abs(x f64) f64
+
+func LibBAbs(x f64) f64 {
+	return abs(x)
+}
+`)
+	writeFile(filepath.Join(sep, "prog", "app", "main.llx"), `
+import "../liba"
+import "../libb"
+
+func main() int {
+	return liba.LibAAbs(-5) + int(libb.LibBAbs(3.0))
+}
+`)
+
+	prog, err := loader.LoadProgram(fs, filepath.Join(sep, "prog", "app"))
+	if err != nil {
+		t.Fatalf("LoadProgram: %v", err)
+	}
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("want a panic on conflicting extern signatures, got none")
+		}
+		msg := fmt.Sprint(r)
+		if !strings.Contains(msg, "conflicting signatures") {
+			t.Errorf("panic message = %q, want it to mention conflicting signatures", msg)
+		}
+	}()
+	CompileProgram(prog, false)
+	t.Fatal("CompileProgram returned normally, want a panic before this point")
 }
 
 // TestCompilePackage_ParseError covers a real syntax error: Module must be

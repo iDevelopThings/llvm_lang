@@ -234,6 +234,31 @@ func TestBinary_TestMode_AssertCoverage(t *testing.T) {
 	}
 }
 
+// TestBinary_TestMode_StdTimeSelfImport is a regression test for a real
+// crash: `-test std/time` used to fail with "Symbols not found:
+// [QueryPerformanceFrequency.N, QueryPerformanceCounter.N]" - std/test's own
+// Runner/Suite import std:time for their duration helpers, so testing
+// std/time directly loaded that same package twice (once as the entry
+// package, once via std:test's own std:time import) and codegen emitted a
+// second, LLVM-renamed declaration of the same real extern symbol (see
+// DECISIONS.md's dated entry, and declareExternFuncSignature's own
+// NamedFunction reuse, func.go).
+func TestBinary_TestMode_StdTimeSelfImport(t *testing.T) {
+	dir := filepath.Join("..", "..", "std", "time")
+	out, err := exec.Command(llvmcPath, "-test", dir).CombinedOutput()
+	if err != nil {
+		t.Fatalf("llvmc -test std/time: %v\nout:\n%s", err, out)
+	}
+	got := string(out)
+	if strings.Contains(got, "Symbols not found") {
+		t.Errorf("extern symbol collision regressed; out:\n%s", got)
+	}
+	lines := strings.Split(strings.TrimRight(got, "\r\n"), "\n")
+	if !slices.Contains(lines, "PASS") {
+		t.Errorf("missing overall PASS summary line; out:\n%s", got)
+	}
+}
+
 // TestRun_TestMode_StdRootNotConfigured confirms a clean error (not a
 // panic) when no standard library location is available at all - the
 // synthesized driver's own "std:test" import (see synthesizeTestDriver)

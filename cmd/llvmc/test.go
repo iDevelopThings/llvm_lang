@@ -84,17 +84,22 @@ func synthesizeTestDriver(tests []discoveredTest) string {
 	b.WriteString("import \"std:test\"\n\n")
 	b.WriteString("func main() int {\n")
 	b.WriteString("    failed := 0\n\n")
+	b.WriteString("    suite := test.NewSuite()\n")
+
 	for i, t := range tests {
 		r := fmt.Sprintf("r%d", i)
 		fmt.Fprintf(&b, "    %s := test.NewRunner(%q)\n", r, t.name)
 		fmt.Fprintf(&b, "    %s(%s)\n", t.name, r)
 		fmt.Fprintf(&b, "    if %s.Failed() {\n", r)
-		fmt.Fprintf(&b, "        print(\"--- FAIL: %s\")\n", t.name)
+		fmt.Fprintf(&b, "        print(\"--- FAIL: %s\" + \" (\" + %s.DurationStr() + \")\")\n", t.name, r)
 		b.WriteString("        failed = failed + 1\n")
 		b.WriteString("    } else {\n")
-		fmt.Fprintf(&b, "        print(\"--- PASS: %s\")\n", t.name)
+		fmt.Fprintf(&b, "        print(\"--- PASS: %s\" + \" (\" + %s.DurationStr() + \")\")\n", t.name, r)
 		b.WriteString("    }\n\n")
 	}
+
+	b.WriteString("    print(\"=== TESTS DONE: \" + suite.DurationStr())\n")
+
 	b.WriteString("    if failed > 0 {\n")
 	b.WriteString("        print(\"FAIL\")\n")
 	b.WriteString("        return 1\n")

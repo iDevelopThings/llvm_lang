@@ -242,9 +242,9 @@ func IntToString(n int) string {
     return result
 }
 
-// F64ToString renders x as a fixed-precision decimal string with always
-// exactly 4 digits after the decimal point (e.g. "3.1416", "-1.5000",
-// "0.0000") - a deliberately simple fixed-precision format, not a general
+// F64ToStringPrecision renders x as a fixed-precision decimal string with
+// exactly `decimals` digits after the decimal point (`decimals` must be >=
+// 1) - a deliberately simple fixed-precision format, not a general
 // shortest-round-tripping float formatter (Go's own strconv.FormatFloat
 // with a real precision/rounding-mode search is a lot more machinery than
 // is worth building for this round - see AGENTS.md's task description for
@@ -258,28 +258,36 @@ func IntToString(n int) string {
 // exactly like floor for a non-negative operand, so there's no reason to
 // reach for std/mathutil's own Floor for this.
 //
-// Rounding to 4 decimal places is the classic "add half a unit in the last
-// place, then truncate" trick (`frac*10000.0 + 0.5`, then i32(...) to
+// Rounding to `decimals` places is the classic "add half a unit in the last
+// place, then truncate" trick (`frac*scale + 0.5`, then i32(...) to
 // truncate) - which can occasionally round the fractional part up to
-// exactly 10000 (e.g. x very slightly below the next whole number), so
+// exactly `scale` (e.g. x very slightly below the next whole number), so
 // that's detected and carried into the integer part explicitly afterwards.
-func F64ToString(x f64) string {
+func F64ToStringPrecision(x f64, decimals int) string {
     negative := x < 0.0
     v := x
     if negative {
         v = -v
     }
 
+    scale := 1.0
+    i := 0
+    for i < decimals {
+        scale = scale * 10.0
+        i = i + 1
+    }
+
     intPart := i32(v)
     frac := v - f64(intPart)
-    scaled := i32(frac * 10000.0 + 0.5)
-    if scaled >= 10000 {
-        scaled = scaled - 10000
+    scaled := i32(frac*scale + 0.5)
+    maxScaled := i32(scale)
+    if scaled >= maxScaled {
+        scaled = scaled - maxScaled
         intPart = intPart + 1
     }
 
     fracStr := IntToString(scaled)
-    for len(fracStr) < 4 {
+    for len(fracStr) < decimals {
         fracStr = "0" + fracStr
     }
 
@@ -288,4 +296,28 @@ func F64ToString(x f64) string {
         result = "-" + result
     }
     return result
+}
+
+// F64ToString is F64ToStringPrecision with decimals fixed to 4 (e.g.
+// "3.1416", "-1.5000", "0.0000") - this package's original, still most
+// common formatting need.
+func F64ToString(x f64) string {
+    return F64ToStringPrecision(x, 4)
+}
+
+tests {
+    import "std:test"
+
+    func TestF64ToStringUnchanged(t *test.Runner) {
+        t.AssertEqual(F64ToString(3.14159), "3.1416", "still 4 decimals")
+        t.AssertEqual(F64ToString(-1.5), "-1.5000", "negative still 4 decimals")
+        t.AssertEqual(F64ToString(0.0), "0.0000", "zero still 4 decimals")
+    }
+
+    func TestF64ToStringPrecisionRounds(t *test.Runner) {
+        t.AssertEqual(F64ToStringPrecision(3.14159, 2), "3.14", "truncates extra digits")
+        t.AssertEqual(F64ToStringPrecision(1.5, 2), "1.50", "keeps a trailing zero")
+        t.AssertEqual(F64ToStringPrecision(-1.5, 2), "-1.50", "negative")
+        t.AssertEqual(F64ToStringPrecision(0.999996, 4), "1.0000", "rounds up into the integer part")
+    }
 }

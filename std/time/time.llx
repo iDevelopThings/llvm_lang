@@ -21,6 +21,8 @@
 // "compute once, remember you already did" lazy-init check on every single
 // Now()/ElapsedSeconds() call.
 
+import "std:strings"
+
 extern func QueryPerformanceCounter(counter *i64) bool
 extern func QueryPerformanceFrequency(freq *i64) bool
 
@@ -51,4 +53,58 @@ func Now() i64 {
 func ElapsedSeconds(startTicks i64) f64 {
     elapsedTicks := Now() - startTicks
     return f64(elapsedTicks) / f64(frequency)
+}
+
+// FormattedDuration renders a duration in seconds (as ElapsedSeconds
+// returns) as a short human-readable string, picking whichever of
+// ns/us/ms/s keeps the shown number in roughly the 1-999 range (e.g.
+// "230.00us", "1.50s") rather than always printing a tiny/huge count of
+// seconds.
+func FormattedDuration(seconds f64) string {
+    negative := seconds < 0.0
+    v := seconds
+    if negative {
+        v = -v
+    }
+
+    unit := "s"
+    scaled := v
+    if v < 0.000001 {
+        unit = "ns"
+        scaled = v * 1000000000.0
+    } else if v < 0.001 {
+        unit = "us"
+        scaled = v * 1000000.0
+    } else if v < 1.0 {
+        unit = "ms"
+        scaled = v * 1000.0
+    }
+
+    result := strings.F64ToStringPrecision(scaled, 2) + unit
+    if negative {
+        result = "-" + result
+    }
+    return result
+}
+
+tests {
+    import "std:test"
+
+    func TestFormattedDurationPicksUnit(t *test.Runner) {
+        t.AssertEqual(FormattedDuration(0.0000000005), "0.50ns", "sub-microsecond -> ns")
+        t.AssertEqual(FormattedDuration(0.00000123), "1.23us", "microsecond range")
+        t.AssertEqual(FormattedDuration(0.0015), "1.50ms", "millisecond range")
+        t.AssertEqual(FormattedDuration(1.5), "1.50s", "second range")
+        t.AssertEqual(FormattedDuration(0.0), "0.00ns", "zero")
+    }
+
+    func TestFormattedDurationBoundaries(t *test.Runner) {
+        t.AssertEqual(FormattedDuration(0.000001), "1.00us", "exactly 1us, not 1000.00ns")
+        t.AssertEqual(FormattedDuration(0.001), "1.00ms", "exactly 1ms, not 1000.00us")
+        t.AssertEqual(FormattedDuration(1.0), "1.00s", "exactly 1s, not 1000.00ms")
+    }
+
+    func TestFormattedDurationNegative(t *test.Runner) {
+        t.AssertEqual(FormattedDuration(-1.5), "-1.50s", "negative duration keeps its sign")
+    }
 }

@@ -4,13 +4,23 @@
 // use `if !t.Assert(...) { return }` to stop a test early.
 // Values are never auto-formatted into messages - pass any detail in msg.
 
+import "std:time"
+import "std:strings"
+
 struct Runner {
     name   string
     failed bool
+    startTime i64
+
+    constructor(name string) {
+        this.name = name
+        this.failed = false
+        this.startTime = time.Now()
+    }
 }
 
 func NewRunner(name string) *Runner {
-    return new Runner{name, false}
+    return new Runner(name)
 }
 
 func (Runner) Name() string {
@@ -19,6 +29,32 @@ func (Runner) Name() string {
 
 func (Runner) Failed() bool {
     return this.failed
+}
+
+func (Runner) Duration() f64 {
+    return time.ElapsedSeconds(this.startTime)
+}
+func (Runner) DurationStr() string {
+    dur := this.Duration()
+    return time.FormattedDuration(dur)
+}
+
+// Suite tracks a whole -test run's elapsed time, the same way Runner tracks
+// one test's own - so the synthesized driver (cmd/llvmc/test.go) only ever
+// needs "std:test", never "std:time" directly. That matters beyond just
+// convenience: the driver is written into whichever package is actually
+// under test, so a direct "std:time" import there would make `llvmc -test
+// std/time` import std:time from inside std/time itself.
+struct Suite {
+    startTime i64
+}
+
+func NewSuite() *Suite {
+    return new Suite{time.Now()}
+}
+
+func (Suite) DurationStr() string {
+    return time.FormattedDuration(time.ElapsedSeconds(this.startTime))
 }
 
 func (Runner) Assert(cond bool, msg string) bool {
