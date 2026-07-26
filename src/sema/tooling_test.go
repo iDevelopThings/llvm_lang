@@ -1,6 +1,11 @@
 package sema
 
-import "testing"
+import (
+	"testing"
+
+	"llvm_lang/src/ast"
+	"llvm_lang/src/enums"
+)
 
 func TestResolveTemplateForTooling_GenericFunc_NeverInstantiated(t *testing.T) {
 	tree, info := checkSrc(t, "func Sum[T](a T, b T) T {\n\treturn a + b\n}\n")
@@ -51,6 +56,54 @@ func TestResolveTemplateForTooling_GenericStruct_FieldsAndMethod(t *testing.T) {
 	// body resolved at all instead by checking its own Scope was recorded.
 	if _, ok := shadowMethod.Scopes[methodDecl]; !ok {
 		t.Error("method template got no Scopes entry - resolveFuncBody did not run")
+	}
+}
+
+// TestResolveTemplateForTooling_GenericStruct_OperatorBody covers the
+// operator-overload counterpart to the constructor/destructor bodies
+// resolveStructTemplateForTooling already resolves (tooling.go) - a
+// generic struct's own `operator` block, hovered/completed before any
+// instantiation exists, must resolve `this` the same way a method's does.
+func TestResolveTemplateForTooling_GenericStruct_OperatorBody(t *testing.T) {
+	tree, info := checkSrc(t, "struct Box[T] {\n\tvalue T\n\n"+
+		"\toperator +(delta f64) f64 {\n\t\treturn this.value\n\t}\n"+
+		"}\n")
+	structDecl := tree.Children(tree.Root)[0]
+
+	var opDecl ast.NodeIndex
+	for op := range tree.StructOperators(structDecl) {
+		opDecl = op
+		break
+	}
+	if opDecl == ast.InvalidNode {
+		t.Fatal("no OperatorDecl found on the struct template")
+	}
+
+	shadow := ResolveTemplateForTooling(tree, info, structDecl)
+	if shadow == nil {
+		t.Fatal("ResolveTemplateForTooling returned nil for the struct template")
+	}
+	if _, ok := shadow.Scopes[opDecl]; !ok {
+		t.Error("operator template got no Scopes entry - resolveOperatorBody did not run")
+	}
+
+	// "this.value" is a MemberExpr, not a plain Ident (its own field-name
+	// token lives directly on the MemberExpr node itself - see ast.Node's
+	// doc comment) - so, unlike the field/method test above, this walks for
+	// the MemberExpr node by text rather than using FindIdentByText.
+	var thisValue ast.NodeIndex
+	for n := range tree.Descendants(opDecl) {
+		if tree.Nodes[n].Kind == enums.NodeKinds.MemberExpr && tree.Text(n) == "value" {
+			thisValue = n
+			break
+		}
+	}
+	if thisValue == ast.InvalidNode {
+		t.Fatal("no this.value MemberExpr found inside the operator body")
+	}
+	sym, ok := shadow.Refs[thisValue]
+	if !ok || sym == nil || sym.Kind != SymField {
+		t.Fatalf("this.value inside the operator body Refs = %+v (ok=%v), want a SymField", sym, ok)
 	}
 }
 

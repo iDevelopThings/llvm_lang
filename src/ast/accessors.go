@@ -140,6 +140,41 @@ func (t *Tree) ConstructorBody(ctor NodeIndex) NodeIndex {
 	return t.Child(ctor, 1)
 }
 
+// StructOperators yields decl's (a StructDecl's) OperatorDecl children, in
+// declaration order - the operator-overload counterpart to
+// StructConstructors (see LANGUAGE.md's "Operator overloading" section).
+func (t *Tree) StructOperators(decl NodeIndex) iter.Seq[NodeIndex] {
+	return func(yield func(NodeIndex) bool) {
+		for _, c := range t.Children(decl)[structMemberStart:] {
+			if t.Nodes[c].Kind != enums.NodeKinds.OperatorDecl {
+				continue
+			}
+			if !yield(c) {
+				return
+			}
+		}
+	}
+}
+
+// OperatorParamList returns op's (an OperatorDecl's) ParamList child - see
+// Node's own OperatorDecl doc comment for the [paramList, returnType, body]
+// shape these three accessors index into. Empty for the unary form.
+func (t *Tree) OperatorParamList(op NodeIndex) NodeIndex {
+	return t.Child(op, 0)
+}
+
+// OperatorReturnType returns op's (an OperatorDecl's) declared return-type
+// child - always present (parseOperatorDecl requires one), unlike
+// ConstructorParamList/DestructorParamList's shared shape, which has none.
+func (t *Tree) OperatorReturnType(op NodeIndex) NodeIndex {
+	return t.Child(op, 1)
+}
+
+// OperatorBody returns op's (an OperatorDecl's) body child.
+func (t *Tree) OperatorBody(op NodeIndex) NodeIndex {
+	return t.Child(op, 2)
+}
+
 // StructDestructors yields decl's (a StructDecl's) DestructorDecl children,
 // in declaration order - the destructor-kind counterpart to
 // StructConstructors (see LANGUAGE.md's "Destructors" section). A struct is

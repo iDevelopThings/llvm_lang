@@ -318,6 +318,16 @@ type Generator struct {
 	// func.go.
 	ctors map[*sema.Symbol]funcEntry
 
+	// operators is ctors' operator-overload-kind counterpart (see
+	// LANGUAGE.md's "Operator overloading" section) - keyed by the
+	// overload's own Symbol (sema.SymOperator), exactly like ctors: a
+	// resolved use may be any one of several overloads sharing a struct and
+	// token, distinguished by declared parameter type, so (unlike dtors) the
+	// call site's own resolved Symbol - not just the struct - identifies
+	// which one. Populated by declareOperatorSignature, read by
+	// genOperatorCall - see func.go/expr.go.
+	operators map[*sema.Symbol]funcEntry
+
 	// dtors is ctors' destructor-kind counterpart (see LANGUAGE.md's
 	// "Destructors" section) - keyed directly by *sema.StructInfo rather
 	// than by a destructor's own *sema.Symbol (sema.SymDestructor): unlike a
@@ -658,6 +668,7 @@ func GeneratePackage(trees []*ast.Tree, infos map[*ast.Tree]*sema.Info, moduleNa
 		globals:       make(map[*sema.Symbol]llvm.Value),
 		funcs:         make(map[*sema.Symbol]funcEntry),
 		ctors:         make(map[*sema.Symbol]funcEntry),
+		operators:     make(map[*sema.Symbol]funcEntry),
 		dtors:         make(map[*sema.StructInfo]funcEntry),
 		enumDtors:     make(map[*sema.EnumInfo]funcEntry),
 		strLiterals:   make(map[string]llvm.Value),
@@ -770,6 +781,9 @@ func (g *Generator) genPackage(trees []*ast.Tree) {
 			for dtor := range tree.StructDestructors(d) {
 				g.declareDestructorSignature(dtor)
 			}
+			for op := range tree.StructOperators(d) {
+				g.declareOperatorSignature(op)
+			}
 		}
 		for d := range g.declsOfKind(enums.NodeKinds.EnumDecl) {
 			for dtor := range tree.EnumDestructors(d) {
@@ -788,6 +802,9 @@ func (g *Generator) genPackage(trees []*ast.Tree) {
 			}
 			for dtor := range tree.StructDestructors(d) {
 				g.genDestructorBody(dtor)
+			}
+			for op := range tree.StructOperators(d) {
+				g.genOperatorBody(op)
 			}
 		}
 		for d := range g.declsOfKind(enums.NodeKinds.EnumDecl) {

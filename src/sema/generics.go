@@ -587,6 +587,7 @@ func (c *checker) instantiateStruct(gi *GenericInfo, args []Type, at ast.NodeInd
 		Fields:       make(map[string]*Symbol),
 		Methods:      make(map[string]*Symbol),
 		Constructors: make(map[int]*Symbol),
+		Operators:    make(map[string]*OperatorSet),
 		Generic:      gi,
 		TypeArgs:     args,
 	}
@@ -618,6 +619,9 @@ func (c *checker) instantiateStruct(gi *GenericInfo, args []Type, at ast.NodeInd
 	}
 	for dtor := range tree.StructDestructors(clone) {
 		r.resolveDestructorBody(scope, si, dtor)
+	}
+	for op := range tree.StructOperators(clone) {
+		r.resolveOperatorBody(scope, si, op)
 	}
 	computeCapturesFrom(tree, info, c.diags, firstNode)
 	info.Specializations = append(info.Specializations, clone)

@@ -84,8 +84,8 @@ func resolveTemplateForTooling(tree *ast.Tree, real *Info, decl ast.NodeIndex, s
 }
 
 // resolveStructTemplateForTooling resolves decl's own field types and every
-// constructor/destructor body - mirroring instantiateStruct's own recipe
-// (generics.go) minus the clone, minus Check, and minus writing the
+// constructor/destructor/operator body - mirroring instantiateStruct's own
+// recipe (generics.go) minus the clone, minus Check, and minus writing the
 // throwaway StructInfo anywhere real code could find it. decl's own name
 // Symbol already exists in real.Refs (declareStruct always runs, even for a
 // template - see its own doc comment) and is reused directly rather than
@@ -106,6 +106,10 @@ func resolveStructTemplateForTooling(r *resolver, real *Info, tree *ast.Tree, de
 	for dtor := range tree.StructDestructors(decl) {
 		r.resolveDestructorBody(scope, si, dtor)
 		resolveThisMemberAccesses(r, tree, tree.DestructorBody(dtor), si)
+	}
+	for op := range tree.StructOperators(decl) {
+		r.resolveOperatorBody(scope, si, op)
+		resolveThisMemberAccesses(r, tree, tree.OperatorBody(op), si)
 	}
 }
 
@@ -132,6 +136,7 @@ func shadowStructInfo(r *resolver, gi *GenericInfo, shadowStructs map[string]*St
 		Fields:       make(map[string]*Symbol),
 		Methods:      make(map[string]*Symbol),
 		Constructors: make(map[int]*Symbol),
+		Operators:    make(map[string]*OperatorSet),
 	}
 	r.declareStructMembers(si, gi.Decl)
 	for _, gm := range gi.Methods {

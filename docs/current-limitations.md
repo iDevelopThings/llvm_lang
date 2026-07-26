@@ -13,6 +13,10 @@ This is a quick list of deliberate limits, not a roadmap.
 - A struct field or method may be named with a reserved word (`move`,
   `new`, ...), but a keyed composite literal can't construct it that way
   (`Point{move: 1}`) - use a positional literal instead.
+- Operator overloading only covers binary `+ - * /` and unary `-`; `==`,
+  `!=`, comparisons, bitwise, and logical operators are not overloadable.
+  Only the left operand is ever checked for a matching overload - `scalar *
+  vector` (the struct on the right) does not work, only `vector * scalar`.
 
 ## Collections
 

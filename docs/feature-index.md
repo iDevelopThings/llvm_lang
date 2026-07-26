@@ -32,6 +32,7 @@ short; this index makes the less-common features easy to find.
 | --- | --- | --- |
 | Structs, methods, and composite literals | [Structs](structs-enums-and-match.md#structs) | [`features`](../examples/features/features.llx) |
 | Constructors | [Constructors](structs-enums-and-match.md#constructors) | [`constructors`](../examples/constructors/constructors.llx) |
+| Operator overloading (`+ - * /`, unary `-`) | [Operator overloading](structs-enums-and-match.md#operator-overloading) | [`operators`](../examples/operators/operators.llx) |
 | Destructors and automatic scope cleanup | [Destructors](memory-and-pointers.md#destructors) | [`destructors`](../examples/destructors/destructors.llx) |
 | Non-copyable types and `move` | [Ownership and move](memory-and-pointers.md#move-semantics) | — |
 | Pointers, `nil`, `new`, and `delete` | [Pointers](memory-and-pointers.md#pointers) | [`pointers`](../examples/pointers/pointers.llx) |

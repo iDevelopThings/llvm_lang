@@ -446,6 +446,54 @@ func (c *checker) checkStructDecl(decl ast.NodeIndex) {
 	for dtor := range c.tree.StructDestructors(decl) {
 		c.checkDestructorDecl(dtor)
 	}
+	for op := range c.tree.StructOperators(decl) {
+		c.checkOperatorDecl(op)
+	}
+	c.checkOperatorOverloadDuplicates(decl)
+}
+
+// checkOperatorOverloadDuplicates re-checks decl's own binary operator
+// overloads (see LANGUAGE.md's "Operator overloading" section) for a
+// duplicate the Resolve-time textual check (declareOperator's own
+// ParamTypeText comparison, resolve.go) cannot see: two overloads of the
+// same token whose declared parameter types are only spelled differently
+// but are the exact same real Type - `int` and `i32` being the same
+// underlying Type is the concrete case (see LANGUAGE.md's "Numeric types"
+// section) - since Resolve runs before any Type is computable at all. This
+// runs once every real declared parameter Type is available (operatorSigForDecl,
+// already computed and cached by checkOperatorDecl's own pass just above),
+// comparing every pair sharing a token via the real Type.Equal, not text.
+//
+// Unary overloads need no such re-check: a duplicate there has no parameter
+// type to even be ambiguous about (declareOperator's own arity-only
+// "already has a unary operator" check is already exact).
+func (c *checker) checkOperatorOverloadDuplicates(decl ast.NodeIndex) {
+	type binaryOverload struct {
+		typ Type
+		op  ast.NodeIndex
+	}
+	byToken := make(map[string][]binaryOverload)
+	for op := range c.tree.StructOperators(decl) {
+		paramNodes := c.tree.Children(c.tree.OperatorParamList(op))
+		if len(paramNodes) != 1 {
+			continue
+		}
+		tok := c.tree.Text(op)
+		sig := c.operatorSigForDecl(op)
+		byToken[tok] = append(byToken[tok], binaryOverload{typ: sig.Params[0], op: op})
+	}
+	for _, overloads := range byToken {
+		for i := 1; i < len(overloads); i++ {
+			for j := 0; j < i; j++ {
+				if !overloads[i].typ.Equal(overloads[j].typ) {
+					continue
+				}
+				structName := c.info.Refs[overloads[i].op].StructInfo.Symbol.Name
+				c.errorAt(overloads[i].op, "struct %s already has an operator %s overload taking %s", structName, c.tree.Text(overloads[i].op), overloads[i].typ)
+				break
+			}
+		}
+	}
 }
 
 // checkEnumDecl type-checks decl's (an EnumDecl's) own variants - populating
@@ -653,6 +701,47 @@ func (c *checker) checkDestructorDecl(dtor ast.NodeIndex) {
 	c.checkBlock(body)
 	restoreMove()
 	c.curFunc = prevFunc
+}
+
+// checkOperatorDecl type-checks one `operator OP(param) RetType {...}`
+// block's params, declared return type, and body (see LANGUAGE.md's
+// "Operator overloading" section) - mirroring checkFuncDecl's own shape,
+// minus the receiver/generator/async concerns a free function/method can
+// have: an operator overload always declares a real return type, so
+// hasReturn is always true and a missing "missing return" is checked
+// exactly like an ordinary function's.
+func (c *checker) checkOperatorDecl(op ast.NodeIndex) {
+	sig := c.operatorSigForDecl(op)
+	body := c.tree.OperatorBody(op)
+
+	prevFunc := c.curFunc
+	c.curFunc = &enclosingFunc{
+		hasReturn: true,
+		ret:       sig.Return,
+	}
+	restoreMove := c.enterFuncBody()
+	c.checkBlock(body)
+	restoreMove()
+	if !isTerminatingStmt(c.tree, c.info, body) {
+		c.errorAt(op, "missing return")
+	}
+	c.curFunc = prevFunc
+}
+
+// operatorSigForDecl returns op's (an OperatorDecl's) signature - its
+// declared parameter type(s) and its own real declared return type, unlike
+// constructorSigForDecl's synthetic "returns the struct" one - computed and
+// cached on first use, reusing c.funcSigs exactly like
+// constructorSigForDecl does (an OperatorDecl's own NodeIndex never
+// collides with a FuncDecl's or ConstructorDecl's - see nodeRef).
+func (c *checker) operatorSigForDecl(op ast.NodeIndex) funcSignature {
+	key := nodeRef{c.tree, op}
+	if sig, ok := c.funcSigs[key]; ok {
+		return sig
+	}
+	sig := c.buildSigFromParamListAndReturnType(c.tree.OperatorParamList(op), c.tree.OperatorReturnType(op), nil)
+	c.funcSigs[key] = sig
+	return sig
 }
 
 func (c *checker) checkFuncDecl(decl ast.NodeIndex) {
@@ -3814,11 +3903,20 @@ func (c *checker) checkUnaryExpr(n ast.NodeIndex) Type {
 	}
 	switch op {
 	case "-":
-		if !t.IsNumeric() {
-			c.errorAt(n, "operator - not defined for %s", t)
-			return invalidType
+		if t.IsNumeric() {
+			return t
 		}
-		return t
+		// Fallback path (see LANGUAGE.md's "Operator overloading" section):
+		// tried only once the existing numeric rule above already failed to
+		// claim n. A struct with no unary `-` overload of its own falls
+		// through unclaimed, to the exact same diagnostic below a
+		// non-numeric, non-struct operand already got before this feature
+		// existed - the regression case LANGUAGE.md documents explicitly.
+		if result, ok := c.checkUnaryOperatorOverload(n, t, op); ok {
+			return result
+		}
+		c.errorAt(n, "operator - not defined for %s", t)
+		return invalidType
 	case "!":
 		if t.Kind != TypeBool {
 			c.errorAt(n, "operator ! not defined for %s", t)
@@ -4016,11 +4114,37 @@ func (c *checker) checkBinaryExpr(n ast.NodeIndex) Type {
 		if result, ok := c.checkNumericBinary(lNode, rNode, lt, rt, false); ok {
 			return result
 		}
+		// Fallback path (see LANGUAGE.md's "Operator overloading" section):
+		// tried only once the existing string/numeric rules above already
+		// failed to claim n - an operator overload never replaces either,
+		// it's a new case tried after both.
+		if result, ok := c.checkBinaryOperatorOverload(n, rNode, lt, rt, op); ok {
+			return result
+		}
+		if lt.Kind == TypeStruct {
+			c.errorAt(n, "no operator + overload on %s for argument type %s", lt, rt)
+			return invalidType
+		}
 		c.errorAt(n, "operator + not defined for %s and %s", lt, rt)
 		return invalidType
 	case "-", "*", "/":
 		if result, ok := c.checkNumericBinary(lNode, rNode, lt, rt, false); ok {
 			return result
+		}
+		if result, ok := c.checkBinaryOperatorOverload(n, rNode, lt, rt, op); ok {
+			return result
+		}
+		// A struct LHS with no matching overload gets its own wording naming
+		// the actual problem (see LANGUAGE.md) - reusing the "requires
+		// numeric operands" wording below would misdescribe why this
+		// genuinely failed. A non-struct LHS (including the reverse,
+		// scalar-on-the-left case, `2.0 * v` - see LANGUAGE.md's "left-
+		// operand-only dispatch" note) keeps that existing wording
+		// unchanged: from this check's own perspective, it's simply not
+		// numeric, exactly as before this feature existed.
+		if lt.Kind == TypeStruct {
+			c.errorAt(n, "no operator %s overload on %s for argument type %s", op, lt, rt)
+			return invalidType
 		}
 		c.errorAt(n, "operator %s requires numeric operands, got %s and %s", op, lt, rt)
 		return invalidType
@@ -4043,6 +4167,98 @@ func (c *checker) checkBinaryExpr(n ast.NodeIndex) Type {
 	default:
 		return invalidType
 	}
+}
+
+// checkUnaryOperatorOverload resolves n (a UnaryExpr for operator op)
+// against t's own declared unary `operator op()` overload, if t is a struct
+// declaring one (see LANGUAGE.md's "Operator overloading" section) -
+// checkUnaryExpr's own fallback, tried only once the existing numeric rule
+// has already failed to claim n. Reports ok=false (claiming nothing) when t
+// isn't a struct, or is a struct with no unary overload for op - the
+// caller's own pre-existing diagnostic fires unchanged in that case.
+func (c *checker) checkUnaryOperatorOverload(n ast.NodeIndex, t Type, op string) (Type, bool) {
+	if t.Kind != TypeStruct {
+		return invalidType, false
+	}
+	set, ok := t.Struct.Operators[op]
+	if !ok || set.Unary == nil {
+		return invalidType, false
+	}
+	restore := c.pushTree(set.Unary.Tree)
+	sig := c.operatorSigForDecl(set.Unary.Decl)
+	restore()
+
+	c.info.Refs[n] = set.Unary
+	c.info.Types[n] = sig.Return
+	return sig.Return, true
+}
+
+// checkBinaryOperatorOverload resolves n (a BinaryExpr for operator op)
+// against lt's own declared binary `operator op(param) RetType` overload
+// set, if lt is a struct declaring one (see LANGUAGE.md's "Operator
+// overloading" section) - checkBinaryExpr's own fallback, tried only once
+// the existing string/numeric handling has already failed to claim n.
+// Reports ok=false (claiming nothing) when lt isn't a struct, or is a
+// struct with no overload for op whose declared parameter type accepts rt -
+// the caller's own diagnostic (naming the actual problem for a struct LHS,
+// vs. the pre-existing wording otherwise) fires unchanged in that case.
+//
+// rt selects among lt's possibly several same-token overloads by testing
+// each one's own declared parameter type against rt in declaration order via
+// operandTypeMatches - a silent, side-effect-free compatibility check
+// (unlike checkAssignable, which both retypes an untyped operand and reports
+// a diagnostic on mismatch) - so probing a non-matching candidate along the
+// way never emits a spurious error or retypes rNode's own untyped literal
+// before the real winner is known. Once a match is found, the *real*
+// checkAssignable then runs against that one candidate only (this always
+// succeeds, since operandTypeMatches already confirmed compatibility) to get
+// its side effects: retyping an untyped rNode, and (via checkNoIllegalCopy)
+// the same by-value-argument copy restriction an ordinary call's arguments
+// already get (see checkConstructorCall).
+func (c *checker) checkBinaryOperatorOverload(n, rNode ast.NodeIndex, lt, rt Type, op string) (Type, bool) {
+	if lt.Kind != TypeStruct {
+		return invalidType, false
+	}
+	set, ok := lt.Struct.Operators[op]
+	if !ok {
+		return invalidType, false
+	}
+	for _, overload := range set.Binary {
+		restore := c.pushTree(overload.Symbol.Tree)
+		sig := c.operatorSigForDecl(overload.Symbol.Decl)
+		restore()
+
+		if !operandTypeMatches(sig.Params[0], rt) {
+			continue
+		}
+		if c.checkAssignable(rNode, sig.Params[0], rt, "right operand") {
+			c.checkNoIllegalCopy(rNode, sig.Params[0], true, "right operand")
+		}
+		c.info.Refs[n] = overload.Symbol
+		c.info.Types[n] = sig.Return
+		return sig.Return, true
+	}
+	return invalidType, false
+}
+
+// operandTypeMatches silently reports whether got is compatible with want
+// (an operator overload candidate's own declared parameter type) - the same
+// decision checkAssignable makes, minus its side effects (retyping an
+// untyped operand, reporting a diagnostic on mismatch), since this only
+// ranks candidate overloads and must not disturb the AST or emit a
+// diagnostic for every candidate that isn't the eventual winner (see
+// checkBinaryOperatorOverload's own doc comment).
+func operandTypeMatches(want, got Type) bool {
+	if got.Kind == TypeUntypedNil {
+		return want.Kind == TypePointer
+	}
+	if got.IsUntyped() {
+		if !want.IsNumeric() {
+			return false
+		}
+		return got.Kind != TypeUntypedFloat || !want.IsIntegerKind()
+	}
+	return want.Equal(got)
 }
 
 // checkNumericBinary type-checks a numeric binary operator (arithmetic or

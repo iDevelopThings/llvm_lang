@@ -629,6 +629,40 @@ A **dynamic array (`[]T`) whose element type is non-copyable is rejected outrigh
 
 Embedding a destructor-having value **by value** as a struct field does **not** automatically cascade a destructor call into that field when the containing struct's own scope ends, if the containing struct declares no `destructor()` of its own - the field's destructor simply never fires in that case. This is a real, documented v1 limitation, not a bug: the intended pattern for a resource-owning type is to hold a `*T` **pointer** field to what it owns and manually `delete` it in its own destructor body (exactly like the `FileHandle` example at the top of this section), not to embed a destructor-having value directly as a field expecting it to clean itself up automatically.
 
+## Operator overloading
+
+A struct may also declare one or more `operator OP(param) RetType { body }` blocks, nested directly inside the struct declaration exactly like `constructor`/`destructor` above - the same narrow, deliberate exception to "structs are data-only, methods declared separately":
+
+```go
+struct Vector2 {
+    x f64
+    y f64
+
+    operator *(scalar f64) Vector2 {
+        return Vector2{this.x * scalar, this.y * scalar}
+    }
+    operator +(other Vector2) Vector2 {
+        return Vector2{this.x + other.x, this.y + other.y}
+    }
+    operator -() Vector2 {
+        return Vector2{-this.x, -this.y}
+    }
+}
+
+v := Vector2{1, 2}
+scaled := v * 2.0        // calls operator *(scalar f64)
+sum := v + Vector2{3, 4} // calls operator +(other Vector2)
+neg := -v                // calls operator -()
+```
+
+`this` inside an operator body is the LEFT operand (or the sole operand for a unary overload), exactly like inside an ordinary method or constructor.
+
+**Overloadable set (v1): binary `+ - * /` and unary `-` only.** `==`/`!=`, comparisons (`< <= > >=`), bitwise (`% & | ^`), and logical (`&& ||`) are deliberately **not** overloadable this round - see "Operators" below for the built-in struct/array equality mechanism this leaves untouched, and DECISIONS.md's dated entry for why. An unsupported operator token, or an arity other than 0 (unary) or 1 (binary), is rejected at struct-declaration time, naming the operator and why.
+
+**Discriminated by (parameter count, and for the 1-parameter/binary case, also that parameter's own declared type).** Zero parameters is the unary form; one parameter is binary, and that parameter's own type IS the right operand's type an overload use must match - the one deliberate divergence from `constructor` (overloaded by argument count only, never by type - see "Constructors" above; DECISIONS.md's dated entry has the reasoning). Two `operator` blocks for the same token with the same (count, and if 1, same param type) on one struct is a compile-time error, reported once a real type is available to compare, and covers two distinct spellings of the same underlying type (`int` and `i32`, for instance - see "Types" below) resolving to the same overload, not just identical source text.
+
+**Left-operand-only dispatch.** Only the left operand being a struct with a matching `operator` overload triggers overload resolution - `this` is always the left operand. `Vector2 * f64` works; `f64 * Vector2` (the scalar on the left) does **not** work - there is no commutative or free-function overload mechanism. A binary use with no matching overload on its left operand's type reports which operator and argument type had no match; if the left operand isn't a struct at all (including the reverse-order case above), it falls through to the plain "requires numeric operands" diagnostic unchanged, since it was never a candidate for overload resolution in the first place.
+
 ## Enums
 
 Rust-style tagged unions: a top-level `enum Name { ... }` declaration, alongside `struct`/`func`/`extern func`/`var`, whose named variants each carry their own shape of associated data (or none at all):
@@ -1379,7 +1413,9 @@ lossy: `i32(5.5)` (float -> int) truncates deliberately, same as Go's own
   (concatenation). No other operator works on `string`.
 - `- * /` are `numeric + numeric -> numeric` - int widths and floats alike
   (`f32`/`f64` lower to real floating-point instructions - `CreateFAdd`/
-  `CreateFSub`/`CreateFMul`/`CreateFDiv` - not integer ones).
+  `CreateFSub`/`CreateFMul`/`CreateFDiv` - not integer ones). A struct left
+  operand instead resolves against its own declared `operator` overloads, if
+  any - see "Operator overloading" above.
 - `%` and the bitwise `& | ^` are `integer + integer -> integer` only - any
   int width, but never float, same restriction Go itself has.
 - `== !=` require both operands to already be the same type (numeric of any
@@ -1433,6 +1469,8 @@ lossy: `i32(5.5)` (float -> int) truncates deliberately, same as Go's own
   types).
 - Unary `-` is `numeric -> numeric` (any int width or float width - `f32`/
   `f64` lower to `CreateFNeg`, not `CreateNeg`); unary `!` is `bool -> bool`.
+  A struct operand instead resolves against its own declared unary
+  `operator -()` overload, if any - see "Operator overloading" above.
 - `++`/`--` and compound assignment (`+= -= *= /=`) apply the matching
   operator's rule to the target's and value's types, generalized the same
   way as the corresponding standalone operator - `+=` also accepts `string`,

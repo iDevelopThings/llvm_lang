@@ -50,6 +50,37 @@ raw composite literal and does not call a constructor.
 Structs may also declare one destructor. That affects copying and ownership;
 see [Ownership, move, and pointers](memory-and-pointers.md).
 
+## Operator overloading
+
+A struct may declare `operator` blocks for `+ - * /` (binary) and `-`
+(unary), nested the same way as a constructor:
+
+```go
+struct Vector2 {
+    x f64
+    y f64
+
+    operator *(scalar f64) Vector2 {
+        return Vector2{this.x * scalar, this.y * scalar}
+    }
+    operator -() Vector2 {
+        return Vector2{-this.x, -this.y}
+    }
+}
+
+v := Vector2{1, 2}
+scaled := v * 2.0   // calls operator *
+neg := -v           // calls operator -
+```
+
+`this` is always the left (or only) operand. A binary overload is
+discriminated by its own parameter's type, so a struct can declare both
+`operator *(f64)` and `operator *(Vector2)` side by side. `f64 * Vector2`
+(the scalar on the left) does not work - only the left operand's type is
+ever checked. `==`/`!=` and every other operator stay non-overloadable; see
+[Operator overloading](../LANGUAGE.md#operator-overloading) in the full
+spec for the complete rule and its rationale.
+
 ## Enums
 
 Enums are tagged unions. Variants may have no data, positional data, or

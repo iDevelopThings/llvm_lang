@@ -14,6 +14,37 @@ pointer to all of this project's docs.
 
 ---
 
+## 2026-07-25 - Operator overloading: type-discriminated, narrow set, left-operand-only
+
+**Decision:** a struct's `operator` overloads are discriminated by
+(parameter count, and for the 1-parameter/binary case, also that
+parameter's own declared type) - unlike `constructor`, which is arity-only
+(see `LANGUAGE.md`'s "Constructors" section). Only binary `+ - * /` and
+unary `-` are overloadable; `==`/`!=`, comparisons, bitwise, and logical
+operators are not. Only the left operand's type ever triggers overload
+resolution - no commutative or free-function mechanism was added.
+
+**Why:** a constructor's arity-only rule exists to keep construction bound
+to the type itself, not to serve as precedent here - an operator overload's
+entire point is dispatching on the right operand's type (`Vector2 * f64` vs.
+`Vector2 * Vector2` coexisting), so type has to be part of the discriminant.
+`==`/`!=` stay out of scope because struct/array equality is already a
+deliberate, carefully-reviewed built-in mechanism (see `checkEqualityOperands`,
+`sema/typecheck.go`, and `AGENTS.md`'s review-process section for a real
+historical bug in exactly that code path) - reopening it to overloading
+risks reintroducing that class of bug for no requested feature. Comparisons/
+bitwise/logical were never asked for either; a narrow v1 surface is easier to
+widen later than to walk back. Left-operand-only dispatch was chosen over
+commutative resolution because the latter needs a real ambiguity-resolution
+story (which side wins if both declare a matching overload) that nothing
+here asked for yet - `this` is always the left operand everywhere else in
+this language (methods, constructors), so this keeps the same rule rather
+than inventing a second one.
+
+**Status:** shipped. See `LANGUAGE.md`'s "Operator overloading" section.
+
+---
+
 ## 2026-07-25 - Generics: unconstrained monomorphization, not Go-style constrained generics
 
 **Decision:** generics are C++-template-shaped - type parameters carry no

@@ -330,14 +330,15 @@ func (p *Parser) parseParam() ast.NodeIndex {
 }
 
 // parseStructDecl parses `struct Name { field Type ... }` - data-only aside
-// from two narrow, deliberate exceptions: a `constructor(params) { body }`
-// block (see LANGUAGE.md's "Constructors" section) or a `destructor() { body
-// }` block (see LANGUAGE.md's "Destructors" section) may also appear directly
-// inside the braces - everything else (an ordinary method) is still declared
-// separately via `func (Name) method() {...}`, to keep multi-file
-// organization like Go's receiver methods, and to keep this grammar rule
-// from ever needing to parse a full method's signature (name, receiver,
-// return type).
+// from three narrow, deliberate exceptions: a `constructor(params) { body }`
+// block (see LANGUAGE.md's "Constructors" section), a `destructor() { body
+// }` block (see LANGUAGE.md's "Destructors" section), or an
+// `operator OP(param) RetType { body }` block (see LANGUAGE.md's "Operator
+// overloading" section) may also appear directly inside the braces -
+// everything else (an ordinary method) is still declared separately via
+// `func (Name) method() {...}`, to keep multi-file organization like Go's
+// receiver methods, and to keep this grammar rule from ever needing to parse
+// a full method's signature (name, receiver, return type).
 func (p *Parser) parseStructDecl() ast.NodeIndex {
 	kwTok := p.expectKeyword(enums.Keywords.Struct)
 	nameTok := p.expectIdent()
@@ -360,15 +361,18 @@ func (p *Parser) parseStructDecl() ast.NodeIndex {
 }
 
 // parseStructMember parses one element of a struct body - either an
-// ordinary field, or (the two exceptions - see parseStructDecl) a
-// constructor or destructor block, disambiguated by whether the element
-// starts with the `constructor`/`destructor` keyword.
+// ordinary field, or (the three exceptions - see parseStructDecl) a
+// constructor, destructor, or operator-overload block, disambiguated by
+// whether the element starts with the `constructor`/`destructor`/`operator`
+// keyword.
 func (p *Parser) parseStructMember() ast.NodeIndex {
 	switch {
 	case p.atKeyword(enums.Keywords.Constructor):
 		return p.parseConstructorDecl()
 	case p.atKeyword(enums.Keywords.Destructor):
 		return p.parseDestructorDecl()
+	case p.atKeyword(enums.Keywords.Operator):
+		return p.parseOperatorDecl()
 	default:
 		return p.parseField()
 	}
@@ -421,6 +425,56 @@ func (p *Parser) parseDestructorDecl() ast.NodeIndex {
 		End:   p.tree.SpanOf(body).End,
 	}
 	return p.tree.NewNode(enums.NodeKinds.DestructorDecl, kwTok, span, params, body)
+}
+
+// parseOperatorDecl parses `operator OP(param) RetType { body }` - see
+// ast.Node's own OperatorDecl doc comment for the [paramList, returnType,
+// body] shape: no name (like a constructor, it's never called by name - see
+// LANGUAGE.md's "Operator overloading" section), no receiver clause, but -
+// unlike a constructor/destructor - a real explicit return type, parsed the
+// same way parseField already parses a field's type.
+//
+// expectOperatorToken only checks that the token is *shaped* like one of
+// this grammar's own single-token binary operators - a purely structural
+// check. Which of those are actually legal to overload (binary `+ - * /`,
+// unary `-` only) and whether the declared parameter
+// count (0 or 1) matches is sema's own job (declareOperator, resolve.go),
+// the same "grammar accepts the general shape, sema narrows it" split
+// parseDestructorDecl's always-empty-paramList rule already uses.
+func (p *Parser) parseOperatorDecl() ast.NodeIndex {
+	kwTok := p.expectKeyword(enums.Keywords.Operator)
+	opTok := p.expectOperatorToken()
+
+	params := p.parseParamList()
+	returnType := p.parseTypeExpr()
+	body := p.parseBlock()
+
+	span := ast.Span{
+		Start: kwTok.Start,
+		End:   p.tree.SpanOf(body).End,
+	}
+	return p.tree.NewNode(enums.NodeKinds.OperatorDecl, opTok, span, params, returnType, body)
+}
+
+// expectOperatorToken consumes and returns the current token if it's one of
+// this grammar's own recognized single-token *binary* operators - every
+// infixRules entry (expr.go) below precPostfix, i.e. every key there
+// EXCEPT `(`/`[`/`.` (call/index/member): those three are also infixRules
+// entries, at precPostfix, but are postfix operators, not binary ones, and
+// so must never be accepted as an operator-overload token here (`operator
+// (v T) ...` must not silently treat `(` itself as the operator). A bare
+// structural check, not itself a bare-token dispatch: an OperatorDecl's own
+// Tok becomes this exact token (see ast.Node's doc comment), same as
+// expect's own "consume and return" shape, just keyed against a set of
+// lexemes instead of one.
+func (p *Parser) expectOperatorToken() lexer.Token {
+	tok := p.tok
+	if rule, ok := infixRules[tok.Lexeme]; !ok || rule.prec >= precPostfix {
+		p.errorAtSpan(tok.Start, tok.End, "expected an operator (+, -, *, /) after 'operator', found %s", p.describe(tok))
+		return tok
+	}
+	p.advance()
+	return tok
 }
 
 // parseEnumDecl parses `enum Name { Variant1, Variant2(T1, T2), Variant3 {

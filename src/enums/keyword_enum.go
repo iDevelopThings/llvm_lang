@@ -40,6 +40,7 @@ const (
 	KeywordAsync       Keyword = "Async"
 	KeywordAwait       Keyword = "Await"
 	KeywordMove        Keyword = "Move"
+	KeywordOperator    Keyword = "Operator"
 )
 
 type KeywordContainer struct {
@@ -70,6 +71,7 @@ type KeywordContainer struct {
 	Async       Keyword
 	Await       Keyword
 	Move        Keyword
+	Operator    Keyword
 }
 
 // Keywords is the entry point for the Keyword enum.
@@ -101,6 +103,7 @@ var Keywords = KeywordContainer{
 	Async:       KeywordAsync,
 	Await:       KeywordAwait,
 	Move:        KeywordMove,
+	Operator:    KeywordOperator,
 }
 
 // KeywordInfo is the static metadata attached to a Keyword.
@@ -246,6 +249,11 @@ var keywordInfos = map[Keyword]KeywordInfo{
 		Name:    "Move",
 		String:  "move",
 	},
+	KeywordOperator: {
+		Keyword: KeywordOperator,
+		Name:    "Operator",
+		String:  "operator",
+	},
 }
 
 var keywordValues = []Keyword{
@@ -276,6 +284,7 @@ var keywordValues = []Keyword{
 	KeywordAsync,
 	KeywordAwait,
 	KeywordMove,
+	KeywordOperator,
 }
 
 var keywordByName = map[string]Keyword{
@@ -306,6 +315,7 @@ var keywordByName = map[string]Keyword{
 	"async":       KeywordAsync,
 	"await":       KeywordAwait,
 	"move":        KeywordMove,
+	"operator":    KeywordOperator,
 }
 
 // Values returns every declared value in declaration order.
