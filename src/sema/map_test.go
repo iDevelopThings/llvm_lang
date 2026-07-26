@@ -117,6 +117,100 @@ func TestPointerMapKeyOk(t *testing.T) {
 	checkSrc(t, "var m map[*int]string\n")
 }
 
+// --- key/value copyability ---
+
+// nonCopyableStructSrc declares a struct with its own destructor - any use
+// of it as a map key or value should be rejected the same way
+// TestDynamicArrayOfNonCopyableElementTypeIsError rejects it as a dynamic
+// array element (see destructor_test.go's fileHandleSrc, mirrored here so
+// this file doesn't depend on it).
+const nonCopyableStructSrc = "struct Resource {\n" +
+	"\tv int\n\n" +
+	"\tdestructor() {\n" +
+	"\t\tthis.v = 0\n" +
+	"\t}\n" +
+	"}\n"
+
+func TestNonCopyableMapValueRejected(t *testing.T) {
+	src := nonCopyableStructSrc + "var m map[string]Resource\n"
+	expectCheckErrors(t, src, 1)
+}
+
+func TestNonCopyableMapKeyRejected(t *testing.T) {
+	src := nonCopyableStructSrc + "var m map[Resource]string\n"
+	expectCheckErrors(t, src, 1)
+}
+
+// TestNonCopyableFixedArrayMapValueRejected covers the non-copyable check
+// reaching through a fixed-size array element, mirroring typeIsComparable's
+// own recursive nested-type coverage above.
+func TestNonCopyableFixedArrayMapValueRejected(t *testing.T) {
+	src := nonCopyableStructSrc + "var m map[string][2]Resource\n"
+	expectCheckErrors(t, src, 1)
+}
+
+func TestCopyableStructMapValueOk(t *testing.T) {
+	src := "struct Point {\n\tx int\n\ty int\n}\n" +
+		"var m map[string]Point\n"
+	checkSrc(t, src)
+}
+
+// nonCopyableEnumSrc mirrors nonCopyableStructSrc one type kind over - an
+// enum declaring its own destructor is non-copyable exactly like a struct
+// (see enum_test.go's TestEnumWithDestructorIsNonCopyable).
+const nonCopyableEnumSrc = "enum Handle {\n" +
+	"\tOwned(int)\n" +
+	"\tdestructor() {\n" +
+	"\t}\n" +
+	"}\n"
+
+func TestNonCopyableEnumMapValueRejected(t *testing.T) {
+	src := nonCopyableEnumSrc + "var m map[string]Handle\n"
+	expectCheckErrors(t, src, 1)
+}
+
+func TestNonCopyableEnumMapKeyRejected(t *testing.T) {
+	src := nonCopyableEnumSrc + "var m map[Handle]string\n"
+	expectCheckErrors(t, src, 1)
+}
+
+// TestNestedMapNonCopyableValueRejected covers the check reaching through a
+// nested map value (`map[string]map[string]Resource`) - each MapType node,
+// however deep, is dispatched to mapTypeFromNode independently via
+// typeFromNode, so the outer map's own elem type check (on its inner
+// map[string]Resource) is what actually catches this, not any special nested
+// handling.
+func TestNestedMapNonCopyableValueRejected(t *testing.T) {
+	src := nonCopyableStructSrc + "var m map[string]map[string]Resource\n"
+	expectCheckErrors(t, src, 1)
+}
+
+// TestStructFieldMapWithNonCopyableValueRejected covers a struct field whose
+// declared type is a map with a non-copyable value - a different declaration
+// site than a bare `var`, proving the check isn't only wired up for one.
+func TestStructFieldMapWithNonCopyableValueRejected(t *testing.T) {
+	src := nonCopyableStructSrc + "struct Box {\n\tm map[string]Resource\n}\n"
+	expectCheckErrors(t, src, 1)
+}
+
+// TestPointerToNonCopyableMapValueOk covers the boundary this check must NOT
+// reject: a pointer is always copyable regardless of its pointee, so a map
+// value holding *Resource (not Resource itself) is fine.
+func TestPointerToNonCopyableMapValueOk(t *testing.T) {
+	src := nonCopyableStructSrc + "var m map[string]*Resource\n"
+	checkSrc(t, src)
+}
+
+// TestDynamicArrayOfNonCopyableMapValueRejected covers a map value whose
+// element is a *dynamic* array of a non-copyable type - rejected, but via
+// arrayTypeFromNode's own element check (typeIsNonCopyable returns false for
+// a dynamic array itself), not this function's own key/value check. Guards
+// against that coupling silently regressing.
+func TestDynamicArrayOfNonCopyableMapValueRejected(t *testing.T) {
+	src := nonCopyableStructSrc + "var m map[string][]Resource\n"
+	expectCheckErrors(t, src, 1)
+}
+
 // --- remove ---
 
 func TestRemoveOk(t *testing.T) {

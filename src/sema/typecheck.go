@@ -2235,13 +2235,17 @@ func (c *checker) constArraySize(sizeNode ast.NodeIndex) (int64, bool) {
 // mapTypeFromNode converts a MapType type-position node (`map[K]V` - see
 // LANGUAGE.md's "Maps" section and ast.Node's own MapType doc comment) into a
 // Type - the map counterpart to arrayTypeFromNode, minus the size handling a
-// map type has no use for. Unlike an array's element type (unrestricted), a
-// map's key type is checked right here, at every declaration site, against
-// this language's own comparability rule (typeIsComparable) - a dynamic
-// array, function type, or another map is rejected outright with a real
-// diagnostic, the same "grammar accepts the general shape, sema enforces the
-// feature's own narrower rule" division of labor arrayTypeFromNode's own
-// non-copyable-element check already uses.
+// map type has no use for. A map's key type is checked right here, at every
+// declaration site, against this language's own comparability rule
+// (typeIsComparable) - a dynamic array, function type, or another map is
+// rejected outright with a real diagnostic, the same "grammar accepts the
+// general shape, sema enforces the feature's own narrower rule" division of
+// labor arrayTypeFromNode's own non-copyable-element check already uses.
+//
+// Both key and value are also rejected if non-copyable (typeIsNonCopyable) -
+// every map read/probe/grow copies bytes around with no destructor-cascading
+// concept, the same hazard arrayTypeFromNode's own element check guards
+// against.
 func (c *checker) mapTypeFromNode(n ast.NodeIndex) Type {
 	keyNode := c.tree.Child(n, 0)
 	elemNode := c.tree.Child(n, 1)
@@ -2250,6 +2254,12 @@ func (c *checker) mapTypeFromNode(n ast.NodeIndex) Type {
 
 	if !key.IsInvalid() && !c.typeIsComparable(key) {
 		c.errorAt(keyNode, "invalid map key type %s: a map key must be comparable (a dynamic array, function type, or another map cannot be used as a key)", key)
+	}
+	if !key.IsInvalid() && c.typeIsNonCopyable(key) {
+		c.errorAt(keyNode, "map key type %s is non-copyable (has a destructor); a non-copyable type cannot be used as a map key", key)
+	}
+	if !elem.IsInvalid() && c.typeIsNonCopyable(elem) {
+		c.errorAt(elemNode, "map value type %s is non-copyable (has a destructor); a non-copyable type cannot be used as a map value", elem)
 	}
 
 	return Type{

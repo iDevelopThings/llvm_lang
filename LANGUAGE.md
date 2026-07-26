@@ -361,6 +361,26 @@ struct Point { x int; y int }
 var ok map[Point]string             // fine - every field is itself comparable
 ```
 
+**Key/value copyability restriction.** Every map operation - a plain read
+(`v := m[k]`), a key comparison during a lookup/probe, or a table
+grow/rehash - copies key and value bytes around with no
+destructor-cascading concept at all (see `CODEGEN.md`'s "Maps" section), the
+same hazard dynamic arrays are restricted for (see "Dynamic arrays" above).
+A **non-copyable** key or value type (a struct/enum declaring its own
+`destructor()`, or embedding one - see "Destructors" below) is therefore
+rejected outright too, with a diagnostic at the `map[K]V` type's own
+declaration site:
+
+```go
+struct Resource {
+    handle *int
+    destructor() { delete this.handle }
+}
+
+var bad1 map[string]Resource   // error: Resource is non-copyable, can't be a map value
+var bad2 map[Resource]string   // error: Resource is non-copyable, can't be a map key
+```
+
 **A map element is not addressable and not independently mutable in place.**
 `&m[k]` is a compile error (mirroring Go's own identical restriction exactly
 - a map slot may not even exist yet, so there's no stable address to hand
