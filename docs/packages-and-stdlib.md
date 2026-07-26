@@ -78,6 +78,8 @@ lives on disk.
 | `std:collections` | Generic `SlotMap` with generation-checked handles; `Len`, `Clear`, and `Values`/`Handles` generators to iterate live entries |
 | `std:time` | Performance-counter timing |
 | `std:scheduler` | Timer scheduler for coroutines |
+| `std:vectors` | `Vector2`/`Vector3` with operator overloads (`+ - * /`, unary `-`), `Length`, `Normalize`, `Dot`, `Cross` (`Vector3`), `Distance`, `Lerp` |
+| `std:rect` | Axis-aligned `Rect` (built on `std:vectors`): `Min`/`Max`/`Center`, `Contains`, `Intersects`, `Intersection`, `Union` |
 | `std:test` | Assertions used by `llvmc -test` |
 
 Example:
@@ -107,4 +109,5 @@ Try:
 - `SlotMap`'s own `llvmc -test` assertions live in a `tests{}` block at the
   end of [`std/collections/collections.llx`](../std/collections/collections.llx)
   itself - see [`compiler.md`](compiler.md#run-language-tests) for the
-  `tests{}` construct.
+  `tests{}` construct. `std/vectors/vectors.llx` and `std/rect/rect.llx` do
+  the same.

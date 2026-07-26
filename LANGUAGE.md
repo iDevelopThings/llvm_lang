@@ -2682,6 +2682,21 @@ error if it can't be found.
   `examples/generics/generics.llx` first proved out; that example is left
   untouched, this is an additive package on top of it (same reasoning
   `std/time`'s own entry above gives for `examples/scope_timer`).
+- **`std/vectors`** - `Vector2`/`Vector3`, `f32` fields (matching the layout
+  most graphics/game FFI bindings use for their own native vector types, so
+  bridging to one is a cheap one-line repackaging rather than needed
+  throughout ordinary math - see the package's own doc comment, and
+  `DECISIONS.md`'s dated entry for why no f64/generic variant is provided).
+  Full operator set (see "Operator overloading" above): `+ - * /`, unary
+  `-`. Plus `Length`, `LengthSquared`, `Normalize`, `Dot`, `Distance`,
+  `Lerp` (both types), `Cross` (`Vector3` only).
+- **`std/rect`** - axis-aligned `Rect{Position, Size}` built on
+  `std/vectors`, kept as its own package rather than folded into vectors
+  (a shape/bounds test is a different concept from vector algebra - see
+  `DECISIONS.md`'s dated entry): `Min`/`Max`/`Center`, `Contains(p)`,
+  `Intersects(other)`, `Intersection(other) (Rect, bool)`, `Union(other)`.
+  `Min`/`Max` are named by magnitude, never "Top"/"Bottom" - the package
+  makes no assumption about which way Y increases.
 - **`std/test`** - soft-fail test helpers for `llvmc -test`: `Runner`,
   `NewRunner`, `Assert` / `AssertFalse` / `AssertEqual[T]` /
   `AssertNotEqual[T]` / `AssertNil[T]` / `AssertNotNil[T]` /

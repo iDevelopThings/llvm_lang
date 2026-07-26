@@ -1,0 +1,188 @@
+// vectors.llx - std/vectors: Vector2/Vector3 with operator overloads (see
+// LANGUAGE.md's "Operator overloading" section) - built entirely as
+// ordinary .llx code, no compiler changes.
+//
+// f32 fields deliberately, not f64 or a generic Vector2[T] - see
+// DECISIONS.md's dated entry for why, and for why a foreign FFI binding's
+// own vector type (e.g. raylib's) can't just get these same operators by
+// importing this package (methods/operators are per-package - see
+// LANGUAGE.md's "Methods" section).
+
+import "std:mathutil"
+
+struct Vector2 {
+	X f32
+	Y f32
+
+	operator +(other Vector2) Vector2 {
+		return Vector2{this.X + other.X, this.Y + other.Y}
+	}
+	operator -(other Vector2) Vector2 {
+		return Vector2{this.X - other.X, this.Y - other.Y}
+	}
+	operator *(scalar f32) Vector2 {
+		return Vector2{this.X * scalar, this.Y * scalar}
+	}
+	operator /(scalar f32) Vector2 {
+		return Vector2{this.X / scalar, this.Y / scalar}
+	}
+	operator -() Vector2 {
+		return Vector2{-this.X, -this.Y}
+	}
+}
+
+// LengthSquared avoids the sqrt Length needs - prefer this when only
+// comparing two lengths (e.g. "is A closer than B"), not their exact value.
+func (Vector2) LengthSquared() f32 {
+	return this.X*this.X + this.Y*this.Y
+}
+
+func (Vector2) Length() f32 {
+	return f32(mathutil.Sqrt(f64(this.LengthSquared())))
+}
+
+// Normalize returns this scaled to length 1 - the zero vector's own
+// normalized result is NaN (division by a zero length), same as every other
+// vector math library; callers that might hold a zero vector should check
+// for it first rather than this method guarding against it internally.
+func (Vector2) Normalize() Vector2 {
+	return *this / this.Length()
+}
+
+func (Vector2) Dot(other Vector2) f32 {
+	return this.X*other.X + this.Y*other.Y
+}
+
+func (Vector2) Distance(other Vector2) f32 {
+	return (*this - other).Length()
+}
+
+// Lerp linearly interpolates between this and other - t 0 returns this, t 1
+// returns other, values outside [0, 1] extrapolate rather than clamping.
+func (Vector2) Lerp(other Vector2, t f32) Vector2 {
+	return *this + (other-*this)*t
+}
+
+struct Vector3 {
+	X f32
+	Y f32
+	Z f32
+
+	operator +(other Vector3) Vector3 {
+		return Vector3{this.X + other.X, this.Y + other.Y, this.Z + other.Z}
+	}
+	operator -(other Vector3) Vector3 {
+		return Vector3{this.X - other.X, this.Y - other.Y, this.Z - other.Z}
+	}
+	operator *(scalar f32) Vector3 {
+		return Vector3{this.X * scalar, this.Y * scalar, this.Z * scalar}
+	}
+	operator /(scalar f32) Vector3 {
+		return Vector3{this.X / scalar, this.Y / scalar, this.Z / scalar}
+	}
+	operator -() Vector3 {
+		return Vector3{-this.X, -this.Y, -this.Z}
+	}
+}
+
+func (Vector3) LengthSquared() f32 {
+	return this.X*this.X + this.Y*this.Y + this.Z*this.Z
+}
+
+func (Vector3) Length() f32 {
+	return f32(mathutil.Sqrt(f64(this.LengthSquared())))
+}
+
+func (Vector3) Normalize() Vector3 {
+	return *this / this.Length()
+}
+
+func (Vector3) Dot(other Vector3) f32 {
+	return this.X*other.X + this.Y*other.Y + this.Z*other.Z
+}
+
+func (Vector3) Cross(other Vector3) Vector3 {
+	return Vector3{
+		this.Y*other.Z - this.Z*other.Y,
+		this.Z*other.X - this.X*other.Z,
+		this.X*other.Y - this.Y*other.X,
+	}
+}
+
+func (Vector3) Distance(other Vector3) f32 {
+	return (*this - other).Length()
+}
+
+func (Vector3) Lerp(other Vector3, t f32) Vector3 {
+	return *this + (other-*this)*t
+}
+
+tests {
+	import "std:test"
+
+	func TestVector2Arithmetic(t *test.Runner) {
+		a := Vector2{1, 2}
+		b := Vector2{3, 4}
+		t.AssertEqual(a+b, Vector2{4, 6}, "component-wise addition")
+		t.AssertEqual(b-a, Vector2{2, 2}, "component-wise subtraction")
+		t.AssertEqual(a*2, Vector2{2, 4}, "scalar multiplication")
+		t.AssertEqual(b/2, Vector2{1.5, 2}, "scalar division")
+		t.AssertEqual(-a, Vector2{-1, -2}, "unary negation")
+	}
+
+	func TestVector2LengthAndNormalize(t *test.Runner) {
+		v := Vector2{3, 4}
+		t.AssertEqual(v.Length(), f32(5), "3-4-5 triangle length")
+		t.AssertEqual(v.LengthSquared(), f32(25), "length squared avoids the sqrt")
+		n := v.Normalize()
+		t.AssertEqual(n, Vector2{0.6, 0.8}, "normalized 3-4-5 vector")
+		t.AssertEqual(n.Length(), f32(1), "a normalized vector has length 1")
+	}
+
+	func TestVector2DotAndDistance(t *test.Runner) {
+		a := Vector2{1, 0}
+		b := Vector2{0, 1}
+		t.AssertEqual(a.Dot(b), f32(0), "perpendicular unit vectors have zero dot product")
+		t.AssertEqual(a.Dot(a), f32(1), "a unit vector dotted with itself is 1")
+		t.AssertEqual(a.Distance(b), b.Distance(a), "distance is symmetric")
+		t.AssertEqual(Vector2{0, 0}.Distance(Vector2{3, 4}), f32(5), "distance matches Length of the difference")
+	}
+
+	func TestVector2Lerp(t *test.Runner) {
+		a := Vector2{0, 0}
+		b := Vector2{10, 20}
+		t.AssertEqual(a.Lerp(b, 0), a, "t=0 returns the start")
+		t.AssertEqual(a.Lerp(b, 1), b, "t=1 returns the end")
+		t.AssertEqual(a.Lerp(b, 0.5), Vector2{5, 10}, "t=0.5 returns the midpoint")
+	}
+
+	func TestVector3Arithmetic(t *test.Runner) {
+		a := Vector3{1, 2, 3}
+		b := Vector3{4, 5, 6}
+		t.AssertEqual(a+b, Vector3{5, 7, 9}, "component-wise addition")
+		t.AssertEqual(b-a, Vector3{3, 3, 3}, "component-wise subtraction")
+		t.AssertEqual(a*2, Vector3{2, 4, 6}, "scalar multiplication")
+		t.AssertEqual(-a, Vector3{-1, -2, -3}, "unary negation")
+	}
+
+	func TestVector3LengthAndNormalize(t *test.Runner) {
+		v := Vector3{2, 0, 0}
+		t.AssertEqual(v.Length(), f32(2), "axis-aligned length")
+		n := v.Normalize()
+		t.AssertEqual(n, Vector3{1, 0, 0}, "normalizing an axis-aligned vector")
+	}
+
+	func TestVector3DotAndCross(t *test.Runner) {
+		x := Vector3{1, 0, 0}
+		y := Vector3{0, 1, 0}
+		z := Vector3{0, 0, 1}
+		t.AssertEqual(x.Dot(y), f32(0), "perpendicular axes have zero dot product")
+		t.AssertEqual(x.Cross(y), z, "x cross y is z (right-handed)")
+	}
+
+	func TestVector3Lerp(t *test.Runner) {
+		a := Vector3{0, 0, 0}
+		b := Vector3{2, 4, 6}
+		t.AssertEqual(a.Lerp(b, 0.5), Vector3{1, 2, 3}, "t=0.5 returns the midpoint")
+	}
+}

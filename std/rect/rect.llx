@@ -1,0 +1,122 @@
+// rect.llx - std/rect: an axis-aligned bounding box (AABB) built on top of
+// std/vectors' own Vector2 - a separate package rather than folded into
+// vectors itself (see DECISIONS.md's dated entry for why).
+//
+// Position names the corner with the smaller x/y, not necessarily the
+// "top-left" - this package makes no assumption about which way Y increases
+// (screen-space Y-down vs. math-space Y-up), so Min/Max are named by
+// magnitude, never "Top"/"Bottom", which would silently bake in one
+// convention or the other.
+
+import "std:mathutil"
+import "std:vectors"
+
+struct Rect {
+	Position vectors.Vector2
+	Size     vectors.Vector2
+}
+
+func (Rect) Min() vectors.Vector2 {
+	return this.Position
+}
+
+func (Rect) Max() vectors.Vector2 {
+	return this.Position + this.Size
+}
+
+func (Rect) Center() vectors.Vector2 {
+	return this.Position + this.Size*0.5
+}
+
+func (Rect) Contains(p vectors.Vector2) bool {
+	max := this.Max()
+	return p.X >= this.Position.X && p.X <= max.X &&
+		p.Y >= this.Position.Y && p.Y <= max.Y
+}
+
+// Intersects uses inclusive bounds, same as Contains: two rects that only
+// touch at an edge (one's Max exactly equals the other's Position on some
+// axis) count as intersecting, not merely adjacent.
+func (Rect) Intersects(other Rect) bool {
+	aMax := this.Max()
+	bMax := other.Max()
+	return this.Position.X <= bMax.X && aMax.X >= other.Position.X &&
+		this.Position.Y <= bMax.Y && aMax.Y >= other.Position.Y
+}
+
+// Intersection returns the overlapping region and true, or an unspecified
+// Rect and false if this and other don't overlap at all.
+func (Rect) Intersection(other Rect) (Rect, bool) {
+	if !this.Intersects(other) {
+		return Rect{}, false
+	}
+	aMax := this.Max()
+	bMax := other.Max()
+	minX := mathutil.Max(this.Position.X, other.Position.X)
+	minY := mathutil.Max(this.Position.Y, other.Position.Y)
+	maxX := mathutil.Min(aMax.X, bMax.X)
+	maxY := mathutil.Min(aMax.Y, bMax.Y)
+	return Rect{
+		vectors.Vector2{minX, minY},
+		vectors.Vector2{maxX - minX, maxY - minY},
+	}, true
+}
+
+// Union returns the smallest Rect containing both this and other.
+func (Rect) Union(other Rect) Rect {
+	aMax := this.Max()
+	bMax := other.Max()
+	minX := mathutil.Min(this.Position.X, other.Position.X)
+	minY := mathutil.Min(this.Position.Y, other.Position.Y)
+	maxX := mathutil.Max(aMax.X, bMax.X)
+	maxY := mathutil.Max(aMax.Y, bMax.Y)
+	return Rect{
+		vectors.Vector2{minX, minY},
+		vectors.Vector2{maxX - minX, maxY - minY},
+	}
+}
+
+tests {
+	import "std:test"
+
+	func TestRectMinMaxCenter(t *test.Runner) {
+		r := Rect{vectors.Vector2{0, 0}, vectors.Vector2{10, 20}}
+		t.AssertEqual(r.Min(), vectors.Vector2{0, 0}, "Min is Position")
+		t.AssertEqual(r.Max(), vectors.Vector2{10, 20}, "Max is Position+Size")
+		t.AssertEqual(r.Center(), vectors.Vector2{5, 10}, "Center is the midpoint")
+	}
+
+	func TestRectContains(t *test.Runner) {
+		r := Rect{vectors.Vector2{0, 0}, vectors.Vector2{10, 10}}
+		t.Assert(r.Contains(vectors.Vector2{5, 5}), "an interior point is contained")
+		t.Assert(r.Contains(vectors.Vector2{0, 0}), "a corner is contained (inclusive bounds)")
+		t.Assert(r.Contains(vectors.Vector2{10, 10}), "the opposite corner is contained too")
+		t.AssertFalse(r.Contains(vectors.Vector2{11, 5}), "a point outside on x is not contained")
+		t.AssertFalse(r.Contains(vectors.Vector2{5, -1}), "a point outside on y is not contained")
+	}
+
+	func TestRectIntersectsAndIntersection(t *test.Runner) {
+		a := Rect{vectors.Vector2{0, 0}, vectors.Vector2{10, 10}}
+		b := Rect{vectors.Vector2{5, 5}, vectors.Vector2{10, 10}}
+		c := Rect{vectors.Vector2{20, 20}, vectors.Vector2{5, 5}}
+
+		t.Assert(a.Intersects(b), "overlapping rects intersect")
+		t.AssertFalse(a.Intersects(c), "disjoint rects don't intersect")
+
+		overlap, ok := a.Intersection(b)
+		t.Assert(ok, "overlapping rects have a real intersection")
+		t.AssertEqual(overlap, Rect{vectors.Vector2{5, 5}, vectors.Vector2{5, 5}}, "the overlapping region itself")
+
+		_, ok2 := a.Intersection(c)
+		t.AssertFalse(ok2, "disjoint rects report no intersection")
+
+		touching := Rect{vectors.Vector2{10, 0}, vectors.Vector2{10, 10}}
+		t.Assert(a.Intersects(touching), "rects sharing only an edge count as intersecting (inclusive bounds)")
+	}
+
+	func TestRectUnion(t *test.Runner) {
+		a := Rect{vectors.Vector2{0, 0}, vectors.Vector2{10, 10}}
+		b := Rect{vectors.Vector2{5, 5}, vectors.Vector2{10, 10}}
+		t.AssertEqual(a.Union(b), Rect{vectors.Vector2{0, 0}, vectors.Vector2{15, 15}}, "the smallest rect containing both")
+	}
+}

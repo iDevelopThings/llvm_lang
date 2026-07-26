@@ -66,6 +66,7 @@ Run a multi-file example by passing its directory:
 | [`collections_demo`](../examples/collections_demo/collections_demo.llx) | `std:collections`; its `SlotMap` tests live in a `tests{}` block inside [`collections.llx`](../std/collections/collections.llx) itself, run via `llvmc -test std/collections` |
 | [`time_demo`](../examples/time_demo/time_demo.llx) | `std:time` |
 | [`scheduler_demo`](../examples/scheduler_demo/scheduler_demo.llx) | `std:scheduler` and coroutines |
+| [`vectors_demo`](../examples/vectors_demo/vectors_demo.llx) | `std:vectors` and `std:rect`; their own tests live in `tests{}` blocks inside [`vectors.llx`](../std/vectors/vectors.llx)/[`rect.llx`](../std/rect/rect.llx) themselves, run via `llvmc -test std/vectors`/`std/rect` |
 | [`test_demo`](../examples/test_demo/test_demo.llx) | `std:test` and `llvmc -test`; intentionally fails |
 
 ## C interop

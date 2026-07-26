@@ -1,0 +1,40 @@
+// vectors_demo.llx - demonstrates std/vectors' Vector2 (operator overloads,
+// Length/Normalize/Dot/Lerp) and std/rect's Rect built on top of it.
+//
+// Run with:
+//   .\llvmc.exe examples\vectors_demo\vectors_demo.llx
+
+import "std:vectors"
+import "std:rect"
+
+func main() int {
+	a := vectors.Vector2{3, 4}
+	b := vectors.Vector2{X: 1, Y: 2}
+
+	print(a + b)
+	print(a - b)
+	print(a * 2)
+	print(-a)
+
+	print(a.Length())
+	print(a.Normalize())
+	print(a.Dot(b))
+	print(a.Lerp(b, 0.5))
+
+	bounds := rect.Rect{
+		Position: vectors.Vector2{0, 0},
+		Size:     vectors.Vector2{10, 10},
+	}
+	print(bounds.Contains(a))
+	print(bounds.Center())
+
+	other := rect.Rect{
+		Position: vectors.Vector2{5, 5},
+		Size:     vectors.Vector2{10, 10},
+	}
+	overlap, ok := bounds.Intersection(other)
+	print(ok)
+	print(overlap.Size)
+
+	return 0
+}
