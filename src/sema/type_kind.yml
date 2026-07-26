@@ -100,11 +100,11 @@ values:
   - name: Enum
 
   - name: UntypedInt
-    display: "untyped int"
+    display: "int"
     integer: true
     untyped: true
   - name: UntypedFloat
-    display: "untyped float"
+    display: "f64"
     float: true
     untyped: true
   - name: UntypedNil

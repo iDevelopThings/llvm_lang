@@ -366,7 +366,7 @@ var typeKindInfos = [...]TypeKindInfo{
 	TypeUntypedInt: {
 		TypeKind:  TypeUntypedInt,
 		Name:      "UntypedInt",
-		Display:   "untyped int",
+		Display:   "int",
 		Bits:      0,
 		Integer:   true,
 		Primitive: false,
@@ -377,7 +377,7 @@ var typeKindInfos = [...]TypeKindInfo{
 	TypeUntypedFloat: {
 		TypeKind:  TypeUntypedFloat,
 		Name:      "UntypedFloat",
-		Display:   "untyped float",
+		Display:   "f64",
 		Bits:      0,
 		Integer:   false,
 		Primitive: false,
