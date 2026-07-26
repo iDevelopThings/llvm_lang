@@ -82,6 +82,14 @@ func StructFieldsText(tree *ast.Tree, info *Info, decl ast.NodeIndex) string {
 	return tree.StructFieldsText(decl, typeRenderer(tree, info))
 }
 
+// OperatorSignatureText renders decl's (an OperatorDecl's) own parameter
+// list and return type as a compact "(name Type, ...) Return" string - the
+// OperatorDecl counterpart to FuncSignatureText, sharing the same
+// Type-first-with-source-fallback reasoning.
+func OperatorSignatureText(tree *ast.Tree, info *Info, decl ast.NodeIndex) string {
+	return tree.OperatorSignatureText(decl, typeRenderer(tree, info))
+}
+
 // FieldTypeText renders fieldDecl's (a Field's) own type - see
 // FuncSignatureText for the same Type-first-with-source-fallback reasoning.
 func FieldTypeText(tree *ast.Tree, info *Info, fieldDecl ast.NodeIndex) string {

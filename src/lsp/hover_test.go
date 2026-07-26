@@ -249,6 +249,32 @@ func f() int {
 	}
 }
 
+// TestHover_OperatorShowsSignatureDetail covers the SymOperator gap
+// symbolDetail used to have (unlike SymConstructor/SymDestructor, an
+// operator overload does have a real declared param/return-type signature to
+// show): hovering an `operator` declaration must render its own
+// "(scalar f64) Vector2" signature, not fall through to the bare
+// "operator Vector2.operator*(1)" the unhandled-kind default used to produce.
+func TestHover_OperatorShowsSignatureDetail(t *testing.T) {
+	w, path := singleFileWorkspace(t, vector2OperatorFixture)
+	fa, _ := w.Analysis(path)
+
+	offset := strings.Index(fa.Tree.File.Src, "operator *(scalar f64)") + len("operator ")
+	pos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(offset))
+
+	hover := w.Hover(path, pos)
+	if hover == nil {
+		t.Fatal("Hover returned nil")
+	}
+	content, ok := hover.Contents.(protocol.MarkupContent)
+	if !ok {
+		t.Fatalf("hover.Contents = %T, want protocol.MarkupContent", hover.Contents)
+	}
+	if !strings.Contains(content.Value, "operator Vector2.operator*(1) (scalar f64) Vector2") {
+		t.Errorf("hover content = %q, want it to contain the operator's own \"(scalar f64) Vector2\" signature", content.Value)
+	}
+}
+
 // TestHover_StructShowsSizeAlignLayout covers the CLion-style memory-layout
 // feature: hovering a struct must also show its real size/alignment/padding,
 // not just its field list. flag (1 byte) forces a 3-byte gap before n (a
