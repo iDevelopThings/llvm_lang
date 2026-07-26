@@ -72,6 +72,10 @@ Only tests in the entry package are discovered. A package defining its own
 `main` conflicts with the generated test driver. No matching tests is a
 usage error.
 
+Each test's own PASS/FAIL line shows how long it took (e.g.
+`--- PASS: TestAdd (12.30us)`), and a final `=== TESTS DONE: ...` line shows
+the whole run's total - both via `std/time.FormattedDuration`.
+
 **Same-file tests:** a `tests { ... }` block lets `TestXxx` functions live
 directly in the file they test, instead of (or alongside) a standalone test
 package - see `LANGUAGE.md`'s "`tests{}`" section for the full rules:

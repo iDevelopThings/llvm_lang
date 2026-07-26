@@ -76,10 +76,11 @@ lives on disk.
 | `std:strings` | Search, prefix/suffix, trim, split, ASCII case conversion, number formatting |
 | `std:slices` | `Contains`, `IndexOf`, `Reverse`, `Map`, `Filter`, `Reduce` |
 | `std:collections` | Generic `SlotMap` with generation-checked handles; `Len`, `Clear`, and `Values`/`Handles` generators to iterate live entries |
-| `std:time` | Performance-counter timing |
+| `std:time` | Performance-counter timing, `FormattedDuration` (ns/us/ms/s auto-scaled) |
 | `std:scheduler` | Timer scheduler for coroutines |
 | `std:vectors` | `Vector2`/`Vector3` with operator overloads (`+ - * /`, unary `-`), `Length`, `Normalize`, `Dot`, `Cross` (`Vector3`), `Distance`, `Lerp` |
 | `std:rect` | Axis-aligned `Rect` (built on `std:vectors`): `Min`/`Max`/`Center`, `Contains`, `Intersects`, `Intersection`, `Union` |
+| `std:rand` | Pseudo-random `Int`, `IntRange`, `Float`, `FloatRange`, `Bool`, seedable via `Seed` |
 | `std:test` | Assertions used by `llvmc -test` |
 
 Example:
@@ -109,5 +110,6 @@ Try:
 - `SlotMap`'s own `llvmc -test` assertions live in a `tests{}` block at the
   end of [`std/collections/collections.llx`](../std/collections/collections.llx)
   itself - see [`compiler.md`](compiler.md#run-language-tests) for the
-  `tests{}` construct. `std/vectors/vectors.llx` and `std/rect/rect.llx` do
-  the same.
+  `tests{}` construct. `std/vectors/vectors.llx`, `std/rect/rect.llx`, and
+  `std/rand/rand.llx` do the same.
+- [`rand_demo.llx`](../examples/rand_demo/rand_demo.llx)

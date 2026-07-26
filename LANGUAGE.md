@@ -2658,11 +2658,13 @@ error if it can't be found.
   `Split` (Go-`strings.Split` semantics exactly, edge cases included:
   `Split("", "")` is an empty slice, `Split(s, "")` splits into single-byte
   pieces, a `sep` that never occurs returns a length-1 slice holding `s`
-  itself unchanged), `ToUpper`/`ToLower` (ASCII `a`-`z`/`A`-`Z` only), and two
+  itself unchanged), `ToUpper`/`ToLower` (ASCII `a`-`z`/`A`-`Z` only), and three
   number-formatting helpers: `IntToString` (handles `0` and the smallest
-  representable `int` correctly) and `F64ToString` (a fixed 4-decimal-place
-  format, not a general shortest-round-tripping float formatter). Every one
-  of these is hand-written using only this language's own existing
+  representable `int` correctly), `F64ToStringPrecision(x, decimals)` (a
+  fixed-decimal-place format, not a general shortest-round-tripping float
+  formatter), and `F64ToString` (`F64ToStringPrecision` with `decimals`
+  fixed to 4). Every one of these is hand-written using only this language's
+  own existing
   primitives (slicing, `len`, `==`, `+`, loops) - deliberately zero `extern
   func` anywhere in this package, since `string`'s own `{ptr, i32}`
   representation has no real C-ABI shape `extern func`'s type restriction
@@ -2674,6 +2676,9 @@ error if it can't be found.
   untouched; this package is an additive convenience layer, not a
   replacement for it. The tick frequency is cached once via a non-constant
   top-level `var` initializer (see "Global `var` initializers" above).
+  `FormattedDuration(seconds f64) string` renders an `ElapsedSeconds` result
+  with whichever of ns/us/ms/s keeps the shown number roughly in the 1-999
+  range (`"230.00us"`, `"1.50s"`), via `std/strings.F64ToStringPrecision`.
 - **`std/scheduler`** - a Unity-`StartCoroutine`-style timer scheduler built
   on top of the `coroutine` type (see "Coroutines" above): `Scheduler.Schedule(e *Entry)`
   (honors whatever `e`'s coroutine already wrote into `e.NextWait`),
@@ -2717,17 +2722,31 @@ error if it can't be found.
   `Intersects(other)`, `Intersection(other) (Rect, bool)`, `Union(other)`.
   `Min`/`Max` are named by magnitude, never "Top"/"Bottom" - the package
   makes no assumption about which way Y increases.
+- **`std/rand`** - a small pseudo-random generator, zero `extern func`
+  (unlike most of this section): `Int() int` (non-negative), `IntRange(min,
+  max) int` (both inclusive), `Float() f64` (`[0, 1)`), `FloatRange(min,
+  max) f64` (`[min, max)`), `Bool()`, and `Seed(s u64)` for a reproducible
+  sequence - auto-seeded from `std/time.Now()` otherwise. A plain 64-bit
+  linear congruential generator, always consuming its upper bits (division
+  by a power of two standing in for the right-shift this language has no
+  operator for - see the package's own doc comment) rather than binding
+  libc's `rand()`, whose quality/range varies by platform.
 - **`std/test`** - soft-fail test helpers for `llvmc -test`: `Runner`,
   `NewRunner`, `Assert` / `AssertFalse` / `AssertEqual[T]` /
   `AssertNotEqual[T]` / `AssertNil[T]` / `AssertNotNil[T]` /
-  `AssertSliceEqual[T]` / `AssertApprox`. Discovery looks for
+  `AssertSliceEqual[T]` / `AssertApprox`, plus `Runner.DurationStr()` (how
+  long that one test took, shown next to its own PASS/FAIL line) and
+  `Suite`/`NewSuite()`/`Suite.DurationStr()` (the whole run's own total,
+  shown in the `-test` driver's final summary line - see `synthesizeTestDriver`,
+  cmd/llvmc/test.go). Discovery looks for
   `func TestXxx(t *test.Runner)` in the entry package (see CODEGEN.md's
   `-test` section). No auto-formatting of values into messages.
 
 **Deliberately deferred, not built this round:** Unicode-aware string
 handling (everything above is ASCII-only, matching this language having no
 Unicode awareness anywhere else yet), a general/shortest-round-tripping
-float-to-string formatter (`F64ToString` above is a simple fixed-precision
-one instead), file I/O, and anything else not listed above - `std/` is
+float-to-string formatter (`F64ToStringPrecision`/`F64ToString` above are a
+simple fixed-precision one instead), file I/O, and anything else not listed
+above - `std/` is
 expected to keep growing incrementally, the same way any other part of this
 language does.
