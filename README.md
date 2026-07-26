@@ -88,9 +88,9 @@ func Init() {
 
 	projectileTex = LoadTexture(cstring("projectile.png"))
 
-	collision.Insert((rect.Rect{vectors.Vector2{100, 100}, vectors.Vector2{80, 80}})
-	collision.Insert((rect.Rect{vectors.Vector2{300, 200}, vectors.Vector2{80, 80}})
-	collision.Insert((rect.Rect{vectors.Vector2{500, 300}, vectors.Vector2{80, 80}})
+	collision.Insert((rect.Rect{vectors.Vector2{100, 100}, vectors.Vector2{80, 80}}))
+	collision.Insert((rect.Rect{vectors.Vector2{300, 200}, vectors.Vector2{80, 80}}))
+	collision.Insert((rect.Rect{vectors.Vector2{500, 300}, vectors.Vector2{80, 80}}))
 }
 
 func Frame() int {
