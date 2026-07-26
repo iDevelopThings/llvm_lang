@@ -257,7 +257,12 @@ func TestGenericBodyRejectedForUnsupportedInstantiation(t *testing.T) {
 	diags := expectCheckErrors(t, "struct P {\n\tx int\n}\n"+
 		"func Sum[T](a T, b T) T {\n\treturn a + b\n}\n"+
 		"func main() {\n\tp := P{1}\n\tSum(p, p)\n}\n", 1)
-	wantDiag(t, diags.All()[0].Msg, "operator + not defined for P and P")
+	// P declares no operator + overload at all - the struct-LHS wording this
+	// feature introduces (see LANGUAGE.md's "Operator overloading" section)
+	// now fires here instead of the old generic "not defined for" message,
+	// since a struct LHS always means "no matching overload", never "not
+	// numeric" (P was never going to be numeric either way).
+	wantDiag(t, diags.All()[0].Msg, "no operator + overload on P for argument type P")
 }
 
 func TestGenericWrongTypeArgumentCountRejected(t *testing.T) {

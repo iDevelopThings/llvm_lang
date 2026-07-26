@@ -834,7 +834,11 @@ func (g *Generator) genBoolLit(n ast.NodeIndex) llvm.Value {
 // section) are handled before the operand is evaluated as a plain rvalue:
 // `&x` needs x's *address*, not its value (genAddr - the same address a
 // plain assignment to x would compute), and `*p` needs p's value (the
-// pointer itself) loaded through, not p's own address.
+// pointer itself) loaded through, not p's own address. A `-` resolved by
+// sema to a struct's own unary operator overload (Info.Refs[n] holding a
+// sema.SymOperator - see LANGUAGE.md's "Operator overloading" section)
+// lowers to an ordinary call instead (genOperatorCall), before the plain
+// numeric-negation case below is ever considered.
 func (g *Generator) genUnaryExpr(n ast.NodeIndex) llvm.Value {
 	operand := g.tree.Child(n, 0)
 	switch g.tree.Text(n) {
@@ -843,6 +847,10 @@ func (g *Generator) genUnaryExpr(n ast.NodeIndex) llvm.Value {
 	case "*":
 		ptr := g.genExpr(operand)
 		return g.builder.CreateLoad(g.llvmType(g.info.Types[n]), ptr, "")
+	}
+
+	if sym, ok := g.info.Refs[n]; ok && sym.Kind == sema.SymOperator {
+		return g.genOperatorCall(sym, operand, ast.InvalidNode)
 	}
 
 	v := g.genExpr(operand)
@@ -877,7 +885,11 @@ func (g *Generator) genUnaryExpr(n ast.NodeIndex) llvm.Value {
 // otherwise the existing integer instructions apply directly, unchanged
 // across every int width (an LLVM integer instruction is generic over bit
 // width as long as both operands share the same LLVM type, which sema
-// already guarantees here).
+// already guarantees here). A `+ - * /` resolved by sema to a struct's own
+// operator overload (Info.Refs[n] holding a sema.SymOperator - see
+// LANGUAGE.md's "Operator overloading" section) lowers to an ordinary call
+// instead (genOperatorCall), before any of the plain arithmetic cases below
+// are ever considered.
 func (g *Generator) genBinaryExpr(n ast.NodeIndex) llvm.Value {
 	op := g.tree.Text(n)
 	lNode := g.tree.Child(n, 0)
@@ -885,6 +897,10 @@ func (g *Generator) genBinaryExpr(n ast.NodeIndex) llvm.Value {
 
 	if op == "&&" || op == "||" {
 		return g.genShortCircuit(op, lNode, rNode)
+	}
+
+	if sym, ok := g.info.Refs[n]; ok && sym.Kind == sema.SymOperator {
+		return g.genOperatorCall(sym, lNode, rNode)
 	}
 
 	lv := g.genExpr(lNode)
@@ -1624,6 +1640,27 @@ func (g *Generator) genMethodCall(calleeNode ast.NodeIndex, argNodes []ast.NodeI
 	args[0] = receiverAddr
 	for i, a := range argNodes {
 		args[i+1] = g.genExpr(a)
+	}
+	return g.builder.CreateCall(entry.fnType, entry.fn, args, "")
+}
+
+// genOperatorCall lowers a resolved operator-overload use (see sema's
+// checkBinaryExpr/checkUnaryExpr, which record the selected overload's own
+// Symbol directly on the whole BinaryExpr/UnaryExpr node's own Info.Refs
+// entry - there's no separate callee child to attach it to the way an
+// ordinary CallExpr has) as an ordinary call: lNode's address becomes the
+// hidden receiver argument, exactly like genMethodCall's own
+// receiver-address convention - an operator overload IS just an ordinary
+// method reached through different call syntax. rNode is ast.InvalidNode for
+// a unary overload (no right operand to evaluate).
+func (g *Generator) genOperatorCall(sym *sema.Symbol, lNode, rNode ast.NodeIndex) llvm.Value {
+	entry := g.operators[sym]
+	receiverAddr, _ := g.genReceiverAddr(lNode)
+
+	args := make([]llvm.Value, 1, 2)
+	args[0] = receiverAddr
+	if rNode != ast.InvalidNode {
+		args = append(args, g.genExpr(rNode))
 	}
 	return g.builder.CreateCall(entry.fnType, entry.fn, args, "")
 }

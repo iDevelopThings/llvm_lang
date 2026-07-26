@@ -210,6 +210,18 @@ const (
 	// only into the synthetic scope generics.go builds per instantiation.
 	// IsType() included: `T` is legal anywhere a type name is.
 	SymTypeParam
+	// SymOperator names one `operator OP(param) RetType {...}` block nested
+	// inside a struct declaration (see LANGUAGE.md's "Operator overloading"
+	// section) - the operator-overload counterpart to SymConstructor, and,
+	// like it, never itself bound into any lexical Scope (an operator has no
+	// name to look up; it's selected by token, arity, and - for the binary
+	// case - the right operand's type, see StructInfo.Operators). Recorded
+	// directly onto a resolved BinaryExpr/UnaryExpr node's own Info.Refs
+	// entry once Check has determined which overload a use resolved to (see
+	// checkBinaryExpr/checkUnaryExpr, typecheck.go) - there's no separate
+	// callee child to attach it to the way a CallExpr has, so the whole
+	// expression node itself is the key.
+	SymOperator
 )
 
 func (k SymbolKind) String() string {
@@ -242,6 +254,8 @@ func (k SymbolKind) String() string {
 		return "enum variant"
 	case SymTypeParam:
 		return "type parameter"
+	case SymOperator:
+		return "operator"
 	default:
 		return "symbol"
 	}
@@ -415,11 +429,12 @@ type Symbol struct {
 // is already Ident" check as any of the real exceptions below, without
 // needing its own separate case.
 //
-//   - SymEnumVariant, SymPackage, SymConstructor, SymDestructor: each IS its
-//     own declaring Info.Refs entry directly - an EnumVariant's own Tok is
-//     its name; an ImportDecl has no separate name node; a constructor/
-//     destructor has no name at all to have one (see declareEnum/
-//     buildFileScope/declareConstructor/declareDestructor).
+//   - SymEnumVariant, SymPackage, SymConstructor, SymDestructor, SymOperator:
+//     each IS its own declaring Info.Refs entry directly - an EnumVariant's
+//     own Tok is its name; an ImportDecl has no separate name node; a
+//     constructor/destructor/operator overload has no name at all to have
+//     one (see declareEnum/buildFileScope/declareConstructor/
+//     declareDestructor/declareOperator).
 //   - SymFunc (a FuncDecl) / an ExternFuncDecl: the name isn't the first
 //     child (FuncDecl's own children lead with an optional receiver clause)
 //   - use FuncName/ExternFuncName instead of assuming Child(0).
@@ -441,7 +456,8 @@ func (s *Symbol) DeclaringNameNode(tree *ast.Tree) ast.NodeIndex {
 		enums.NodeKinds.EnumVariant,
 		enums.NodeKinds.ImportDecl,
 		enums.NodeKinds.ConstructorDecl,
-		enums.NodeKinds.DestructorDecl:
+		enums.NodeKinds.DestructorDecl,
+		enums.NodeKinds.OperatorDecl:
 		return s.Decl
 	case enums.NodeKinds.FuncDecl:
 		return tree.FuncName(s.Decl)
@@ -505,6 +521,19 @@ type StructInfo struct {
 	// Constructors' own arity-collision check already uses.
 	Destructor *Symbol
 
+	// Operators catalogs each declared `operator OP(param) RetType {...}`
+	// block (see LANGUAGE.md's "Operator overloading" section), keyed by the
+	// operator's own token text ("+", "-", "*", "/"). Unlike Constructors'
+	// count-only overload rule, an operator additionally dispatches on its
+	// right operand's type (see OperatorSet's own doc comment for the exact
+	// discriminant) - the entire point of the feature is letting `Vector2 *
+	// f64` and a hypothetical `Vector2 * Vector2` coexist on one struct.
+	// Built by declareOperator at struct-declaration time, which also
+	// rejects a structurally duplicate overload there, and any operator/
+	// arity combination outside this round's narrow supported set (binary
+	// `+ - * /`, unary `-` only). May be empty (most structs declare none).
+	Operators map[string]*OperatorSet
+
 	// Copyable reports whether a value of this struct type may be freely
 	// duplicated - false iff this struct declares its own Destructor, or
 	// (transitively) embeds any field whose own type is itself non-copyable,
@@ -525,6 +554,34 @@ type StructInfo struct {
 	// specifically so "not computed yet" and "computed, and it's false" are
 	// never confused (see checker.structCopyable).
 	copyableComputed bool
+}
+
+// OperatorSet catalogs every operator-overload block declared for one
+// specific token on one struct (see StructInfo.Operators). Unary is nil
+// unless a zero-parameter `operator OP()` block is declared - this round
+// only ever true for "-" (see declareOperator); Binary holds one entry per
+// distinct declared parameter type, since a one-parameter overload's own
+// discriminant is (token, and its parameter's own type), not token alone.
+type OperatorSet struct {
+	Unary  *Symbol
+	Binary []OperatorOverload
+}
+
+// OperatorOverload is one declared binary operator-overload block: its
+// resolved Symbol, plus ParamTypeText - its single parameter's own type
+// expression, rendered as source text (ast.Tree.SourceText). ParamTypeText
+// is only a fast-path, textual duplicate check at struct-declaration time
+// (Resolve has no type-inference machinery yet, unlike Check), and is NOT
+// the real guarantee: two distinct spellings of the same underlying Type
+// (`int` and `i32`, literally the same Type - see LANGUAGE.md's "Numeric
+// types" section) look different as text and so pass this check, but
+// checker.checkOperatorOverloadDuplicates (typecheck.go) re-checks every
+// binary overload pairwise by its real, resolved Type once Check has made
+// that computable, and is what actually catches that case with a real
+// diagnostic.
+type OperatorOverload struct {
+	Symbol        *Symbol
+	ParamTypeText string
 }
 
 // EnumVariantKind classifies one EnumVariant - unit (no associated data),

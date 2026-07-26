@@ -314,6 +314,7 @@ func (r *resolver) resolvePackage(trees []*ast.Tree) {
 				r.resolveStructFieldTypes(fileScope, decl)
 				r.resolveStructConstructors(fileScope, decl)
 				r.resolveStructDestructors(fileScope, decl)
+				r.resolveStructOperators(fileScope, decl)
 			case enums.NodeKinds.EnumDecl:
 				r.resolveEnumVariantTypes(fileScope, decl)
 				r.resolveEnumDestructors(fileScope, decl)
@@ -398,16 +399,18 @@ func (r *resolver) declareStruct(pkg *Scope, decl ast.NodeIndex) {
 		Fields:       make(map[string]*Symbol),
 		Methods:      make(map[string]*Symbol),
 		Constructors: make(map[int]*Symbol),
+		Operators:    make(map[string]*OperatorSet),
 	}
 	sym.StructInfo = info
 	r.info.Structs[sym.Name] = info
 	r.declareStructMembers(info, decl)
 }
 
-// declareStructMembers catalogs decl's fields, constructors and destructors
-// into info - shared by declareStruct and by a generic struct's own
-// instantiation, which builds its StructInfo itself (its name isn't decl's own
-// source text) but needs the identical member cataloguing.
+// declareStructMembers catalogs decl's fields, constructors, destructors,
+// and operator overloads into info - shared by declareStruct and by a
+// generic struct's own instantiation, which builds its StructInfo itself
+// (its name isn't decl's own source text) but needs the identical member
+// cataloguing.
 func (r *resolver) declareStructMembers(info *StructInfo, decl ast.NodeIndex) {
 	sym := info.Symbol
 	for _, field := range r.tree.StructFields(decl) {
@@ -435,6 +438,9 @@ func (r *resolver) declareStructMembers(info *StructInfo, decl ast.NodeIndex) {
 	}
 	for dtor := range r.tree.StructDestructors(decl) {
 		r.declareDestructor(info, dtor)
+	}
+	for op := range r.tree.StructOperators(decl) {
+		r.declareOperator(info, op)
 	}
 }
 
@@ -498,6 +504,83 @@ func (r *resolver) declareDestructor(info *StructInfo, dtor ast.NodeIndex) {
 		return
 	}
 	info.Destructor = dtorSym
+}
+
+// declareOperator catalogs one `operator OP(param) RetType {...}` block
+// nested inside a StructDecl (see LANGUAGE.md's "Operator overloading"
+// section), keyed first by the operator's own token text, then by arity: a
+// zero-parameter block is the unary form, a one-parameter block is binary -
+// additionally keyed by that parameter's own declared type, unlike
+// declareConstructor's count-only rule (see StructInfo.Operators/
+// OperatorSet's own doc comments for why).
+//
+// This round's supported set is narrow and enforced right here: binary
+// `+ - * /` and unary `-` only (see LANGUAGE.md's "Operator overloading"
+// section for why `==`/`!=`/comparisons/bitwise stay out of scope) - any
+// other token, or any arity beyond 0/1, is rejected as unsupported rather
+// than catalogued at all. A structurally duplicate overload (same token,
+// same arity, and for arity 1 the same parameter type - compared as source
+// text, see OperatorOverload's own doc comment) is likewise rejected, the
+// same "structural problem regardless of whether either is ever called"
+// reasoning declareConstructor's own duplicate-arity check already uses.
+func (r *resolver) declareOperator(info *StructInfo, opNode ast.NodeIndex) {
+	tok := r.tree.Text(opNode)
+	paramNodes := r.tree.Children(r.tree.OperatorParamList(opNode))
+
+	opSym := &Symbol{
+		Name:       fmt.Sprintf("%s.operator%s(%d)", info.Symbol.Name, tok, len(paramNodes)),
+		Kind:       SymOperator,
+		Decl:       opNode,
+		Tree:       r.tree,
+		Scope:      info.Symbol.Scope,
+		StructInfo: info,
+	}
+	r.info.Refs[opNode] = opSym
+
+	switch len(paramNodes) {
+	case 0:
+		if tok != "-" {
+			r.errorAt(opNode, "unary operator overloading is only supported for -, got %s", tok)
+			return
+		}
+	case 1:
+		switch tok {
+		case "+", "-", "*", "/":
+		default:
+			r.errorAt(opNode, "operator overloading is only supported for + - * / (binary) and - (unary), got %s", tok)
+			return
+		}
+	default:
+		r.errorAt(opNode, "operator %s must declare 0 (unary) or 1 (binary) parameters, got %d", tok, len(paramNodes))
+		return
+	}
+
+	set, ok := info.Operators[tok]
+	if !ok {
+		set = &OperatorSet{}
+		info.Operators[tok] = set
+	}
+
+	if len(paramNodes) == 0 {
+		if set.Unary != nil {
+			r.errorAt(opNode, "struct %s already has a unary operator %s overload", info.Symbol.Name, tok)
+			return
+		}
+		set.Unary = opSym
+		return
+	}
+
+	paramTypeText := r.tree.SourceText(r.tree.Child(paramNodes[0], 1))
+	for _, existing := range set.Binary {
+		if existing.ParamTypeText == paramTypeText {
+			r.errorAt(opNode, "struct %s already has an operator %s overload taking %s", info.Symbol.Name, tok, paramTypeText)
+			return
+		}
+	}
+	set.Binary = append(set.Binary, OperatorOverload{
+		Symbol:        opSym,
+		ParamTypeText: paramTypeText,
+	})
 }
 
 // declareEnum registers decl's own name into pkg (SymEnum) and catalogs every
@@ -733,6 +816,44 @@ func (r *resolver) resolveDestructorBody(pkg *Scope, info *StructInfo, dtor ast.
 		r.declareLocal(fnScope, param, r.tree.Child(param, 0), SymParam)
 		r.resolveType(fnScope, r.tree.Child(param, 1))
 	}
+
+	r.resolveBlock(fnScope, body)
+}
+
+// resolveStructOperators resolves every operator overload nested inside
+// decl - mirrors resolveStructConstructors, one construct over (see
+// LANGUAGE.md's "Operator overloading" section).
+func (r *resolver) resolveStructOperators(pkg *Scope, decl ast.NodeIndex) {
+	nameNode := r.tree.Child(decl, 0)
+	info, ok := r.info.Structs[r.tree.Text(nameNode)]
+	if !ok {
+		return
+	}
+	for op := range r.tree.StructOperators(decl) {
+		r.resolveOperatorBody(pkg, info, op)
+	}
+}
+
+// resolveOperatorBody resolves an operator overload's params, declared
+// return type, and body - mirrors resolveConstructorBody, plus the one
+// thing a constructor never has: a real return-type reference to resolve.
+func (r *resolver) resolveOperatorBody(pkg *Scope, info *StructInfo, op ast.NodeIndex) {
+	paramList := r.tree.OperatorParamList(op)
+	returnType := r.tree.OperatorReturnType(op)
+	body := r.tree.OperatorBody(op)
+
+	fnScope := newScope(ScopeFunc, pkg, op)
+	r.info.Scopes[op] = fnScope
+	fnScope.Receiver = receiverSymbol(info.Symbol, fnScope)
+	// See resolveConstructorBody's identical assignment for why this isn't
+	// redundant with what receiverSymbol already copied.
+	fnScope.Receiver.StructInfo = info
+
+	for _, param := range r.tree.Children(paramList) {
+		r.declareLocal(fnScope, param, r.tree.Child(param, 0), SymParam)
+		r.resolveType(fnScope, r.tree.Child(param, 1))
+	}
+	r.resolveType(fnScope, returnType)
 
 	r.resolveBlock(fnScope, body)
 }

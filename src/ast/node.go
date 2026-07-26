@@ -37,6 +37,16 @@ type Span struct {
 //     StringLit expression; there's no aliasing syntax yet - see
 //     LANGUAGE.md's "Imports" section - so there's no separate name node)
 //   - BinaryExpr, UnaryExpr: the operator token (Tok.Lexeme says which)
+//   - OperatorDecl: the overloaded operator's own token (`+`, `-`, `*`, or
+//     `/` - see LANGUAGE.md's "Operator overloading" section), NOT the
+//     leading `operator` keyword - deliberately parallel to how BinaryExpr/
+//     UnaryExpr already carry their own operator token in Tok, so a reader
+//     resolving which specific operator a use resolved to (checkBinaryExpr/
+//     checkUnaryExpr, sema/typecheck.go) reads the identical shape either
+//     side. One consequence: Tok.Start != Span.Start here (Span still starts
+//     at the `operator` keyword), so Tree.LeadingToken/DocComment don't
+//     reliably attach a preceding comment to this node kind - a known,
+//     narrow gap, not exercised by this feature's own tests.
 //   - MemberExpr: the field-name identifier token (`a.b` - Tok is `b`)
 //   - AssignStmt, IncDecStmt, MultiAssignStmt: the assignment/inc-dec
 //     operator token (=, +=, -=, *=, /=, ++, --; MultiAssignStmt only ever
@@ -157,10 +167,10 @@ type Span struct {
 //     convention every other optional child uses; it's a fixed slot rather
 //     than another leading member because a member list has no place to put
 //     something that isn't a member. Each member is either a
-//     Field, a ConstructorDecl, or a DestructorDecl, interspersed in
-//     declaration order - see ast.Tree's StructFields/StructConstructors/
-//     StructDestructors, which each filter the full member list down to
-//     their own kind.
+//     Field, a ConstructorDecl, a DestructorDecl, or an OperatorDecl,
+//     interspersed in declaration order - see ast.Tree's StructFields/
+//     StructConstructors/StructDestructors/StructOperators, which each
+//     filter the full member list down to their own kind.
 //   - ConstructorDecl: [paramList, body] - fixed arity. A constructor is a
 //     narrow, deliberate exception to "structs are data-only, methods
 //     declared separately" (see LANGUAGE.md's "Constructors" section): it's
@@ -180,6 +190,16 @@ type Span struct {
 //     would ever need to supply any. At most one per struct - a second one is
 //     a compile-time error, reported at struct-declaration time exactly like
 //     a duplicate-arity constructor (see sema.declareDestructor).
+//   - OperatorDecl: [paramList, returnType, body] - fixed arity, one slot
+//     more than ConstructorDecl/DestructorDecl's shared [paramList, body]
+//     shape: an operator overload (see LANGUAGE.md's "Operator overloading"
+//     section) has a real declared return type, unlike either of those two.
+//     Zero params is the unary form (this round: `-` only); one param is the
+//     binary form, and that parameter's own declared type IS the right
+//     operand's type an overload use must match - see sema.declareOperator
+//     for the resulting (token, arity, and for arity 1 also that param's own
+//     type) discriminant, the one deliberate divergence from
+//     ConstructorDecl's count-only overload rule.
 //   - File: [decl0, decl1, ...] - variable arity (the parse tree root)
 //   - ParamTypeList: [type0, type1, ...] - variable arity, each child a bare
 //     type-position node (an Ident, ArrayType, or another FuncType - no name,

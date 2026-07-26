@@ -37,6 +37,7 @@ Run a multi-file example by passing its directory:
 | Example | Shows |
 | --- | --- |
 | [`constructors`](../examples/constructors/constructors.llx) | Constructor overloads and composite literals |
+| [`operators`](../examples/operators/operators.llx) | Overloaded `* + -` on a Vector2-like struct |
 | [`destructors`](../examples/destructors/destructors.llx) | Automatic cleanup and explicit deletion |
 | [`pointers`](../examples/pointers/pointers.llx) | Addresses, dereferencing, `new`, `delete`, and `nil` |
 | [`enums`](../examples/enums/enums.llx) | Tagged unions, methods, and exhaustive matching |

@@ -1,0 +1,43 @@
+// operators.llx - a struct overloading `* + -` (see LANGUAGE.md's "Operator
+// overloading" section): `this` inside each block is the left operand, so
+// `a * 2.0` calls Vector2's own operator *, `scaled + b` calls operator +,
+// and `-sum` calls the unary operator -. Returns an int, which becomes this
+// process's own exit code (see cmd/llvmc's package doc comment).
+//
+// Run with:
+//   .\llvmc.exe examples\operators\operators.llx
+//   echo $LASTEXITCODE   # (PowerShell) -> 6
+
+struct Vector2 {
+    x f64
+    y f64
+
+    operator *(scalar f64) Vector2 {
+        return Vector2{this.x * scalar, this.y * scalar}
+    }
+    operator +(other Vector2) Vector2 {
+        return Vector2{this.x + other.x, this.y + other.y}
+    }
+    operator -() Vector2 {
+        return Vector2{-this.x, -this.y}
+    }
+}
+
+func main() int {
+    a := Vector2{1.0, 2.0}
+    b := Vector2{3.0, 4.0}
+
+    scaled := a * 2.0   // Vector2{2, 4}
+    sum := scaled + b   // Vector2{5, 8}
+    neg := -sum         // Vector2{-5, -8}
+
+    print(scaled.x)   // 2.000000
+    print(scaled.y)   // 4.000000
+    print(sum.x)      // 5.000000
+    print(sum.y)      // 8.000000
+    print(neg.x)      // -5.000000
+    print(neg.y)      // -8.000000
+
+    total := scaled.x + scaled.y + sum.x + sum.y + neg.x + neg.y
+    return int(total)   // 2 + 4 + 5 + 8 - 5 - 8 = 6
+}

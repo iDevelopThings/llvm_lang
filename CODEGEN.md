@@ -1257,6 +1257,39 @@ constructors - kept as its own map purely for read-site clarity, since a
 constructor's `*sema.Symbol` (`sema.SymConstructor`) is a completely
 different declaration shape from an ordinary free function's or method's.
 
+## Operator overloading
+
+See `LANGUAGE.md`'s "Operator overloading" section for the language-level
+feature. Lowering needs no fundamentally new machinery at all: an operator
+overload is just an ordinary method reached through `+ - * /`/unary `-`
+syntax instead of `.name(...)` call syntax.
+
+**Signature/body generation mirrors a constructor's own two-pass split**
+(`declareOperatorSignature`/`genOperatorBody`) - the same implicit-first-
+pointer-parameter convention, except an operator overload's LLVM return type
+is its own real declared return type, never `void` (unlike a constructor,
+it returns a genuine value rather than populating `this`). Named
+`Struct.operator.<word>.N` (`<word>` a readable stand-in for the token,
+`operatorFnNameSuffix`; `N` its declared parameter count - see that
+function's own doc comment for why both pieces are part of the name).
+
+**Lowering a use** (`genOperatorCall`, `src/codegen/expr.go`): sema already
+resolved which overload a `BinaryExpr`/`UnaryExpr` selected, recording that
+overload's own `*sema.Symbol` directly on the whole expression node's own
+`Info.Refs` entry - there's no separate callee child to attach it to the way
+a `CallExpr` has. `genBinaryExpr`/`genUnaryExpr` each check for this (a
+`sema.SymOperator`-kind `Info.Refs` entry) before ever reaching their own
+plain arithmetic/negation cases, and lower it exactly like `genMethodCall`
+already lowers an ordinary method call: the left (or only) operand's address
+becomes the hidden receiver argument, followed by the right operand's value
+for a binary overload.
+
+`Generator.operators` is `Generator.ctors`' operator-kind counterpart -
+keyed by the resolved overload's own `*sema.Symbol` (not just its struct),
+since a struct can declare several overloads of the same token, discriminated
+by parameter type (unlike a destructor, which needs no such indirection at
+all).
+
 ## Destructors
 
 See `LANGUAGE.md`'s "Destructors" section for the language-level feature.

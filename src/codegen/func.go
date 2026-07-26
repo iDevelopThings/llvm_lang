@@ -550,6 +550,94 @@ func (g *Generator) genDestructorBody(dtor ast.NodeIndex) {
 	g.curFunc = nil
 }
 
+// operatorFnNameSuffix renders tok (an operator overload's own token - see
+// LANGUAGE.md's "Operator overloading" section) as a plain word for use in
+// an LLVM function name, rather than embedding the raw symbol - purely
+// cosmetic (an LLVM symbol name tolerates arbitrary characters), kept
+// readable the same way declareConstructorSignature's own generated names
+// are. The declared parameter count, appended by the caller, is what
+// actually keeps a unary and binary overload of the same token
+// (`operator -()` vs `operator -(other T)`) from colliding.
+func operatorFnNameSuffix(tok string) string {
+	switch tok {
+	case "+":
+		return "add"
+	case "-":
+		return "sub"
+	case "*":
+		return "mul"
+	case "/":
+		return "div"
+	default:
+		return tok
+	}
+}
+
+// declareOperatorSignature declares op's (an OperatorDecl's) LLVM function
+// signature, with no body yet - mirrors declareConstructorSignature closely
+// (the same implicit-first-pointer-parameter convention for `this`), except
+// an operator overload has a real declared return type, never void: unlike
+// a constructor (which "returns" by populating `this`), an operator
+// overload returns a genuine value (see LANGUAGE.md's "Operator
+// overloading" section).
+func (g *Generator) declareOperatorSignature(op ast.NodeIndex) {
+	sym := g.info.Refs[op]
+	structInfo := sym.StructInfo
+	layout := g.structLayouts[structInfo]
+
+	paramListNode := g.tree.OperatorParamList(op)
+	paramNodes := g.tree.Children(paramListNode)
+	returnTypeNode := g.tree.OperatorReturnType(op)
+
+	paramTypes := make([]llvm.Type, 0, len(paramNodes)+1)
+	paramTypes = append(paramTypes, llvm.PointerType(layout.llvmType, 0))
+	for _, paramNode := range paramNodes {
+		paramTypes = append(paramTypes, g.llvmType(g.info.Types[g.tree.Child(paramNode, 1)]))
+	}
+
+	retType := g.info.Types[returnTypeNode]
+	fnType := llvm.FunctionType(g.llvmType(retType), paramTypes, false)
+	name := fmt.Sprintf("%s.operator.%s.%d", structInfo.Symbol.Name, operatorFnNameSuffix(g.tree.Text(op)), len(paramNodes))
+	g.operators[sym] = funcEntry{
+		fn:       llvm.AddFunction(g.mod, name, fnType),
+		fnType:   fnType,
+		retType:  retType,
+		isMethod: true,
+	}
+}
+
+// genOperatorBody lowers op's body, given its signature already declared
+// (see declareOperatorSignature) - mirrors genConstructorBody's parameter-
+// loop shape exactly, except hasReturn is always true and retType is the
+// overload's own real declared return type, not void.
+func (g *Generator) genOperatorBody(op ast.NodeIndex) {
+	sym := g.info.Refs[op]
+	entry := g.operators[sym]
+	paramListNode := g.tree.OperatorParamList(op)
+	body := g.tree.OperatorBody(op)
+
+	g.beginSyntheticFunc(entry.fn)
+	g.curReceiver = g.curFn.Param(0)
+
+	for i, paramNode := range g.tree.Children(paramListNode) {
+		psym := g.info.Refs[g.tree.Child(paramNode, 0)]
+		ptype := g.info.Types[g.tree.Child(paramNode, 1)]
+		addr := g.allocLocalSlot(psym, g.llvmType(ptype), psym.Name)
+		g.builder.CreateStore(g.curFn.Param(1+i), addr)
+		g.locals[psym] = addr
+		g.pushDestructorEntry(psym, ptype)
+	}
+
+	g.curFunc = &funcCtx{
+		isMain:    false,
+		hasReturn: true,
+		retType:   entry.retType,
+	}
+
+	g.finishBody(body)
+	g.curFunc = nil
+}
+
 // allocLocalSlot returns the storage address to use for sym - a var/
 // short-var-decl/parameter declaration's own Symbol - deciding between a real
 // stack alloca (createEntryAlloca, unchanged default) and an arena-heap

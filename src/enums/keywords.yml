@@ -64,3 +64,5 @@ values:
     string: "move"
   - name: Tests
     string: "tests"
+  - name: Operator
+    string: "operator"
