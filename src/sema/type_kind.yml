@@ -1,0 +1,118 @@
+package: sema
+type: TypeKind
+underlying: int
+constPrefix: Type
+denseTable: true
+aliasField: aliasOf
+iterators: [primitive, untyped, integer, unsigned, float]
+out: .
+kt:
+  out: ../../../llvm_lang_jb_plugin/src/main/kotlin/dev/idt/llx/types/TypeKind.kt
+  package: dev.idt.llx.types
+
+fields:
+  display: string
+  bits: int
+  integer: bool
+  unsigned: bool
+  float: bool
+  untyped: bool
+  primitive: bool
+
+values:
+  - name: Invalid
+    display: "<invalid>"
+  - name: Void
+    display: "void"
+
+  - name: I8
+    display: "i8"
+    bits: 8
+    integer: true
+    primitive: true
+  - name: I16
+    display: "i16"
+    bits: 16
+    integer: true
+    primitive: true
+  - name: I32
+    display: "int"
+    bits: 32
+    integer: true
+    primitive: true
+  - name: I64
+    display: "i64"
+    bits: 64
+    integer: true
+    primitive: true
+
+  - name: U8
+    display: "u8"
+    bits: 8
+    integer: true
+    unsigned: true
+    primitive: true
+  - name: U16
+    display: "u16"
+    bits: 16
+    integer: true
+    unsigned: true
+    primitive: true
+  - name: U32
+    display: "u32"
+    bits: 32
+    integer: true
+    unsigned: true
+    primitive: true
+  - name: U64
+    display: "u64"
+    bits: 64
+    integer: true
+    unsigned: true
+    primitive: true
+
+  - name: F32
+    display: "f32"
+    bits: 32
+    float: true
+    primitive: true
+  - name: F64
+    display: "f64"
+    bits: 64
+    float: true
+    primitive: true
+
+  - name: String
+    display: "string"
+    primitive: true
+  - name: CString
+    display: "cstring"
+    primitive: true
+  - name: Bool
+    display: "bool"
+    primitive: true
+  - name: Struct
+  - name: Array
+  - name: Func
+  - name: CFunc
+  - name: Pointer
+  - name: Map
+  - name: Enum
+
+  - name: UntypedInt
+    display: "untyped int"
+    integer: true
+    untyped: true
+  - name: UntypedFloat
+    display: "untyped float"
+    float: true
+    untyped: true
+  - name: UntypedNil
+    display: "nil"
+
+  - name: MultiReturn
+  - name: Generator
+  - name: Coroutine
+
+  - name: Int
+    aliasOf: I32
