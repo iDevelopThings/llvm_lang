@@ -20,7 +20,7 @@ import (
 // the *declaring* file's, which needn't be the file the request came from.
 //
 // "" for any symbol kind this doesn't know how to render (unchanged
-// behavior for everything but SymFunc/SymStruct/SymField).
+// behavior for everything but SymFunc/SymStruct/SymField/SymOperator).
 func symbolDetail(info *sema.Info, sym *sema.Symbol) string {
 	if sym == nil || sym.Tree == nil || sym.Decl == ast.InvalidNode {
 		return ""
@@ -40,6 +40,11 @@ func symbolDetail(info *sema.Info, sym *sema.Symbol) string {
 		return sema.StructFieldsText(sym.Tree, info, sym.Decl)
 	case sema.SymField:
 		return sema.FieldTypeText(sym.Tree, info, sym.Decl)
+	case sema.SymOperator:
+		// An OperatorDecl's shape ([paramList, returnType, body], always an
+		// explicit return type) differs from FuncDecl's, hence its own
+		// accessor set - see sema.OperatorSignatureText.
+		return sema.OperatorSignatureText(sym.Tree, info, sym.Decl)
 	default:
 		return ""
 	}

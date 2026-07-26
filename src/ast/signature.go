@@ -22,7 +22,24 @@ func (t *Tree) FuncSignatureText(decl NodeIndex, renderType func(NodeIndex) stri
 	if t.Nodes[decl].Kind == enums.NodeKinds.ExternFuncDecl {
 		paramList, returnType = t.ExternFuncParamList(decl), t.ExternFuncReturnType(decl)
 	}
+	return t.paramListSignatureText(paramList, returnType, renderType)
+}
 
+// OperatorSignatureText renders decl's (an OperatorDecl's) own parameter list
+// and return type as a compact "(name Type, ...) Return" string - the
+// OperatorDecl counterpart to FuncSignatureText, reading from
+// OperatorParamList/OperatorReturnType instead of FuncParamList/
+// FuncReturnType (an operator's return type is always present - see
+// OperatorReturnType's own doc comment - but paramListSignatureText's
+// InvalidNode guard still applies uniformly).
+func (t *Tree) OperatorSignatureText(decl NodeIndex, renderType func(NodeIndex) string) string {
+	return t.paramListSignatureText(t.OperatorParamList(decl), t.OperatorReturnType(decl), renderType)
+}
+
+// paramListSignatureText is the shared child-shape walk behind
+// FuncSignatureText/OperatorSignatureText: given a resolved paramList and
+// returnType child, render "(name Type, ...) Return".
+func (t *Tree) paramListSignatureText(paramList, returnType NodeIndex, renderType func(NodeIndex) string) string {
 	var params []string
 	for _, p := range t.Children(paramList) {
 		params = append(params, t.Text(t.Child(p, 0))+" "+renderTypeNode(t.Child(p, 1), renderType))
