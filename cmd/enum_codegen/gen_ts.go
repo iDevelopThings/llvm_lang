@@ -66,6 +66,21 @@ func renderTS(s *spec, fields []field, entries []entry, srcName, tsOutAbs string
 		}
 		p("")
 	}
+	aliases := aliasEntries(entries)
+	if len(aliases) > 0 {
+		p("// Source-level aliases, excluded from the tables below.")
+		for _, e := range aliases {
+			p(
+				"export const %s%s: %s = %s.%s;",
+				T,
+				s.memberIdent(e.Name),
+				T,
+				contV,
+				s.memberIdent(e.Alias),
+			)
+		}
+		p("")
+	}
 
 	// A metadata column is optional in TS when any member omits it: unlike Go,
 	// which must fall back to a zero value, TS models "absent" as an undefined
@@ -165,31 +180,6 @@ func renderTS(s *spec, fields []field, entries []entry, srcName, tsOutAbs string
 	}
 
 	return b.Bytes(), nil
-}
-
-// optionalFields reports, per metadata column, whether at least one member
-// omits it (a nil or null node), making it an optional TS property.
-func optionalFields(fields []field, members []entry) map[string]bool {
-	opt := map[string]bool{}
-	for _, f := range fields {
-		for _, e := range members {
-			if n := e.Nodes[f.Key]; n == nil || n.Tag == "!!null" {
-				opt[f.Key] = true
-				break
-			}
-		}
-	}
-	return opt
-}
-
-func sentinelEntries(entries []entry) []entry {
-	var out []entry
-	for _, e := range entries {
-		if e.Sentinel {
-			out = append(out, e)
-		}
-	}
-	return out
 }
 
 // tsImport is one generated import line for a cross-file enum reference.

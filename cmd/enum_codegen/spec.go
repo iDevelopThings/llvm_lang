@@ -24,6 +24,12 @@ type spec struct {
 	Underlying string `yaml:"underlying"`
 	// MarshalText adds encoding.TextMarshaler/Unmarshaler methods when set.
 	MarshalText bool `yaml:"marshalText"`
+	// DenseTable replaces the Go metadata map with a directly indexed array.
+	// Live wire values must be the contiguous range 0..n-1.
+	DenseTable bool `yaml:"denseTable"`
+	// AliasField names the per-member key used for source-level aliases. When
+	// empty, no member key is reserved and "alias" remains ordinary metadata.
+	AliasField string `yaml:"aliasField"`
 	// Case controls how a member name becomes its exported Go/TS identifier:
 	// "pascal" (default, suits camelCase names), "snake"/"preserve" (verbatim —
 	// keeps UPPER_SNAKE names as authored, avoiding pascal collisions), "camel",
@@ -48,6 +54,10 @@ type spec struct {
 	// enum's TypeScript symbols. Defaults to the relative path of TSOut; set it
 	// when the symbols live elsewhere (e.g. hand-written, or behind a path alias).
 	TSModule string `yaml:"tsModule"`
+	// KTOut, when set, is the Kotlin output file, relative to this file.
+	KTOut string `yaml:"ktOut"`
+	// KTPackage overrides the Kotlin package; it defaults to Package.
+	KTPackage string `yaml:"ktPackage"`
 	// Values are the enum members, in declaration order.
 	Values []yaml.Node `yaml:"values"`
 }
@@ -128,6 +138,17 @@ func (t ftype) tsType() string {
 	return base
 }
 
+func (t ftype) ktType() string {
+	base := kotlinBasicType(t.elem)
+	if t.ref != nil {
+		base = pascal(t.ref.spec.Type)
+	}
+	if t.slice {
+		return "List<" + base + ">"
+	}
+	return base
+}
+
 // field is one metadata column shared across the enum's members.
 type field struct {
 	Key      string // yaml key
@@ -138,10 +159,14 @@ type field struct {
 
 // entry is one enum member.
 type entry struct {
-	Name     string
-	Wire     string // literal for the const value (unquoted; quoted at render)
-	Sentinel bool   // const-only boundary: excluded from tables and iteration
-	Nodes    map[string]*yaml.Node
+	Name        string
+	Wire        string // literal for the const value (unquoted; quoted at render)
+	Alias       string // target member for a const-only source synonym
+	Sentinel    bool   // const-only boundary: excluded from tables and iteration
+	aliasSet    bool
+	wireSet     bool
+	sentinelSet bool
+	Nodes       map[string]*yaml.Node
 }
 
 // regEntry is one enum in the cross-spec registry, used to resolve and validate
@@ -152,6 +177,7 @@ type regEntry struct {
 	container string          // container var name
 	names     map[string]bool // declared member names, for reference validation
 	tsOutAbs  string          // resolved absolute TS output path, or ""
+	ktPackage string
 }
 
 func (r *regEntry) has(name string) bool {
@@ -196,6 +222,7 @@ type registry map[string]*regEntry
 type parsed struct {
 	path     string
 	tsOutAbs string // resolved absolute TS output path, or ""
+	ktOutAbs string // resolved absolute Kotlin output path, or ""
 	spec     *spec
 	fields   []field
 	entries  []entry
@@ -228,18 +255,37 @@ func parse(raw []byte) (*parsed, error) {
 		return nil, fmt.Errorf("case %q is not one of pascal, snake, preserve, camel, lower", s.Case)
 	}
 
-	fields, entries, err := parseValues(s.Values)
+	switch s.AliasField {
+	case "name",
+		"wire",
+		"sentinel":
+		return nil, fmt.Errorf("aliasField %q conflicts with a built-in member key", s.AliasField)
+	}
+	if _, declared := s.Fields[s.AliasField]; s.AliasField != "" && declared {
+		return nil, fmt.Errorf("aliasField %q cannot also be declared as metadata", s.AliasField)
+	}
+
+	fields, entries, err := parseValues(s.Values, s.AliasField)
 	if err != nil {
 		return nil, err
 	}
+	wireIndex := 0
 	for i := range entries {
-		if entries[i].Wire != "" {
+		if entries[i].Alias != "" {
 			continue
 		}
-		if s.stringUnderlying() {
-			entries[i].Wire = entries[i].Name
-		} else {
-			entries[i].Wire = strconv.Itoa(i)
+		if entries[i].Wire == "" {
+			if s.stringUnderlying() {
+				entries[i].Wire = entries[i].Name
+			} else {
+				entries[i].Wire = strconv.Itoa(wireIndex)
+			}
+		}
+		wireIndex++
+	}
+	if s.DenseTable {
+		if err := validateDenseTable(&s, entries); err != nil {
+			return nil, err
 		}
 	}
 	return &parsed{spec: &s, fields: fields, entries: entries}, nil
@@ -255,7 +301,9 @@ func buildRegistry(all []*parsed) (registry, error) {
 		}
 		names := make(map[string]bool, len(p.entries))
 		for _, e := range p.entries {
-			names[e.Name] = true
+			if e.Alias == "" {
+				names[e.Name] = true
+			}
 		}
 		reg[p.spec.Type] = &regEntry{
 			spec:      p.spec,
@@ -263,6 +311,7 @@ func buildRegistry(all []*parsed) (registry, error) {
 			container: *p.spec.Container,
 			names:     names,
 			tsOutAbs:  p.tsOutAbs,
+			ktPackage: p.spec.kotlinPackage(),
 		}
 	}
 	return reg, nil
@@ -341,10 +390,11 @@ func (s *spec) memberIdent(name string) string {
 
 // parseValues does two passes: infer the field set + types, then keep raw nodes
 // so literals can be rendered against the final (possibly widened) type.
-func parseValues(nodes []yaml.Node) ([]field, []entry, error) {
+func parseValues(nodes []yaml.Node, aliasField string) ([]field, []entry, error) {
 	var fields []field
 	idx := map[string]int{}
 	var entries []entry
+	declared := make(map[string]entry, len(nodes))
 
 	for i := range nodes {
 		n := &nodes[i]
@@ -354,13 +404,20 @@ func parseValues(nodes []yaml.Node) ([]field, []entry, error) {
 		e := entry{Nodes: map[string]*yaml.Node{}}
 		for j := 0; j+1 < len(n.Content); j += 2 {
 			key, val := n.Content[j].Value, n.Content[j+1]
+			if aliasField != "" && key == aliasField {
+				e.Alias = val.Value
+				e.aliasSet = true
+				continue
+			}
 			switch key {
 			case "name":
 				e.Name = val.Value
 			case "wire":
 				e.Wire = val.Value
+				e.wireSet = true
 			case "sentinel":
 				e.Sentinel = val.Value == "true"
+				e.sentinelSet = true
 			default:
 				e.Nodes[key] = val
 				t := inferType(val)
@@ -377,7 +434,34 @@ func parseValues(nodes []yaml.Node) ([]field, []entry, error) {
 		if e.Name == "" {
 			return nil, nil, fmt.Errorf("values[%d]: missing name", i)
 		}
+		if _, exists := declared[e.Name]; exists {
+			return nil, nil, fmt.Errorf("values[%d]: duplicate name %q", i, e.Name)
+		}
+		if e.aliasSet {
+			if e.Alias == "" {
+				return nil, nil, fmt.Errorf("values[%d] %q: alias target is required", i, e.Name)
+			}
+			switch {
+			case e.wireSet:
+				return nil, nil, fmt.Errorf("values[%d] %q: alias cannot be combined with wire", i, e.Name)
+			case e.sentinelSet:
+				return nil, nil, fmt.Errorf("values[%d] %q: alias cannot be combined with sentinel", i, e.Name)
+			case len(e.Nodes) != 0:
+				return nil, nil, fmt.Errorf("values[%d] %q: alias cannot have metadata", i, e.Name)
+			}
+			target, ok := declared[e.Alias]
+			if !ok {
+				return nil, nil, fmt.Errorf("values[%d] %q: alias target %q must be an earlier member of the same enum", i, e.Name, e.Alias)
+			}
+			if target.Alias != "" {
+				return nil, nil, fmt.Errorf("values[%d] %q: alias target %q is itself an alias", i, e.Name, e.Alias)
+			}
+			if target.Sentinel {
+				return nil, nil, fmt.Errorf("values[%d] %q: alias target %q is a sentinel", i, e.Name, e.Alias)
+			}
+		}
 		entries = append(entries, e)
+		declared[e.Name] = e
 	}
 	return fields, entries, nil
 }
@@ -445,15 +529,84 @@ func iteratorFields(s *spec, fields []field) ([]field, error) {
 }
 
 // liveEntries returns the members that participate in tables and iteration,
-// dropping const-only sentinels.
+// dropping const-only sentinels and aliases.
 func liveEntries(entries []entry) []entry {
 	out := make([]entry, 0, len(entries))
 	for _, e := range entries {
-		if !e.Sentinel {
+		if !e.Sentinel && e.Alias == "" {
 			out = append(out, e)
 		}
 	}
 	return out
+}
+
+func aliasEntries(entries []entry) []entry {
+	var out []entry
+	for _, e := range entries {
+		if e.Alias != "" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func sentinelEntries(entries []entry) []entry {
+	var out []entry
+	for _, e := range entries {
+		if e.Sentinel {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// optionalFields reports whether any live member omits each metadata column.
+func optionalFields(fields []field, members []entry) map[string]bool {
+	opt := map[string]bool{}
+	for _, f := range fields {
+		for _, e := range members {
+			if n := e.Nodes[f.Key]; n == nil || n.Tag == "!!null" {
+				opt[f.Key] = true
+				break
+			}
+		}
+	}
+	return opt
+}
+
+func (s *spec) kotlinPackage() string {
+	if s.KTPackage != "" {
+		return s.KTPackage
+	}
+	return s.Package
+}
+
+func validateDenseTable(s *spec, entries []entry) error {
+	if s.underlyingInfo()&types.IsInteger == 0 {
+		return fmt.Errorf("denseTable requires an integer underlying type")
+	}
+	members := liveEntries(entries)
+	if len(members) == 0 {
+		return fmt.Errorf("denseTable requires at least one live member")
+	}
+	seen := make([]bool, len(members))
+	for _, e := range members {
+		if strings.HasPrefix(e.Wire, "-") {
+			return fmt.Errorf("denseTable member %q has negative wire value %s", e.Name, e.Wire)
+		}
+		wire, err := strconv.ParseUint(e.Wire, 0, 64)
+		if err != nil {
+			return fmt.Errorf("denseTable member %q has invalid integer wire value %q", e.Name, e.Wire)
+		}
+		if wire >= uint64(len(members)) {
+			return fmt.Errorf("denseTable wire values must be contiguous 0..%d: %q has %d", len(members)-1, e.Name, wire)
+		}
+		if seen[wire] {
+			return fmt.Errorf("denseTable has duplicate wire value %d", wire)
+		}
+		seen[wire] = true
+	}
+	return nil
 }
 
 // wireLit renders a member's wire value as a literal of the underlying type,

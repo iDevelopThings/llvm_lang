@@ -132,6 +132,51 @@ values:
 	}
 }
 
+func TestGenWritesKotlinOutput(t *testing.T) {
+	dir := t.TempDir()
+	p := build(t, `
+package: p
+type: T
+underlying: string
+ktOut: T.kt
+values:
+  - name: A
+`)[0]
+	p.path = filepath.Join(dir, "t.yml")
+	p.ktOutAbs = filepath.Join(dir, "T.kt")
+
+	if err := gen(p, dir, ""); err != nil {
+		t.Fatalf("gen: %v", err)
+	}
+	raw, err := os.ReadFile(p.ktOutAbs)
+	if err != nil {
+		t.Fatalf("read Kotlin output: %v", err)
+	}
+	if !strings.Contains(string(raw), "public value class T(public val wire: String)") {
+		t.Errorf("unexpected Kotlin output\n---\n%s", raw)
+	}
+}
+
+func TestGenSkipsMissingKotlinDir(t *testing.T) {
+	dir := t.TempDir()
+	p := build(t, `
+package: p
+type: T
+ktOut: missing/T.kt
+values:
+  - name: A
+`)[0]
+	p.path = filepath.Join(dir, "t.yml")
+	p.ktOutAbs = filepath.Join(dir, "missing", "T.kt")
+
+	if err := gen(p, dir, ""); err != nil {
+		t.Fatalf("gen should not fail when the Kotlin dir is missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(p.ktOutAbs)); !os.IsNotExist(err) {
+		t.Error("the Kotlin output directory tree must not be created")
+	}
+}
+
 func TestRenderTSRejectsStructColumn(t *testing.T) {
 	dir := writeTempPkg(t)
 	const spec = `
@@ -155,5 +200,31 @@ values:
 	_, err := renderTS(p.spec, p.fields, p.entries, "t.yml", "")
 	if err == nil {
 		t.Fatal("expected TS rendering to reject a struct column")
+	}
+}
+
+func TestRenderKotlinRejectsStructColumn(t *testing.T) {
+	dir := writeTempPkg(t)
+	const spec = `
+package: foo
+type: T
+underlying: string
+ktOut: T.kt
+fields:
+  rules: "[]Rule"
+values:
+  - name: A
+    rules:
+      - func: X
+`
+	p, _ := parse([]byte(spec))
+	reg, _ := buildRegistry([]*parsed{p})
+	_ = resolveFields(p, reg)
+	if err := resolveStructRefs(p, dir, newTypeLoader()); err != nil {
+		t.Fatalf("resolveStructRefs: %v", err)
+	}
+	_, err := renderKotlin(p.spec, p.fields, p.entries, "t.yml")
+	if err == nil {
+		t.Fatal("expected Kotlin rendering to reject a struct column")
 	}
 }

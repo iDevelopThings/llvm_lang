@@ -1,7 +1,7 @@
 # enum_codegen
 
-Generates container-based Go enums — and, optionally, matching TypeScript
-types — from small YAML specs. One spec describes an enum type, its underlying
+Generates container-based Go enums and optional matching TypeScript and Kotlin
+types from small YAML specs. One spec describes an enum type, its underlying
 representation, and its members with arbitrary per-member metadata; the
 generator emits the constants, lookup tables, and helper methods so callers get
 name/value/metadata resolution without hand-maintaining parallel maps.
@@ -9,15 +9,15 @@ name/value/metadata resolution without hand-maintaining parallel maps.
 ## Usage
 
 Point `-in` at a single spec or a directory of specs. Output locations are set
-on the spec itself (`out`, `tsOut`), so a `//go:generate` directive only needs
-to name the input:
+on the spec itself (`out`, `tsOut`, `ktOut`), so a `//go:generate` directive
+only needs to name the input:
 
 ```go
 //go:generate go run ../../cmd/enum_codegen -in ./enums
 ```
 
-Then `go generate ./...`. See [`src/model/gen.go`](../../src/model/gen.go) and
-the specs in [`src/model/enums`](../../src/model/enums).
+Then `go generate ./...`. See the root [`main.go`](../../main.go) directive and
+the specs in [`src/enums`](../../src/enums).
 
 Flags:
 
@@ -36,9 +36,13 @@ package: model          # required: Go package of the generated file
 type: SlotName          # required: generated enum type name
 underlying: byte        # optional: base type (default: int)
 marshalText: false      # optional: emit MarshalText/UnmarshalText (default: false)
+denseTable: false       # optional: use a dense Go metadata array (default: false)
+aliasField: aliasOf     # optional: member key used for source-level aliases
 container: SlotNames    # optional: container var name (default: <type> + "s")
 out: ..                 # optional: Go output dir, relative to THIS file
 tsOut: ../ui/slots.ts   # optional: TypeScript output file, relative to THIS file
+ktOut: ../app/SlotName.kt # optional: Kotlin output file, relative to THIS file
+ktPackage: dev.example.model # optional: Kotlin package (default: package)
 values:
   - name: MainWeapon    # required: member identifier (PascalCase)
     wire: 0             # optional: const value (default: index, or name for string enums)
@@ -47,6 +51,8 @@ values:
   - name: MAX
     wire: 47
     sentinel: true      # const-only boundary; excluded from tables and iteration
+  - name: Primary
+    aliasOf: MainWeapon # const-only synonym for an earlier real member
 ```
 
 ### `underlying`
@@ -73,11 +79,47 @@ boundary such as `MAX` used for bounds/counts. It is deliberately excluded from
 the container, the `Infos`/`Values`/`ByName` tables, iteration, and the derived
 TypeScript union, so it never appears as a "real" value.
 
+### `aliasField`
+
+Set `aliasField` to opt into source-level aliases and choose their per-member
+key. An entry using that key emits one source-level constant equal to an earlier
+real member. It has no wire slot and is excluded from containers, metadata,
+values, iteration, `ByName`, and `Parse`:
+
+```yaml
+aliasField: aliasOf
+values:
+  - name: I32
+  - name: Int
+    aliasOf: I32
+```
+
+Keeping aliases out of name lookup is deliberate: aliases are source-code
+conveniences, not additional serialized or parsed enum names.
+
+The target must already be declared in the same enum and cannot be another
+alias or a sentinel. An alias cannot also set `wire`, `sentinel`, or metadata.
+The configured key cannot be `name`, `wire`, or `sentinel`.
+
+When `aliasField` is omitted, no member key is reserved. In particular, an
+existing metadata column named `alias` continues to work unchanged.
+
+### `denseTable`
+
+`denseTable: true` replaces the generated Go metadata map with a directly
+indexed array. The live wire values must be exactly `0..n-1`, with no gaps or
+duplicates. Aliases do not consume a default wire value; aliases and sentinels
+do not occupy array slots.
+
+Non-integer, negative, sparse, duplicate, and empty dense tables are rejected
+during generation. Invalid runtime values remain safe because lookup methods
+bounds-check before indexing.
+
 ### Metadata columns
 
-Every key on a member other than `name`/`wire`/`sentinel` becomes a metadata
-column. Its Go type is inferred from the YAML scalar tag and widened across all
-members:
+Every key on a member other than `name`/`wire`/`sentinel` and the configured
+`aliasField` becomes a metadata column. Its Go type is inferred from the YAML
+scalar tag and widened across all members:
 
 | YAML          | Go type    |
 | ------------- | ---------- |
@@ -109,8 +151,9 @@ set (a reference), the **name of a Go struct** in the target package, or a slice
 of any of these.
 
 **Enum references** are the main reason to declare a type. `stat: fishingSpeed`
-typed as `StatId` emits the compile-checked constant `StatIdFishingSpeed` (Go)
-and `StatIds.FishingSpeed` (TS), honoring the referenced enum's own `case` mode.
+typed as `StatId` emits the compile-checked constant `StatIdFishingSpeed` (Go),
+`StatIds.FishingSpeed` (TS), or `StatId.FishingSpeed` (Kotlin), honoring the
+referenced enum's own `case` mode.
 The generator resolves references across the whole `-in` set in a first pass, so
 it **errors at generation time** if a value isn't a real member of the target
 enum — which is how a typo or a stale name gets caught. A member that omits a
@@ -139,8 +182,8 @@ and each value is rendered with the field's actual type (so `args: [10]` on an
 `Args []float64` field emits `[]float64{10}`, not `[]int{...}`). Basic fields,
 slices, pointers, and nested same-package structs are supported; a field from
 another package is rejected (its import isn't wired up). Struct columns are
-Go-only — a struct column in a `tsOut` enum errors. Package types are loaded
-lazily, so enum-only generation never invokes `go/packages`.
+Go-only — a struct column in a `tsOut` or `ktOut` enum errors. Package types are
+loaded lazily, so enum-only generation never invokes `go/packages`.
 
 ### Extra iterators (`iterators`)
 
@@ -151,11 +194,11 @@ hand-written side file:
 iterators: [title, alias]
 ```
 
-For each column this emits a Go container method `Iter<Field>() iter.Seq[T]` and
-a TypeScript generator `iter<Field>()`, both yielding each member's value in
-declaration order (`T` is the column's type; an optional TS column yields
-`... | undefined`). Get an array in TS with `[...iterTitle()]`. An `iterators`
-entry that names a non-column errors.
+For each column this emits a Go container method `Iter<Field>() iter.Seq[T]`, a
+TypeScript generator `iter<Field>()`, and a Kotlin `Sequence<T>` function. Each
+yields the column in declaration order. Optional TypeScript columns yield
+`... | undefined`; optional Kotlin columns yield nullable values. An
+`iterators` entry that names a non-column errors.
 
 ## Generated Go API
 
@@ -197,6 +240,26 @@ lookup-time lowercasing). For the same case-insensitive resolution, a
 `parse<Type>(name)` function is generated that trims and lowercases before
 looking up, returning `undefined` for an unknown name.
 
+## Generated Kotlin
+
+When `ktOut` is set, the generator writes an `@JvmInline value class`. Members
+live on its companion object, giving compact usage such as
+`SlotName.MainWeapon` while retaining only the configured wire value at
+runtime. The companion exposes `entries`, `byName`, `fromWire`, and
+case-insensitive `parse`; metadata is emitted as a typed data class and map.
+
+Go primitive types map to Kotlin primitives, slices become read-only `List<T>`,
+and omitted metadata becomes nullable. Cross-enum fields use the referenced
+value class and add an import when its `ktPackage` differs. Kotlin keywords are
+escaped when a configured case mode produces one.
+
+Aliases and sentinels are top-level typed values. Neither participates in
+`entries`, lookups, or metadata.
+
+Like TypeScript output, the Kotlin output directory is never created. A missing
+directory produces a skip warning without affecting Go or other configured
+outputs.
+
 ## Layout
 
 | file          | responsibility                                        |
@@ -205,4 +268,5 @@ looking up, returning `undefined` for an unknown name.
 | `spec.go`     | spec parsing, type inference, underlying classification |
 | `gen_go.go`   | Go renderer                                            |
 | `gen_ts.go`   | TypeScript renderer                                    |
+| `gen_kotlin.go` | Kotlin renderer                                        |
 | `naming.go`   | identifier case helpers                                |

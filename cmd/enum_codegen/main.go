@@ -1,5 +1,5 @@
-// Command enum_codegen generates container-based Go enums (and, optionally,
-// matching TypeScript types) from YAML specs.
+// Command enum_codegen generates container-based Go enums and optional
+// TypeScript and Kotlin counterparts from YAML specs.
 //
 // Each spec declares a type, its underlying representation, and its members
 // with per-member metadata. Output locations may be set on the spec itself
@@ -44,7 +44,8 @@ func main() {
 			check(fmt.Errorf("%s: %w", f, err))
 		}
 		p.path = f
-		p.tsOutAbs = tsOutPath(f, p.spec.TSOut)
+		p.tsOutAbs = outputPath(f, p.spec.TSOut)
+		p.ktOutAbs = outputPath(f, p.spec.KTOut)
 		all = append(all, p)
 	}
 	reg, err := buildRegistry(all)
@@ -128,39 +129,72 @@ func gen(p *parsed, out, root string) error {
 		return err
 	}
 
-	if p.tsOutAbs == "" {
-		return nil
+	if p.tsOutAbs != "" {
+		if err := writeOptionalOutput(
+			"TypeScript",
+			s.Type,
+			p.tsOutAbs,
+			func() ([]byte, error) {
+				return renderTS(s, p.fields, p.entries, srcName, p.tsOutAbs)
+			},
+		); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
 	}
-	// The TS target often lives in a separate repo (e.g. a viewer alongside this
-	// one). Never create its directory tree: writing into a missing path would
-	// scatter stray dirs/files for anyone using this package without that repo.
-	// Require the directory to exist; otherwise warn and skip.
-	tsDir := filepath.Dir(p.tsOutAbs)
-	if info, err := os.Stat(tsDir); err != nil || !info.IsDir() {
+	if p.ktOutAbs != "" {
+		if err := writeOptionalOutput(
+			"Kotlin",
+			s.Type,
+			p.ktOutAbs,
+			func() ([]byte, error) {
+				return renderKotlin(s, p.fields, p.entries, srcName)
+			},
+		); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+	}
+	return nil
+}
+
+// outputPath resolves a secondary output relative to the spec file.
+func outputPath(specPath, output string) string {
+	if output == "" {
+		return ""
+	}
+	if filepath.IsAbs(output) {
+		return output
+	}
+	return filepath.Join(filepath.Dir(specPath), output)
+}
+
+// writeOptionalOutput writes a client-language output only when its destination
+// directory already exists.
+func writeOptionalOutput(
+	language string,
+	enumType string,
+	dst string,
+	render func() ([]byte, error),
+) error {
+	dir := filepath.Dir(dst)
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 		if err == nil || os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "enum_codegen: skipping TypeScript for %s: output directory %s does not exist\n", s.Type, tsDir)
+			fmt.Fprintf(
+				os.Stderr,
+				"enum_codegen: skipping %s for %s: output directory %s does not exist\n",
+				language,
+				enumType,
+				dir,
+			)
 			return nil
 		}
 		return err
 	}
-	tsSrc, err := renderTS(s, p.fields, p.entries, srcName, p.tsOutAbs)
+	src, err := render()
 	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+		return err
 	}
-	fmt.Fprintf(os.Stderr, "enum_codegen: %s -> %s\n", path, p.tsOutAbs)
-	return os.WriteFile(p.tsOutAbs, tsSrc, 0o644)
-}
-
-// tsOutPath resolves a spec's TS output to an absolute path (relative to the
-// spec file), or "" when the spec emits no TypeScript.
-func tsOutPath(specPath, tsOut string) string {
-	if tsOut == "" {
-		return ""
-	}
-	if filepath.IsAbs(tsOut) {
-		return tsOut
-	}
-	return filepath.Join(filepath.Dir(specPath), tsOut)
+	fmt.Fprintf(os.Stderr, "enum_codegen: %s -> %s\n", language, dst)
+	return os.WriteFile(dst, src, 0o644)
 }
 
 // goOutDir resolves the Go output directory: the -out / -root flags win, then

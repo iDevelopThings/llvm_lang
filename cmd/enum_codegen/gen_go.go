@@ -37,6 +37,10 @@ func renderGo(s *spec, fields []field, entries []entry, srcName string) ([]byte,
 	p("")
 	p("const (")
 	for _, e := range entries {
+		if e.Alias != "" {
+			p("\t%s%s = %s%s", exportedType, s.memberIdent(e.Name), exportedType, s.memberIdent(e.Alias))
+			continue
+		}
 		p("\t%s%s %s = %s", exportedType, s.memberIdent(e.Name), T, wireLit(s, e.Wire))
 	}
 	p(")")
@@ -69,7 +73,11 @@ func renderGo(s *spec, fields []field, entries []entry, srcName string) ([]byte,
 	p("")
 
 	// Tables
-	p("var %sInfos = map[%s]%s{", unexportedType, T, infoT)
+	if s.DenseTable {
+		p("var %sInfos = [...]%s{", unexportedType, infoT)
+	} else {
+		p("var %sInfos = map[%s]%s{", unexportedType, T, infoT)
+	}
 	for _, e := range members {
 		p("\t%s%s: {", exportedType, s.memberIdent(e.Name))
 		p("\t\t%s: %s%s,", exportedType, exportedType, s.memberIdent(e.Name))
@@ -142,8 +150,16 @@ func renderGo(s *spec, fields []field, entries []entry, srcName string) ([]byte,
 	p("// FromWire converts a raw wire value, reporting whether it is declared.")
 	p("func (c %s) FromWire(w %s) (%s, bool) {", contT, s.Underlying, T)
 	p("\tv := %s(w)", T)
-	p("\t_, ok := %sInfos[v]", unexportedType)
-	p("\treturn v, ok")
+	if s.DenseTable {
+		p("\tif uint64(v) >= uint64(len(%sInfos)) {", unexportedType)
+		p("\t\tvar zero %s", T)
+		p("\t\treturn zero, false")
+		p("\t}")
+		p("\treturn v, true")
+	} else {
+		p("\t_, ok := %sInfos[v]", unexportedType)
+		p("\treturn v, ok")
+	}
 	p("}")
 	p("")
 
@@ -166,19 +182,35 @@ func renderGo(s *spec, fields []field, entries []entry, srcName string) ([]byte,
 	// Value methods
 	p("// TryGetInfo returns the metadata for v, and whether v is a declared value.")
 	p("func (v %s) TryGetInfo() (%s, bool) {", T, infoT)
-	p("\ti, ok := %sInfos[v]", unexportedType)
-	p("\treturn i, ok")
+	if s.DenseTable {
+		p("\tif uint64(v) >= uint64(len(%sInfos)) {", unexportedType)
+		p("\t\treturn %s{}, false", infoT)
+		p("\t}")
+		p("\treturn %sInfos[v], true", unexportedType)
+	} else {
+		p("\ti, ok := %sInfos[v]", unexportedType)
+		p("\treturn i, ok")
+	}
 	p("}")
 	p("")
 	p("// Info returns the metadata for v, and whether v is a declared value.")
 	p("func (v %s) Info() %s {", T, infoT)
-	p("\treturn %sInfos[v]", unexportedType)
+	if s.DenseTable {
+		p("\ti, _ := v.TryGetInfo()")
+		p("\treturn i")
+	} else {
+		p("\treturn %sInfos[v]", unexportedType)
+	}
 	p("}")
 	p("")
 
 	p("func (v %s) Valid() bool {", T)
-	p("\t_, ok := %sInfos[v]", unexportedType)
-	p("\treturn ok")
+	if s.DenseTable {
+		p("\treturn uint64(v) < uint64(len(%sInfos))", unexportedType)
+	} else {
+		p("\t_, ok := %sInfos[v]", unexportedType)
+		p("\treturn ok")
+	}
 	p("}")
 	p("")
 
@@ -188,12 +220,20 @@ func renderGo(s *spec, fields []field, entries []entry, srcName string) ([]byte,
 	p("")
 
 	p("func (v %s) Name() string {", T)
-	p("\treturn %sInfos[v].Name", unexportedType)
+	if s.DenseTable {
+		p("\treturn v.Info().Name")
+	} else {
+		p("\treturn %sInfos[v].Name", unexportedType)
+	}
 	p("}")
 	p("")
 
 	p("func (v %s) String() string {", T)
-	p("\tif i, ok := %sInfos[v]; ok {", unexportedType)
+	if s.DenseTable {
+		p("\tif i, ok := v.TryGetInfo(); ok {")
+	} else {
+		p("\tif i, ok := %sInfos[v]; ok {", unexportedType)
+	}
 	p("\t\treturn i.Name")
 	p("\t}")
 	p("\treturn fmt.Sprintf(%q, %s(v))", T+"("+s.fmtVerb()+")", s.Underlying)
@@ -206,7 +246,11 @@ func renderGo(s *spec, fields []field, entries []entry, srcName string) ([]byte,
 			continue
 		}
 		p("func (v %s) %s() %s {", T, f.GoName, f.Type.goType())
-		p("\treturn %sInfos[v].%s", unexportedType, f.GoName)
+		if s.DenseTable {
+			p("\treturn v.Info().%s", f.GoName)
+		} else {
+			p("\treturn %sInfos[v].%s", unexportedType, f.GoName)
+		}
 		p("}")
 		p("")
 	}

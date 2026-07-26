@@ -393,6 +393,18 @@ values:
 	if !strings.Contains(ts, "yield StatInfos[v].label;") {
 		t.Error("TS iterator should yield the field value")
 	}
+
+	ktOut, err := renderKotlin(p.spec, p.fields, p.entries, "stat.yml")
+	if err != nil {
+		t.Fatalf("renderKotlin: %v", err)
+	}
+	kt := string(ktOut)
+	if !strings.Contains(kt, "public fun iterLabel(): Sequence<String> =") {
+		t.Errorf("missing Kotlin iterator\n---\n%s", kt)
+	}
+	if !strings.Contains(kt, "public fun iterAlias(): Sequence<String?> =") {
+		t.Error("optional Kotlin iterator should yield a nullable type")
+	}
 }
 
 func TestIteratorUnknownColumnErrors(t *testing.T) {
