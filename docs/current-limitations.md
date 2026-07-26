@@ -31,6 +31,9 @@ This is a quick list of deliberate limits, not a roadmap.
 - Only free functions have first-class function values; bound method values
   are not supported. A variadic function cannot be used as a value either -
   only called directly.
+- A lambda or constructor's own last parameter may be written `...T`, but
+  gets no collect/spread call-site sugar - it's just an ordinary `[]T`
+  parameter there, unlike a named function's variadic parameter.
 - Lambdas cannot capture a method's `this`.
 - Generic enums are not supported.
 - Explicit type arguments work on free-function calls, but not method calls.

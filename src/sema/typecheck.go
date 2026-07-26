@@ -22,14 +22,14 @@ import (
 // own Type; only a real Type (TypeFunc, for a bare function reference or a
 // function-typed variable) does that. See funcSigForCall.
 //
-// Variadic marks a declared function/method whose last parameter is
-// `...T` (see LANGUAGE.md's "Variadic parameters" section) - Params' own
-// last entry is already the ordinary `[]T` dynamic-array Type in that case
-// (computeDeclType wraps it), so nothing here duplicates the element type;
-// checkCallArgs reads *Params[len(Params)-1].Elem for it. Always false for
-// an indirect call's own funcSignature (built from a TypeFunc's Params via
-// funcType) - a variadic function can never be referenced as a value in the
-// first place (see typeOfSymbolValue), so that shape never arises.
+// Variadic marks a declared function/method whose last parameter is `...T`.
+// Params' own last entry is already the ordinary `[]T` dynamic-array Type in
+// that case (computeDeclType wraps it), so nothing here duplicates the
+// element type; checkCallArgs reads *Params[len(Params)-1].Elem for it.
+// Always false for an indirect call's own funcSignature (built from a
+// TypeFunc's Params via funcType) - a variadic function can never be
+// referenced as a value in the first place (see typeOfSymbolValue), so that
+// shape never arises.
 type funcSignature struct {
 	Params   []Type
 	Return   Type

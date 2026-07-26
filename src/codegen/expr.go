@@ -1582,13 +1582,8 @@ func (g *Generator) genConversion(n, argNode ast.NodeIndex) llvm.Value {
 // (isDirectFuncCall) - identical for both until entry.fnType's own declared
 // param/return types diverge from g.llvmType's "natural" ones, which only
 // ever happens for an extern func's own struct-by-value parameter/return
-// (see ffi.go's own doc comment for why, and DECISIONS.md's dated entry for
-// what this scopes out: an ordinary call's declared and natural types are
-// always identical, so every branch below is a no-op there). n is the whole
-// CallExpr - only needed to check a spread argument (see genCallArgValues);
-// an extern func can never be variadic (LANGUAGE.md's FFI type restriction
-// already rejects a bare []T parameter), so genCallArgValues is a no-op
-// beyond plain per-argument evaluation for that case.
+// (see ffi.go's own doc comment for why). n is the whole CallExpr, only
+// needed to check a spread argument (see genCallArgValues).
 func (g *Generator) genFuncCall(n, calleeNode ast.NodeIndex, argNodes []ast.NodeIndex) llvm.Value {
 	sym := g.info.Refs[calleeNode]
 	entry := g.funcs[sym]
@@ -1653,11 +1648,9 @@ func (g *Generator) genMethodCall(n, calleeNode ast.NodeIndex, argNodes []ast.No
 // isVariadicFuncDecl reports whether decl (declared in tree) is a FuncDecl
 // with a variadic last parameter (`...T` - see LANGUAGE.md's "Variadic
 // parameters" section) - a purely structural, AST-level check
-// (Tree.ParamIsVariadic) needing no sema.Info, mirroring how
-// isDirectFuncCall/isConversionCall already mirror sema's own structural
-// dispatch (see CODEGEN.md). Always false for an ExternFuncDecl - LANGUAGE.md's
-// FFI type restriction already rejects a bare []T parameter, so an extern
-// func can never actually be variadic.
+// (Tree.ParamIsVariadic) needing no sema.Info. Always false for an
+// ExternFuncDecl: LANGUAGE.md's FFI type restriction already rejects a bare
+// []T parameter, so an extern func can never actually be variadic.
 func isVariadicFuncDecl(tree *ast.Tree, decl ast.NodeIndex) bool {
 	if tree.Nodes[decl].Kind != enums.NodeKinds.FuncDecl {
 		return false
@@ -1667,19 +1660,15 @@ func isVariadicFuncDecl(tree *ast.Tree, decl ast.NodeIndex) bool {
 }
 
 // genCallArgValues builds the real LLVM argument list for a direct call
-// (genFuncCall/genMethodCall) to declTree/declNode's own declared parameters,
-// from argNodes exactly as sema already checked them (see sema's
-// checkVariadicCallArgs) - n is the whole CallExpr, read only for
-// Tree.CallHasSpread. An ordinary call just evaluates each argNode in
-// order; a variadic one (see LANGUAGE.md's "Variadic parameters" section)
-// additionally collects every trailing argument into a freshly built []T -
-// the exact same arena allocation genDynArrayLitInto already builds for a
-// `[]T{...}` composite literal - or, for a spread call, passes an existing
-// []T value straight through with no allocation at all. Either way this is
-// the only codegen this feature needs: the callee's own declared LLVM
-// signature already has an ordinary []T as its real last parameter (see
-// declareFuncSignature), so the call instruction itself, and the function's
-// own body, need no further awareness of variadic-ness whatsoever.
+// (genFuncCall/genMethodCall) to declTree/declNode's own declared parameters
+// - n is the whole CallExpr, read only for Tree.CallHasSpread. An ordinary
+// call just evaluates each argNode in order; a variadic one (see
+// LANGUAGE.md's "Variadic parameters" section) additionally collects every
+// trailing argument into a freshly built []T, or, for a spread call, passes
+// an existing []T value straight through with no allocation at all. This is
+// the only codegen this feature needs anywhere - the call instruction
+// itself, and the callee's own declaration/body, need no further awareness
+// of variadic-ness.
 func (g *Generator) genCallArgValues(n ast.NodeIndex, declTree *ast.Tree, declNode ast.NodeIndex, argNodes []ast.NodeIndex) []llvm.Value {
 	if !isVariadicFuncDecl(declTree, declNode) {
 		args := make([]llvm.Value, len(argNodes))

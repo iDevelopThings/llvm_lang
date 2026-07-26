@@ -1810,6 +1810,11 @@ a value, only called directly") - the same out-of-scope precedent "First-
 class functions" above already sets for a bound method value. Only a direct
 *call* to a variadic function is meaningful this round.
 
+A function literal or constructor whose last parameter is written `...T`
+parses, but gets none of the collect/spread call-site sugar above - it's
+just an ordinary `[]T` parameter, so calling it requires passing a real
+`[]T` directly rather than trailing positional arguments.
+
 ## Lambdas (function-literal expressions)
 
 A function value doesn't have to be a *reference* to an already-declared
