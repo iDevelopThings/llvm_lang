@@ -1,0 +1,180 @@
+// rand.llx - std/rand: a small pseudo-random number package, built entirely
+// as ordinary .llx code (see LANGUAGE.md's "Standard library" section) - no
+// `extern func` at all, unlike most of this project's other FFI-backed
+// packages. libc's own `rand()` was deliberately not bound: its quality and
+// range (`RAND_MAX`) vary by platform - mingw's own C runtime only gives 15
+// usable bits - so a small generator written directly in this language is
+// both more portable and a better fit than wrapping a weak/inconsistent libc
+// primitive.
+//
+// This language has no bit-shift operator (see LANGUAGE.md's "Operators"
+// section - only `+ - * / % & | ^` exist for integers), which rules out
+// every common modern generator (xorshift, PCG, splitmix64, ...): all of
+// them extract a generator's output via a shift or rotate. Division by a
+// power of two is the unsigned-integer equivalent of a right shift, so this
+// package uses that instead - a plain 64-bit linear congruential generator
+// (`next`, Knuth's MMIX constants; wraps mod 2^64 for free via u64's own
+// wraparound overflow - see LANGUAGE.md's "Types" section), always
+// consuming its *upper* bits (`nextU32`, and the top 53 bits in `Float`) -
+// an LCG's low bits are its statistically weakest part, so this avoids
+// relying on them anywhere.
+
+import "std:time"
+
+// state is the generator's current 64-bit LCG state, auto-seeded from
+// std/time.Now() so a program gets a different sequence every run without
+// calling Seed at all.
+var state u64 = u64(time.Now())
+
+// Seed resets the generator to start from a specific state, making every
+// later Int/Float/... call reproduce the exact same sequence for that seed -
+// useful for a repeatable test or a replayable run.
+func Seed(s u64) {
+    state = s
+}
+
+// next advances the LCG by one step and returns its new raw state.
+func next() u64 {
+    state = state*6364136223846793005 + 1442695040888963407
+    return state
+}
+
+// nextU32 returns the upper 32 bits of one generator step - see this file's
+// own header comment for why the upper half, not the raw 64-bit value.
+func nextU32() u32 {
+    return u32(next() / 4294967296)
+}
+
+// Int returns a pseudo-random, non-negative int (0 to 2147483647 inclusive).
+func Int() int {
+    return int(nextU32() % 2147483648)
+}
+
+// IntRange returns a pseudo-random int in [min, max], both inclusive.
+// Requires min <= max.
+func IntRange(min int, max int) int {
+    span := u32(max - min + 1)
+    if span == 0 {
+        // min == -2147483648 and max == 2147483647: the true span is 2^32,
+        // which wrapped to exactly 0 above - every nextU32() value is
+        // already uniform over that whole range, so skip the (otherwise
+        // divide-by-zero) modulo entirely.
+        return min + int(nextU32())
+    }
+    return min + int(nextU32() % span)
+}
+
+// Float returns a pseudo-random f64 in [0, 1).
+func Float() f64 {
+    top53 := next() / 2048
+    return f64(top53) / 9007199254740992.0
+}
+
+// FloatRange returns a pseudo-random f64 in [min, max).
+func FloatRange(min f64, max f64) f64 {
+    return min + Float()*(max-min)
+}
+
+// Bool returns a pseudo-random true/false with equal probability.
+func Bool() bool {
+    return nextU32()%2 == 0
+}
+
+tests {
+    import "std:test"
+
+    func TestSeedIsReproducible(t *test.Runner) {
+        Seed(42)
+        a1 := Int()
+        a2 := IntRange(1, 6)
+        a3 := Float()
+        a4 := Bool()
+
+        Seed(42)
+        t.AssertEqual(Int(), a1, "same seed -> same Int()")
+        t.AssertEqual(IntRange(1, 6), a2, "same seed -> same IntRange()")
+        t.AssertApprox(Float(), a3, 0.0000001, "same seed -> same Float()")
+        t.AssertEqual(Bool(), a4, "same seed -> same Bool()")
+    }
+
+    func TestIntIsNonNegative(t *test.Runner) {
+        Seed(1)
+        i := 0
+        for i < 2000 {
+            t.Assert(Int() >= 0, "Int() is non-negative")
+            i = i + 1
+        }
+    }
+
+    func TestIntRangeStaysInBounds(t *test.Runner) {
+        Seed(2)
+        i := 0
+        for i < 2000 {
+            v := IntRange(-5, 5)
+            t.Assert(v >= -5 && v <= 5, "IntRange(-5, 5) stays in [-5, 5]")
+            i = i + 1
+        }
+    }
+
+    func TestFloatStaysInBounds(t *test.Runner) {
+        Seed(3)
+        i := 0
+        for i < 2000 {
+            f := Float()
+            t.Assert(f >= 0.0 && f < 1.0, "Float() stays in [0, 1)")
+            i = i + 1
+        }
+    }
+
+    func TestFloatRangeStaysInBounds(t *test.Runner) {
+        Seed(4)
+        i := 0
+        for i < 2000 {
+            f := FloatRange(10.0, 20.0)
+            t.Assert(f >= 10.0 && f < 20.0, "FloatRange(10, 20) stays in [10, 20)")
+            i = i + 1
+        }
+    }
+
+    func TestBoolProducesBothValues(t *test.Runner) {
+        Seed(5)
+        sawTrue := false
+        sawFalse := false
+        i := 0
+        for i < 200 {
+            if Bool() {
+                sawTrue = true
+            } else {
+                sawFalse = true
+            }
+            i = i + 1
+        }
+        t.Assert(sawTrue, "saw true at least once")
+        t.Assert(sawFalse, "saw false at least once")
+    }
+
+    // TestIntRangeFullDomainDoesNotCrash covers the one span this function's
+    // u32 arithmetic can't represent as a nonzero value (max - min + 1
+    // wraps to exactly 0) - see IntRange's own comment.
+    func TestIntRangeFullDomainDoesNotCrash(t *test.Runner) {
+        Seed(6)
+        minInt := -2147483647 - 1 // i32's own minimum - see strings_demo.llx for why not the bare literal
+        i := 0
+        for i < 200 {
+            IntRange(minInt, 2147483647)
+            i = i + 1
+        }
+    }
+
+    func TestIntRangeSingleValue(t *test.Runner) {
+        Seed(7)
+        t.AssertEqual(IntRange(3, 3), 3, "min == max always returns that value")
+    }
+
+    func TestSeedZeroIsReproducible(t *test.Runner) {
+        Seed(0)
+        a := Int()
+        Seed(0)
+        t.AssertEqual(Int(), a, "Seed(0) reproduces the same sequence too")
+    }
+}

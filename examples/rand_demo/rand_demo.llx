@@ -1,0 +1,46 @@
+// rand_demo.llx - exercises std/rand's own API (Int/IntRange/Float/
+// FloatRange/Bool/Seed).
+//
+// A random value is inherently not a hand-computable exact number (unlike
+// most other demos in this project) - Seed makes the exact sequence
+// reproducible, so what's hand-verified below is that a fixed seed really
+// does reproduce the same values twice, plus the bounds every call must
+// satisfy regardless of seed.
+//
+// Run with:
+//   .\llvmc.exe examples\rand_demo\rand_demo.llx
+//   echo $LASTEXITCODE   # (PowerShell) -> 4  (all four sanity checks passed)
+
+import "std:rand"
+
+func main() int {
+    rand.Seed(7)
+    a := rand.IntRange(1, 6)
+    rand.Seed(7)
+    b := rand.IntRange(1, 6)
+
+    n := rand.IntRange(-10, 10)
+    f := rand.Float()
+
+    print(a)   // some value in [1, 6]
+    print(b)   // the exact same value as a - same seed, same sequence
+    print(n)   // some value in [-10, 10]
+    print(f)   // some value in [0, 1)
+
+    ok := 0
+    if a == b {
+        ok = ok + 1
+    }
+    if n >= -10 && n <= 10 {
+        ok = ok + 1
+    }
+    if f >= 0.0 && f < 1.0 {
+        ok = ok + 1
+    }
+    if rand.Bool() || !rand.Bool() {
+        ok = ok + 1
+    }
+
+    print(ok)   // 4
+    return ok
+}
