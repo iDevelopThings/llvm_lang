@@ -32,6 +32,7 @@ func renderTS(s *spec, fields []field, entries []entry, srcName, tsOutAbs string
 	}
 
 	T := pascal(s.Type)
+	constPrefix := s.constPrefix()
 	infoT := T + "Info"
 	contV := *s.Container
 
@@ -62,7 +63,7 @@ func renderTS(s *spec, fields []field, entries []entry, srcName, tsOutAbs string
 	if len(sentinels) > 0 {
 		p("// Const-only boundaries, excluded from the tables below.")
 		for _, e := range sentinels {
-			p("export const %s%s = %s;", T, s.memberIdent(e.Name), wireLit(s, e.Wire))
+			p("export const %s%s = %s;", constPrefix, s.memberIdent(e.Name), wireLit(s, e.Wire))
 		}
 		p("")
 	}
@@ -72,7 +73,7 @@ func renderTS(s *spec, fields []field, entries []entry, srcName, tsOutAbs string
 		for _, e := range aliases {
 			p(
 				"export const %s%s: %s = %s.%s;",
-				T,
+				constPrefix,
 				s.memberIdent(e.Name),
 				T,
 				contV,

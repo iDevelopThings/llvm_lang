@@ -16,6 +16,7 @@ func renderGo(s *spec, fields []field, entries []entry, srcName string) ([]byte,
 
 	T := s.Type
 	exportedType := pascal(T)
+	constPrefix := s.constPrefix()
 	unexportedType := unexport(T)
 	infoT := T + "Info"
 	contT := exportedType + "Container"
@@ -38,10 +39,10 @@ func renderGo(s *spec, fields []field, entries []entry, srcName string) ([]byte,
 	p("const (")
 	for _, e := range entries {
 		if e.Alias != "" {
-			p("\t%s%s = %s%s", exportedType, s.memberIdent(e.Name), exportedType, s.memberIdent(e.Alias))
+			p("\t%s%s = %s%s", constPrefix, s.memberIdent(e.Name), constPrefix, s.memberIdent(e.Alias))
 			continue
 		}
-		p("\t%s%s %s = %s", exportedType, s.memberIdent(e.Name), T, wireLit(s, e.Wire))
+		p("\t%s%s %s = %s", constPrefix, s.memberIdent(e.Name), T, wireLit(s, e.Wire))
 	}
 	p(")")
 	p("")
@@ -56,7 +57,7 @@ func renderGo(s *spec, fields []field, entries []entry, srcName string) ([]byte,
 	p("// %s is the entry point for the %s enum.", contV, T)
 	p("var %s = %s{", contV, contT)
 	for _, e := range members {
-		p("\t%s: %s%s,", s.memberIdent(e.Name), exportedType, s.memberIdent(e.Name))
+		p("\t%s: %s%s,", s.memberIdent(e.Name), constPrefix, s.memberIdent(e.Name))
 	}
 	p("}")
 	p("")
@@ -79,8 +80,8 @@ func renderGo(s *spec, fields []field, entries []entry, srcName string) ([]byte,
 		p("var %sInfos = map[%s]%s{", unexportedType, T, infoT)
 	}
 	for _, e := range members {
-		p("\t%s%s: {", exportedType, s.memberIdent(e.Name))
-		p("\t\t%s: %s%s,", exportedType, exportedType, s.memberIdent(e.Name))
+		p("\t%s%s: {", constPrefix, s.memberIdent(e.Name))
+		p("\t\t%s: %s%s,", T, constPrefix, s.memberIdent(e.Name))
 		p("\t\tName: %q,", e.Name)
 		for _, f := range fields {
 			v, emit, err := goValue(f.Type, e.Nodes[f.Key])
@@ -98,14 +99,14 @@ func renderGo(s *spec, fields []field, entries []entry, srcName string) ([]byte,
 
 	p("var %sValues = []%s{", unexportedType, T)
 	for _, e := range members {
-		p("\t%s%s,", exportedType, s.memberIdent(e.Name))
+		p("\t%s%s,", constPrefix, s.memberIdent(e.Name))
 	}
 	p("}")
 	p("")
 
 	p("var %sByName = map[string]%s{", unexportedType, T)
 	for _, e := range members {
-		p("\t%q: %s%s,", strings.ToLower(e.Name), exportedType, s.memberIdent(e.Name))
+		p("\t%q: %s%s,", strings.ToLower(e.Name), constPrefix, s.memberIdent(e.Name))
 	}
 	p("}")
 	p("")

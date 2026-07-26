@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"go/token"
 	"go/types"
 	"log"
 	"path"
@@ -30,6 +31,9 @@ type spec struct {
 	// AliasField names the per-member key used for source-level aliases. When
 	// empty, no member key is reserved and "alias" remains ordinary metadata.
 	AliasField string `yaml:"aliasField"`
+	// ConstPrefix overrides the prefix of generated member constants. It
+	// defaults to the exported enum type name.
+	ConstPrefix string `yaml:"constPrefix"`
 	// Case controls how a member name becomes its exported Go/TS identifier:
 	// "pascal" (default, suits camelCase names), "snake"/"preserve" (verbatim —
 	// keeps UPPER_SNAKE names as authored, avoiding pascal collisions), "camel",
@@ -172,12 +176,12 @@ type entry struct {
 // regEntry is one enum in the cross-spec registry, used to resolve and validate
 // references from other specs' fields.
 type regEntry struct {
-	spec      *spec
-	exported  string          // pascal(type)
-	container string          // container var name
-	names     map[string]bool // declared member names, for reference validation
-	tsOutAbs  string          // resolved absolute TS output path, or ""
-	ktPackage string
+	spec        *spec
+	constPrefix string
+	container   string          // container var name
+	names       map[string]bool // declared member names, for reference validation
+	tsOutAbs    string          // resolved absolute TS output path, or ""
+	ktPackage   string
 }
 
 func (r *regEntry) has(name string) bool {
@@ -186,7 +190,7 @@ func (r *regEntry) has(name string) bool {
 
 // goConst is the exported Go constant for a member.
 func (r *regEntry) goConst(name string) string {
-	return r.exported + r.spec.memberIdent(name)
+	return r.constPrefix + r.spec.memberIdent(name)
 }
 
 // tsRef is the container-qualified TypeScript accessor for a member.
@@ -264,6 +268,9 @@ func parse(raw []byte) (*parsed, error) {
 	if _, declared := s.Fields[s.AliasField]; s.AliasField != "" && declared {
 		return nil, fmt.Errorf("aliasField %q cannot also be declared as metadata", s.AliasField)
 	}
+	if s.ConstPrefix != "" && !token.IsIdentifier(s.ConstPrefix) {
+		return nil, fmt.Errorf("constPrefix %q is not a valid Go identifier", s.ConstPrefix)
+	}
 
 	fields, entries, err := parseValues(s.Values, s.AliasField)
 	if err != nil {
@@ -306,12 +313,12 @@ func buildRegistry(all []*parsed) (registry, error) {
 			}
 		}
 		reg[p.spec.Type] = &regEntry{
-			spec:      p.spec,
-			exported:  pascal(p.spec.Type),
-			container: *p.spec.Container,
-			names:     names,
-			tsOutAbs:  p.tsOutAbs,
-			ktPackage: p.spec.kotlinPackage(),
+			spec:        p.spec,
+			constPrefix: p.spec.constPrefix(),
+			container:   *p.spec.Container,
+			names:       names,
+			tsOutAbs:    p.tsOutAbs,
+			ktPackage:   p.spec.kotlinPackage(),
 		}
 	}
 	return reg, nil
@@ -386,6 +393,13 @@ func (s *spec) memberIdent(name string) string {
 	default:
 		return pascal(name)
 	}
+}
+
+func (s *spec) constPrefix() string {
+	if s.ConstPrefix != "" {
+		return s.ConstPrefix
+	}
+	return pascal(s.Type)
 }
 
 // parseValues does two passes: infer the field set + types, then keep raw nodes

@@ -33,6 +33,128 @@ values:
     sentinel: true
 `
 
+const constPrefixSpec = `
+package: sema
+type: TypeKind
+underlying: int
+denseTable: true
+aliasField: aliasOf
+constPrefix: Type
+values:
+  - name: Invalid
+  - name: I32
+    display: "int"
+  - name: Int
+    aliasOf: I32
+  - name: MAX
+    wire: 2
+    sentinel: true
+`
+
+func TestConstPrefixAppliesOnlyToConstants(t *testing.T) {
+	p := mustParse(t, constPrefixSpec)
+	out, err := renderGo(p.spec, p.fields, p.entries, "type_kind.yml")
+	if err != nil {
+		t.Fatalf("renderGo: %v", err)
+	}
+	got := string(out)
+	compact := strings.Join(strings.Fields(got), " ")
+	for _, want := range []string{
+		"TypeInvalid TypeKind = 0",
+		"TypeI32 TypeKind = 1",
+		"TypeInt = TypeI32",
+		"TypeMAX TypeKind = 2",
+		"type TypeKindContainer struct",
+		"var TypeKinds = TypeKindContainer",
+		"type TypeKindInfo struct",
+		"var typeKindInfos = [...]TypeKindInfo",
+	} {
+		if !strings.Contains(compact, want) {
+			t.Errorf("Go output missing %q\n---\n%s", want, got)
+		}
+	}
+	for _, forbidden := range []string{
+		"TypeKindInvalid",
+		"TypeKindI32",
+		"TypeKindInt",
+		"TypeKindMAX",
+	} {
+		if strings.Contains(got, forbidden) {
+			t.Errorf("constant used type-derived prefix %q\n---\n%s", forbidden, got)
+		}
+	}
+}
+
+func TestConstPrefixUsedByGoEnumReferences(t *testing.T) {
+	const target = `
+package: p
+type: TypeKind
+constPrefix: Type
+values:
+  - name: I32
+`
+	const source = `
+package: p
+type: Holder
+fields:
+  kind: TypeKind
+values:
+  - name: A
+    kind: I32
+`
+	all := build(t, target, source)
+	out, err := renderGo(all[1].spec, all[1].fields, all[1].entries, "holder.yml")
+	if err != nil {
+		t.Fatalf("renderGo: %v", err)
+	}
+	compact := strings.Join(strings.Fields(string(out)), " ")
+	if !strings.Contains(compact, "Kind: TypeI32,") {
+		t.Errorf("enum reference did not use constPrefix\n---\n%s", out)
+	}
+}
+
+func TestConstPrefixClientRendererSymmetry(t *testing.T) {
+	p := mustParse(t, constPrefixSpec)
+	tsOut, err := renderTS(p.spec, p.fields, p.entries, "type_kind.yml", "")
+	if err != nil {
+		t.Fatalf("renderTS: %v", err)
+	}
+	for _, want := range []string{
+		"export const TypeMAX = 2;",
+		"export const TypeInt: TypeKind = TypeKinds.I32;",
+	} {
+		if !strings.Contains(string(tsOut), want) {
+			t.Errorf("TypeScript output missing %q\n---\n%s", want, tsOut)
+		}
+	}
+
+	ktOut, err := renderKotlin(p.spec, p.fields, p.entries, "type_kind.yml")
+	if err != nil {
+		t.Fatalf("renderKotlin: %v", err)
+	}
+	for _, want := range []string{
+		"public val TypeMAX: TypeKind = TypeKind(2)",
+		"public val TypeInt: TypeKind = TypeKind.I32",
+	} {
+		if !strings.Contains(string(ktOut), want) {
+			t.Errorf("Kotlin output missing %q\n---\n%s", want, ktOut)
+		}
+	}
+}
+
+func TestConstPrefixValidation(t *testing.T) {
+	_, err := parse([]byte(`
+package: p
+type: T
+constPrefix: bad-prefix
+values:
+  - name: A
+`))
+	if err == nil || !strings.Contains(err.Error(), "valid Go identifier") {
+		t.Fatalf("constPrefix validation error = %v", err)
+	}
+}
+
 func TestAliasAndDenseTableGo(t *testing.T) {
 	p := mustParse(t, aliasDenseSpec)
 	out, err := renderGo(p.spec, p.fields, p.entries, "type_kind.yml")

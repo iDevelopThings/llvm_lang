@@ -38,6 +38,7 @@ underlying: byte        # optional: base type (default: int)
 marshalText: false      # optional: emit MarshalText/UnmarshalText (default: false)
 denseTable: false       # optional: use a dense Go metadata array (default: false)
 aliasField: aliasOf     # optional: member key used for source-level aliases
+constPrefix: SlotName   # optional: Go member-constant prefix (default: type)
 container: SlotNames    # optional: container var name (default: <type> + "s")
 out: ..                 # optional: Go output dir, relative to THIS file
 tsOut: ../ui/slots.ts   # optional: TypeScript output file, relative to THIS file
@@ -114,6 +115,25 @@ do not occupy array slots.
 Non-integer, negative, sparse, duplicate, and empty dense tables are rejected
 during generation. Invalid runtime values remain safe because lookup methods
 bounds-check before indexing.
+
+### `constPrefix`
+
+`constPrefix` changes only the prefix of generated member constants. It defaults
+to the exported `type` name, preserving existing output:
+
+```yaml
+type: TypeKind
+constPrefix: Type
+```
+
+This emits constants such as `TypeI32 TypeKind = 1`. Ordinary members,
+sentinels, aliases, and Go enum references all use the configured prefix; for
+example, an alias becomes `TypeInt = TypeI32`. Container, info, lookup-table,
+and method names continue to derive from `TypeKind`.
+
+TypeScript and Kotlin use `constPrefix` for their top-level sentinel and alias
+names. Their ordinary members remain properties of the usual container or
+companion object.
 
 ### Metadata columns
 

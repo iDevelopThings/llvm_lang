@@ -32,6 +32,7 @@ func renderKotlin(s *spec, fields []field, entries []entry, srcName string) ([]b
 	}
 
 	T := pascal(s.Type)
+	constPrefix := s.constPrefix()
 	infoT := T + "Info"
 	wireT := kotlinBasicType(s.Underlying)
 	optional := optionalFields(fields, members)
@@ -100,7 +101,7 @@ func renderKotlin(s *spec, fields []field, entries []entry, srcName string) ([]b
 	for _, e := range sentinels {
 		p(
 			"public val %s%s: %s = %s(%s)",
-			T,
+			constPrefix,
 			kotlinIdent(s.memberIdent(e.Name)),
 			T,
 			T,
@@ -110,7 +111,7 @@ func renderKotlin(s *spec, fields []field, entries []entry, srcName string) ([]b
 	for _, e := range aliases {
 		p(
 			"public val %s%s: %s = %s.%s",
-			T,
+			constPrefix,
 			kotlinIdent(s.memberIdent(e.Name)),
 			T,
 			T,
