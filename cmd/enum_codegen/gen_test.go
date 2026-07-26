@@ -399,11 +399,14 @@ values:
 		t.Fatalf("renderKotlin: %v", err)
 	}
 	kt := string(ktOut)
-	if !strings.Contains(kt, "public fun iterLabel(): Sequence<String> =") {
+	if !strings.Contains(kt, "fun iterLabel(): Sequence<String> =") {
 		t.Errorf("missing Kotlin iterator\n---\n%s", kt)
 	}
-	if !strings.Contains(kt, "public fun iterAlias(): Sequence<String?> =") {
+	if !strings.Contains(kt, "fun iterAlias(): Sequence<String?> =") {
 		t.Error("optional Kotlin iterator should yield a nullable type")
+	}
+	if !strings.Contains(kt, "Stat.entries.asSequence().map { it.alias }") {
+		t.Error("Kotlin iterator should read metadata directly from enum entries")
 	}
 }
 

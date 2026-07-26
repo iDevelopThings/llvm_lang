@@ -58,12 +58,19 @@ type spec struct {
 	// enum's TypeScript symbols. Defaults to the relative path of TSOut; set it
 	// when the symbols live elsewhere (e.g. hand-written, or behind a path alias).
 	TSModule string `yaml:"tsModule"`
-	// KTOut, when set, is the Kotlin output file, relative to this file.
-	KTOut string `yaml:"ktOut"`
-	// KTPackage overrides the Kotlin package; it defaults to Package.
-	KTPackage string `yaml:"ktPackage"`
+	// KT configures optional Kotlin output.
+	KT kotlinConfig `yaml:"kt"`
 	// Values are the enum members, in declaration order.
 	Values []yaml.Node `yaml:"values"`
+}
+
+type kotlinConfig struct {
+	// Out is the Kotlin output file, relative to the spec.
+	Out string `yaml:"out"`
+	// Package overrides the Kotlin package; it defaults to the Go package.
+	Package string `yaml:"package"`
+	// Visibility is empty for Kotlin's default, or public/internal/private.
+	Visibility string `yaml:"visibility"`
 }
 
 // underlyingInfo classifies the declared underlying type via the predeclared
@@ -270,6 +277,14 @@ func parse(raw []byte) (*parsed, error) {
 	}
 	if s.ConstPrefix != "" && !token.IsIdentifier(s.ConstPrefix) {
 		return nil, fmt.Errorf("constPrefix %q is not a valid Go identifier", s.ConstPrefix)
+	}
+	switch s.KT.Visibility {
+	case "", "public", "internal", "private":
+	default:
+		return nil, fmt.Errorf(
+			"kt.visibility %q is not one of public, internal, private",
+			s.KT.Visibility,
+		)
 	}
 
 	fields, entries, err := parseValues(s.Values, s.AliasField)
@@ -589,10 +604,26 @@ func optionalFields(fields []field, members []entry) map[string]bool {
 }
 
 func (s *spec) kotlinPackage() string {
-	if s.KTPackage != "" {
-		return s.KTPackage
+	if s.KT.Package != "" {
+		return s.KT.Package
 	}
 	return s.Package
+}
+
+func (s *spec) kotlinVisibilityPrefix() string {
+	if s.KT.Visibility == "" {
+		return ""
+	}
+	return s.KT.Visibility + " "
+}
+
+func (s *spec) kotlinMemberVisibilityPrefix() string {
+	// A private enum already hides its members; keeping properties visible also
+	// lets generated top-level iterators read them.
+	if s.KT.Visibility == "private" {
+		return ""
+	}
+	return s.kotlinVisibilityPrefix()
 }
 
 func validateDenseTable(s *spec, entries []entry) error {

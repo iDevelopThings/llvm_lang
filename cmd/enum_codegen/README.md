@@ -9,7 +9,7 @@ name/value/metadata resolution without hand-maintaining parallel maps.
 ## Usage
 
 Point `-in` at a single spec or a directory of specs. Output locations are set
-on the spec itself (`out`, `tsOut`, `ktOut`), so a `//go:generate` directive
+on the spec itself (`out`, `tsOut`, `kt.out`), so a `//go:generate` directive
 only needs to name the input:
 
 ```go
@@ -42,8 +42,10 @@ constPrefix: SlotName   # optional: Go member-constant prefix (default: type)
 container: SlotNames    # optional: container var name (default: <type> + "s")
 out: ..                 # optional: Go output dir, relative to THIS file
 tsOut: ../ui/slots.ts   # optional: TypeScript output file, relative to THIS file
-ktOut: ../app/SlotName.kt # optional: Kotlin output file, relative to THIS file
-ktPackage: dev.example.model # optional: Kotlin package (default: package)
+kt:
+  out: ../app/SlotName.kt # optional: Kotlin output file, relative to THIS file
+  package: dev.example.model # optional: Kotlin package (default: package)
+  visibility: public    # optional: public, internal, or private (default: omitted)
 values:
   - name: MainWeapon    # required: member identifier (PascalCase)
     wire: 0             # optional: const value (default: index, or name for string enums)
@@ -85,7 +87,7 @@ TypeScript union, so it never appears as a "real" value.
 Set `aliasField` to opt into source-level aliases and choose their per-member
 key. An entry using that key emits one source-level constant equal to an earlier
 real member. It has no wire slot and is excluded from containers, metadata,
-values, iteration, `ByName`, and `Parse`:
+values, and iteration:
 
 ```yaml
 aliasField: aliasOf
@@ -95,8 +97,9 @@ values:
     aliasOf: I32
 ```
 
-Keeping aliases out of name lookup is deliberate: aliases are source-code
-conveniences, not additional serialized or parsed enum names.
+Go and TypeScript exclude aliases from their name lookups. Kotlin `parse`
+accepts an alias name and returns its target enum entry, while the alias remains
+absent from `entries`.
 
 The target must already be declared in the same enum and cannot be another
 alias or a sentinel. An alias cannot also set `wire`, `sentinel`, or metadata.
@@ -202,7 +205,7 @@ and each value is rendered with the field's actual type (so `args: [10]` on an
 `Args []float64` field emits `[]float64{10}`, not `[]int{...}`). Basic fields,
 slices, pointers, and nested same-package structs are supported; a field from
 another package is rejected (its import isn't wired up). Struct columns are
-Go-only — a struct column in a `tsOut` or `ktOut` enum errors. Package types are
+Go-only — a struct column in a `tsOut` or `kt.out` enum errors. Package types are
 loaded lazily, so enum-only generation never invokes `go/packages`.
 
 ### Extra iterators (`iterators`)
@@ -215,10 +218,12 @@ iterators: [title, alias]
 ```
 
 For each column this emits a Go container method `Iter<Field>() iter.Seq[T]`, a
-TypeScript generator `iter<Field>()`, and a Kotlin `Sequence<T>` function. Each
-yields the column in declaration order. Optional TypeScript columns yield
-`... | undefined`; optional Kotlin columns yield nullable values. An
-`iterators` entry that names a non-column errors.
+TypeScript generator `iter<Field>()`, and a Kotlin `Sequence<T>` function.
+These normally yield the column in declaration order. Optional TypeScript
+columns yield `... | undefined`; optional Kotlin columns normally yield nullable
+values. In Kotlin, a scalar Boolean column is treated as a predicate instead:
+`iter<Field>()` yields the enum entries whose field is `true`. An `iterators`
+entry that names a non-column errors.
 
 ## Generated Go API
 
@@ -262,19 +267,27 @@ looking up, returning `undefined` for an unknown name.
 
 ## Generated Kotlin
 
-When `ktOut` is set, the generator writes an `@JvmInline value class`. Members
-live on its companion object, giving compact usage such as
-`SlotName.MainWeapon` while retaining only the configured wire value at
-runtime. The companion exposes `entries`, `byName`, `fromWire`, and
-case-insensitive `parse`; metadata is emitted as a typed data class and map.
+When `kt.out` is set, the generator writes a real Kotlin `enum class`. Its first
+constructor property is `wire`; metadata columns follow as typed properties on
+each entry. Kotlin supplies `entries` and `name`, while the generated companion
+adds `fromWire` and case-insensitive `parse`.
 
 Go primitive types map to Kotlin primitives, slices become read-only `List<T>`,
 and omitted metadata becomes nullable. Cross-enum fields use the referenced
-value class and add an import when its `ktPackage` differs. Kotlin keywords are
+enum class and add an import when its `kt.package` differs. Kotlin keywords are
 escaped when a configured case mode produces one.
 
-Aliases and sentinels are top-level typed values. Neither participates in
-`entries`, lookups, or metadata.
+Aliases remain top-level enum-typed values and do not participate in `entries`
+or metadata. Kotlin `parse` recognizes their names and returns the target entry.
+`fromWire` needs no separate alias mapping because an alias has no independent
+wire value. Sentinels remain top-level wire values because an enum class cannot
+construct a non-entry instance.
+
+`kt.visibility` applies to generated declarations and constructor properties.
+Omit it for idiomatic Kotlin default visibility; set it to `public`, `internal`,
+or `private` when a consumer requires an explicit modifier. A private enum's
+properties keep default member visibility so generated file-private iterators
+can read them.
 
 Like TypeScript output, the Kotlin output directory is never created. A missing
 directory produces a skip warning without affecting Go or other configured

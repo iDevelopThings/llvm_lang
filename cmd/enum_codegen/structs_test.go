@@ -138,7 +138,8 @@ func TestGenWritesKotlinOutput(t *testing.T) {
 package: p
 type: T
 underlying: string
-ktOut: T.kt
+kt:
+  out: T.kt
 values:
   - name: A
 `)[0]
@@ -152,7 +153,7 @@ values:
 	if err != nil {
 		t.Fatalf("read Kotlin output: %v", err)
 	}
-	if !strings.Contains(string(raw), "public value class T(public val wire: String)") {
+	if !strings.Contains(string(raw), "enum class T(") {
 		t.Errorf("unexpected Kotlin output\n---\n%s", raw)
 	}
 }
@@ -162,7 +163,8 @@ func TestGenSkipsMissingKotlinDir(t *testing.T) {
 	p := build(t, `
 package: p
 type: T
-ktOut: missing/T.kt
+kt:
+  out: missing/T.kt
 values:
   - name: A
 `)[0]
@@ -209,7 +211,8 @@ func TestRenderKotlinRejectsStructColumn(t *testing.T) {
 package: foo
 type: T
 underlying: string
-ktOut: T.kt
+kt:
+  out: T.kt
 fields:
   rules: "[]Rule"
 values:

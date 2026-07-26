@@ -12,8 +12,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// renderKotlin produces a value-class wire wrapper with companion members,
-// metadata, and lookup helpers.
+// renderKotlin produces an enum class with per-entry metadata and wire/name
+// lookup helpers.
 func renderKotlin(s *spec, fields []field, entries []entry, srcName string) ([]byte, error) {
 	var b bytes.Buffer
 	p := func(format string, a ...any) {
@@ -29,13 +29,23 @@ func renderKotlin(s *spec, fields []field, entries []entry, srcName string) ([]b
 				f.Type.elem,
 			)
 		}
+		switch camel(f.Key) {
+		case "entries", "ordinal":
+			return nil, fmt.Errorf(
+				"column %q conflicts with Kotlin enum property %q",
+				f.Key,
+				camel(f.Key),
+			)
+		}
 	}
 
 	T := pascal(s.Type)
 	constPrefix := s.constPrefix()
-	infoT := T + "Info"
 	wireT := kotlinBasicType(s.Underlying)
 	optional := optionalFields(fields, members)
+	aliases := aliasEntries(entries)
+	visibility := s.kotlinVisibilityPrefix()
+	memberVisibility := s.kotlinMemberVisibilityPrefix()
 	packageName, err := kotlinPackageName(s.kotlinPackage())
 	if err != nil {
 		return nil, err
@@ -57,62 +67,84 @@ func renderKotlin(s *spec, fields []field, entries []entry, srcName string) ([]b
 		p("")
 	}
 
-	p("@JvmInline")
-	p("public value class %s(public val wire: %s) {", T, wireT)
-	p("    public companion object {")
+	p("%senum class %s(", visibility, T)
+	p("    %sval wire: %s,", memberVisibility, wireT)
+	for _, f := range fields {
+		typ := f.Type.ktType()
+		if optional[f.Key] {
+			typ += "?"
+		}
+		p("    %sval %s: %s,", memberVisibility, kotlinIdent(camel(f.Key)), typ)
+	}
+	p(") {")
 	for _, e := range members {
+		args := []string{
+			kotlinBasicLit(
+				s.Underlying,
+				scalarNode(e.Wire, s.stringUnderlying()),
+			),
+		}
+		for _, f := range fields {
+			n := e.Nodes[f.Key]
+			value := "null"
+			if n != nil && n.Tag != "!!null" {
+				value, err = kotlinValue(f.Type, n)
+				if err != nil {
+					return nil, fmt.Errorf("%s.%s: %w", e.Name, f.Key, err)
+				}
+			}
+			args = append(args, value)
+		}
 		p(
-			"        public val %s: %s = %s(%s)",
+			"    %s(%s),",
 			kotlinIdent(s.memberIdent(e.Name)),
-			T,
-			T,
-			kotlinBasicLit(s.Underlying, scalarNode(e.Wire, s.stringUnderlying())),
+			strings.Join(args, ", "),
 		)
 	}
-	if len(members) > 0 {
-		p("")
-	}
-	p("        public val entries: List<%s> = listOf(", T)
-	for _, e := range members {
-		p("            %s,", kotlinIdent(s.memberIdent(e.Name)))
-	}
-	p("        )")
+	p("    ;")
 	p("")
-	p("        public val byName: Map<String, %s> = mapOf(", T)
-	for _, e := range members {
-		p("            %s to %s,", kotlinString(e.Name), kotlinIdent(s.memberIdent(e.Name)))
-	}
-	p("        )")
-	p("")
+	p("    %scompanion object {", memberVisibility)
 	p("        private val byWire: Map<%s, %s> = entries.associateBy(%s::wire)", wireT, T, T)
 	p("        private val byLowerName: Map<String, %s> =", T)
-	p("            byName.mapKeys { (name, _) -> name.lowercase() }")
+	if len(aliases) == 0 {
+		p("            entries.associateBy { it.name.lowercase() }")
+	} else {
+		p("            entries.associateBy { it.name.lowercase() } +")
+		p("                mapOf(")
+		for _, e := range aliases {
+			p(
+				"                    %s to %s.%s,",
+				kotlinString(strings.ToLower(e.Name)),
+				T,
+				kotlinIdent(s.memberIdent(e.Alias)),
+			)
+		}
+		p("                )")
+	}
 	p("")
-	p("        public fun fromWire(wire: %s): %s? = byWire[wire]", wireT, T)
+	p("        %sfun fromWire(wire: %s): %s? = byWire[wire]", memberVisibility, wireT, T)
 	p("")
-	p("        public fun parse(name: String): %s? =", T)
+	p("        %sfun parse(name: String): %s? =", memberVisibility, T)
 	p("            byLowerName[name.trim().lowercase()]")
 	p("    }")
 	p("}")
 	p("")
 
 	sentinels := sentinelEntries(entries)
-	aliases := aliasEntries(entries)
 	for _, e := range sentinels {
 		p(
-			"public val %s%s: %s = %s(%s)",
-			constPrefix,
-			kotlinIdent(s.memberIdent(e.Name)),
-			T,
-			T,
+			"%sval %s: %s = %s",
+			visibility,
+			kotlinPrefixedIdent(constPrefix, s.memberIdent(e.Name)),
+			wireT,
 			kotlinBasicLit(s.Underlying, scalarNode(e.Wire, s.stringUnderlying())),
 		)
 	}
 	for _, e := range aliases {
 		p(
-			"public val %s%s: %s = %s.%s",
-			constPrefix,
-			kotlinIdent(s.memberIdent(e.Name)),
+			"%sval %s: %s = %s.%s",
+			visibility,
+			kotlinPrefixedIdent(constPrefix, s.memberIdent(e.Name)),
 			T,
 			T,
 			kotlinIdent(s.memberIdent(e.Alias)),
@@ -122,56 +154,28 @@ func renderKotlin(s *spec, fields []field, entries []entry, srcName string) ([]b
 		p("")
 	}
 
-	p("public data class %s(", infoT)
-	p("    public val value: %s,", T)
-	p("    public val name: String,")
-	for _, f := range fields {
-		typ := f.Type.ktType()
-		if optional[f.Key] {
-			typ += "?"
-		}
-		p("    public val %s: %s,", kotlinIdent(camel(f.Key)), typ)
-	}
-	p(")")
-	p("")
-
-	p("public val %sInfos: Map<%s, %s> = mapOf(", T, T, infoT)
-	for _, e := range members {
-		member := kotlinIdent(s.memberIdent(e.Name))
-		p("    %s.%s to %s(", T, member, infoT)
-		p("        value = %s.%s,", T, member)
-		p("        name = %s,", kotlinString(e.Name))
-		for _, f := range fields {
-			n := e.Nodes[f.Key]
-			value := "null"
-			if n != nil && n.Tag != "!!null" {
-				var err error
-				value, err = kotlinValue(f.Type, n)
-				if err != nil {
-					return nil, fmt.Errorf("%s.%s: %w", e.Name, f.Key, err)
-				}
-			}
-			p("        %s = %s,", kotlinIdent(camel(f.Key)), value)
-		}
-		p("    ),")
-	}
-	p(")")
-	p("")
-	p("public val %s.info: %s?", T, infoT)
-	p("    get() = %sInfos[this]", T)
-
 	iters, err := iteratorFields(s, fields)
 	if err != nil {
 		return nil, err
 	}
 	for _, f := range iters {
+		if !f.Type.slice && basicInfo(f.Type.elem)&types.IsBoolean != 0 {
+			p("")
+			p("%sfun iter%s(): Sequence<%s> =", visibility, f.GoName, T)
+			p(
+				"    %s.entries.asSequence().filter { it.%s == true }",
+				T,
+				kotlinIdent(camel(f.Key)),
+			)
+			continue
+		}
 		typ := f.Type.ktType()
 		if optional[f.Key] {
 			typ += "?"
 		}
 		p("")
-		p("public fun iter%s(): Sequence<%s> =", f.GoName, typ)
-		p("    %s.entries.asSequence().map { %sInfos.getValue(it).%s }", T, T, kotlinIdent(camel(f.Key)))
+		p("%sfun iter%s(): Sequence<%s> =", visibility, f.GoName, typ)
+		p("    %s.entries.asSequence().map { it.%s }", T, kotlinIdent(camel(f.Key)))
 	}
 
 	return b.Bytes(), nil
@@ -290,8 +294,12 @@ func kotlinFloat(value string) string {
 }
 
 func kotlinString(value string) string {
-	encoded, _ := json.Marshal(value)
-	return strings.ReplaceAll(string(encoded), "$", `\$`)
+	var b bytes.Buffer
+	encoder := json.NewEncoder(&b)
+	encoder.SetEscapeHTML(false)
+	_ = encoder.Encode(value)
+	encoded := strings.TrimSuffix(b.String(), "\n")
+	return strings.ReplaceAll(encoded, "$", `\$`)
 }
 
 func scalarNode(value string, stringValue bool) *yaml.Node {
@@ -311,6 +319,10 @@ func kotlinIdent(ident string) string {
 		return "`" + ident + "`"
 	}
 	return ident
+}
+
+func kotlinPrefixedIdent(prefix, member string) string {
+	return kotlinIdent(prefix + member)
 }
 
 func kotlinPackageName(name string) (string, error) {

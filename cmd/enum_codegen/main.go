@@ -3,7 +3,7 @@
 //
 // Each spec declares a type, its underlying representation, and its members
 // with per-member metadata. Output locations may be set on the spec itself
-// (out / tsOut, resolved relative to the spec file), so a //go:generate
+// (out / tsOut / kt.out, resolved relative to the spec file), so a //go:generate
 // directive only needs to point at the spec or a directory of specs:
 //
 //	//go:generate go run ../../cmd/enum_codegen -in ./enums
@@ -45,7 +45,7 @@ func main() {
 		}
 		p.path = f
 		p.tsOutAbs = outputPath(f, p.spec.TSOut)
-		p.ktOutAbs = outputPath(f, p.spec.KTOut)
+		p.ktOutAbs = outputPath(f, p.spec.KT.Out)
 		all = append(all, p)
 	}
 	reg, err := buildRegistry(all)

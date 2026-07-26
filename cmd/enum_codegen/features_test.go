@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -12,8 +14,9 @@ underlying: int
 denseTable: true
 aliasField: aliasOf
 tsOut: type_kind.ts
-ktOut: TypeKind.kt
-ktPackage: dev.llvm.lang.sema
+kt:
+  out: TypeKind.kt
+  package: dev.llvm.lang.sema
 values:
   - name: Invalid
   - name: I32
@@ -133,8 +136,8 @@ func TestConstPrefixClientRendererSymmetry(t *testing.T) {
 		t.Fatalf("renderKotlin: %v", err)
 	}
 	for _, want := range []string{
-		"public val TypeMAX: TypeKind = TypeKind(2)",
-		"public val TypeInt: TypeKind = TypeKind.I32",
+		"val TypeMAX: Int = 2",
+		"val TypeInt: TypeKind = TypeKind.I32",
 	} {
 		if !strings.Contains(string(ktOut), want) {
 			t.Errorf("Kotlin output missing %q\n---\n%s", want, ktOut)
@@ -192,7 +195,7 @@ func TestAliasAndDenseTableGo(t *testing.T) {
 	}
 }
 
-func TestAliasRenderersExcludeAliasFromLookups(t *testing.T) {
+func TestAliasRenderersHandleAliasLookups(t *testing.T) {
 	p := mustParse(t, aliasDenseSpec)
 
 	tsOut, err := renderTS(p.spec, p.fields, p.entries, "type_kind.yml", "")
@@ -214,21 +217,33 @@ func TestAliasRenderersExcludeAliasFromLookups(t *testing.T) {
 	kt := string(ktOut)
 	for _, want := range []string{
 		"package dev.llvm.lang.sema",
-		"@JvmInline",
-		"public value class TypeKind(public val wire: Int)",
-		"public val I32: TypeKind = TypeKind(1)",
-		"public val TypeKindInt: TypeKind = TypeKind.I32",
-		"public fun fromWire(wire: Int): TypeKind? = byWire[wire]",
-		"public fun parse(name: String): TypeKind?",
-		"public val display: String?,",
-		"public val bits: Int?,",
+		"enum class TypeKind(",
+		"val wire: Int,",
+		"val display: String?,",
+		"val bits: Int?,",
+		"I32(1, \"int\", 32, true, null),",
+		"val TypeKindInt: TypeKind = TypeKind.I32",
+		`"int" to TypeKind.I32`,
+		"fun fromWire(wire: Int): TypeKind? = byWire[wire]",
+		"fun parse(name: String): TypeKind?",
 	} {
 		if !strings.Contains(kt, want) {
 			t.Errorf("Kotlin output missing %q\n---\n%s", want, kt)
 		}
 	}
-	if strings.Contains(kt, `"Int" to Int`) {
-		t.Error("Kotlin alias must not appear in byName")
+	if strings.Contains(kt, "Int(") {
+		t.Error("Kotlin alias must not appear in enum entries")
+	}
+	for _, forbidden := range []string{
+		"@JvmInline",
+		"value class",
+		"TypeKindInfo",
+		"TypeKindInfos",
+		"public ",
+	} {
+		if strings.Contains(kt, forbidden) {
+			t.Errorf("Kotlin output contains obsolete shape %q\n---\n%s", forbidden, kt)
+		}
 	}
 }
 
@@ -389,7 +404,8 @@ func TestRenderKotlinReferencesAndTypes(t *testing.T) {
 package: source
 type: Source
 underlying: uint8
-ktPackage: dev.example.source
+kt:
+  package: dev.example.source
 values:
   - name: One
 `
@@ -397,7 +413,8 @@ values:
 package: target
 type: Target
 underlying: string
-ktPackage: dev.example.target
+kt:
+  package: dev.example.target
 fields:
   source: Source
   sources: "[]Source"
@@ -417,13 +434,13 @@ values:
 	got := string(out)
 	for _, want := range []string{
 		"import dev.example.source.Source",
-		"public value class Target(public val wire: String)",
-		"public val source: Source?,",
-		"public val sources: List<Source>?,",
-		"public val weight: Float?,",
-		"source = Source.One,",
-		"sources = listOf(Source.One),",
-		"weight = 1.5f,",
+		"enum class Target(",
+		"val wire: String,",
+		"val source: Source?,",
+		"val sources: List<Source>?,",
+		"val weight: Float?,",
+		`Main("Main", Source.One, listOf(Source.One), 1.5f),`,
+		`Other("Other", null, null, null),`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("Kotlin output missing %q\n---\n%s", want, got)
@@ -469,7 +486,8 @@ func TestKotlinPackageValidationAndEscaping(t *testing.T) {
 	p := mustParse(t, `
 package: p
 type: T
-ktPackage: dev.when.example
+kt:
+  package: dev.when.example
 values:
   - name: A
 `)
@@ -481,8 +499,177 @@ values:
 		t.Errorf("Kotlin keyword package segment was not escaped\n---\n%s", out)
 	}
 
-	p.spec.KTPackage = "dev.bad-name"
+	p.spec.KT.Package = "dev.bad-name"
 	if _, err := renderKotlin(p.spec, p.fields, p.entries, "t.yml"); err == nil {
 		t.Fatal("expected an invalid Kotlin package error")
+	}
+}
+
+func TestKotlinVisibility(t *testing.T) {
+	p := mustParse(t, `
+package: p
+type: T
+aliasField: aliasOf
+kt:
+  visibility: public
+values:
+  - name: A
+    label: "A"
+  - name: Alias
+    aliasOf: A
+`)
+	out, err := renderKotlin(p.spec, p.fields, p.entries, "t.yml")
+	if err != nil {
+		t.Fatalf("renderKotlin: %v", err)
+	}
+	got := string(out)
+	for _, want := range []string{
+		"public enum class T(",
+		"public val wire: Int,",
+		"public val label: String,",
+		"public companion object {",
+		"public fun fromWire(wire: Int): T?",
+		"public val TAlias: T = T.A",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("explicit Kotlin visibility missing %q\n---\n%s", want, got)
+		}
+	}
+}
+
+func TestKotlinVisibilityValidation(t *testing.T) {
+	_, err := parse([]byte(`
+package: p
+type: T
+kt:
+  visibility: protected
+values:
+  - name: A
+`))
+	if err == nil || !strings.Contains(err.Error(), "kt.visibility") {
+		t.Fatalf("Kotlin visibility validation error = %v", err)
+	}
+}
+
+func TestKotlinRejectsBuiltInEnumMetadata(t *testing.T) {
+	for _, field := range []string{"entries", "ordinal"} {
+		p := mustParse(t, "package: p\ntype: T\nvalues:\n  - name: A\n    "+field+": 1\n")
+		_, err := renderKotlin(p.spec, p.fields, p.entries, "t.yml")
+		if err == nil || !strings.Contains(err.Error(), "Kotlin enum property") {
+			t.Errorf("metadata %q error = %v", field, err)
+		}
+	}
+}
+
+func TestKotlinPrefixedAliasEscapesWholeIdentifier(t *testing.T) {
+	p := mustParse(t, `
+package: p
+type: T
+case: lower
+aliasField: aliasOf
+values:
+  - name: real
+  - name: when
+    aliasOf: real
+`)
+	out, err := renderKotlin(p.spec, p.fields, p.entries, "t.yml")
+	if err != nil {
+		t.Fatalf("renderKotlin: %v", err)
+	}
+	got := string(out)
+	if !strings.Contains(got, "val Twhen: T = T.real") {
+		t.Errorf("prefixed alias identifier is malformed\n---\n%s", got)
+	}
+	if strings.Contains(got, "T`when`") {
+		t.Errorf("member-only keyword escaping leaked into prefixed identifier\n---\n%s", got)
+	}
+}
+
+func TestKotlinBooleanIteratorFiltersEntries(t *testing.T) {
+	p := mustParse(t, `
+package: p
+type: Kind
+iterators: [enabled, flags]
+fields:
+  flags: "[]bool"
+values:
+  - name: Enabled
+    enabled: true
+    flags: [true]
+  - name: Disabled
+    enabled: false
+    flags: [false]
+  - name: Unspecified
+    flags: []
+`)
+	out, err := renderKotlin(p.spec, p.fields, p.entries, "kind.yml")
+	if err != nil {
+		t.Fatalf("renderKotlin: %v", err)
+	}
+	got := string(out)
+	for _, want := range []string{
+		"fun iterEnabled(): Sequence<Kind> =",
+		"Kind.entries.asSequence().filter { it.enabled == true }",
+		"fun iterFlags(): Sequence<List<Boolean>> =",
+		"Kind.entries.asSequence().map { it.flags }",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Kotlin Boolean iterator missing %q\n---\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "fun iterEnabled(): Sequence<Boolean?>") {
+		t.Errorf("Kotlin Boolean iterator projects flag values\n---\n%s", got)
+	}
+}
+
+func TestRenderRealTypeKindKotlin(t *testing.T) {
+	path := filepath.Join("..", "..", "src", "sema", "type_kind.yml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	p, err := parse(raw)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	reg, err := buildRegistry([]*parsed{p})
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	if err := resolveFields(p, reg); err != nil {
+		t.Fatalf("resolve fields: %v", err)
+	}
+	out, err := renderKotlin(p.spec, p.fields, p.entries, "type_kind.yml")
+	if err != nil {
+		t.Fatalf("renderKotlin: %v", err)
+	}
+	got := string(out)
+	for _, want := range []string{
+		"package dev.idt.llx.types",
+		"enum class TypeKind(",
+		"val wire: Int,",
+		"val display: String?,",
+		`Invalid(0, "<invalid>",`,
+		`I8(2, "i8", 8, true, true,`,
+		"entries.associateBy(TypeKind::wire)",
+		"entries.associateBy { it.name.lowercase() }",
+		`"int" to TypeKind.I32`,
+		"val TypeInt: TypeKind = TypeKind.I32",
+		"fun iterPrimitive(): Sequence<TypeKind> =",
+		"TypeKind.entries.asSequence().filter { it.primitive == true }",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("real TypeKind Kotlin output missing %q\n---\n%s", want, got)
+		}
+	}
+	for _, forbidden := range []string{
+		"public ",
+		"TypeKindInfo",
+		"TypeKindInfos",
+		`\u003c`,
+	} {
+		if strings.Contains(got, forbidden) {
+			t.Errorf("real TypeKind Kotlin output contains %q\n---\n%s", forbidden, got)
+		}
 	}
 }
