@@ -173,7 +173,7 @@ func TestOperatorDeclMissingOperatorSymbolIsError(t *testing.T) {
 		"func main() {\n\tprint(1)\n}\n"
 
 	file := lexer.NewFile("t.ll", src)
-	tree, diags := ParseFile(file)
+	tree, diags := ParseFile(file, false)
 	if diags.ErrorCount() != 1 {
 		t.Fatalf("ErrorCount = %d, want 1: %v", diags.ErrorCount(), diags.All())
 	}
@@ -201,7 +201,7 @@ func TestOperatorDeclRecoversFromMalformedParam(t *testing.T) {
 		"}\n" +
 		"func main() {\n\tprint(1)\n}\n"
 
-	tree, diags := ParseFile(lexer.NewFile("t.ll", src))
+	tree, diags := ParseFile(lexer.NewFile("t.ll", src), false)
 	if !diags.HasErrors() {
 		t.Fatal("expected parse errors for a param with no declared type")
 	}
