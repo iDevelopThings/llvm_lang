@@ -1,10 +1,19 @@
 package sema
 
+//go:generate go run ../../cmd/enum_codegen -in ./type_kind.yml
+
 import (
 	"fmt"
 	"strings"
 )
 
+// TypeKind is generated from type_kind.yml (see cmd/enum_codegen) - its
+// constants, container (TypeKinds), and per-kind metadata (TypeKind.Display/
+// Bits/Integer/Unsigned/Float/Untyped) live in the generated
+// type_kind_enum.go. TypeInt is the sole aliasField entry, a pure name
+// synonym for TypeI32 (see AGENTS.md's Types section and BLOCKERS.md's
+// "int is 32-bit" entry) - not a second, independently-tracked value.
+//
 // TypeKind classifies a Type. Two kinds exist purely for error recovery and
 // void-call bookkeeping, not because the language has values of them:
 //   - TypeInvalid marks a type that couldn't be determined because of an
@@ -23,9 +32,10 @@ import (
 // TypeU8/TypeU16/TypeU32/TypeU64 are their unsigned counterparts, identical
 // in every way except signedness (see IsUnsigned and LANGUAGE.md's Types
 // section); TypeF32/TypeF64 are real, distinct floating-point widths. There
-// is no separate TypeInt constant - see TypeInt's own doc comment below for
-// why "int" is a synonym for TypeI32, not a second TypeKind value that merely
-// happens to compare equal to it. There is deliberately no unsigned analogue:
+// is no separate TypeInt constant - see this file's own top-of-file TypeKind
+// doc comment above for why "int" is a synonym for TypeI32, not a second
+// TypeKind value that merely happens to compare equal to it. There is
+// deliberately no unsigned analogue:
 // "int" is special only as this language's oldest int type, and no single
 // unsigned width holds that role.
 //
@@ -124,56 +134,6 @@ import (
 // (checkAssignable's own func-to-cfunc conversion, typecheck.go) - a
 // function literal or any other function value with real captures is a
 // compile error, since there is no trampoline to synthesize one this round.
-type TypeKind int
-
-const (
-	TypeInvalid TypeKind = iota
-	TypeVoid
-
-	TypeI8
-	TypeI16
-	TypeI32
-	TypeI64
-
-	TypeU8
-	TypeU16
-	TypeU32
-	TypeU64
-
-	TypeF32
-	TypeF64
-
-	TypeString
-	TypeCString
-	TypeBool
-	TypeStruct
-	TypeArray
-	TypeFunc
-	TypeCFunc
-	TypePointer
-	TypeMap
-	TypeEnum
-
-	TypeUntypedInt
-	TypeUntypedFloat
-	TypeUntypedNil
-
-	TypeMultiReturn
-	TypeGenerator
-	TypeCoroutine
-)
-
-// TypeInt is a synonym for TypeI32, not a distinct TypeKind value: "int" in
-// this language has always meant exactly a 32-bit signed integer (see
-// AGENTS.md's Types section and BLOCKERS.md's "int is 32-bit" entry). Now
-// that i8/i16/i32/i64 exist as their own real, named types, keeping "int" as
-// a second constant that merely happens to Equal TypeI32 would be exactly
-// the kind of parallel, hand-synced representation of the same type this
-// project avoids elsewhere - every switch/comparison anywhere in this
-// package or codegen only ever needs to look at TypeI32; "int" and "i32" are
-// simply two source-level spellings of the identical Type.
-const TypeInt = TypeI32
-
 // Type is the result of type-checking one expression or type position.
 // Structs are identified by their *StructInfo (built once by Resolve and
 // shared, so two Types both naming struct Point always point at the exact
@@ -278,50 +238,16 @@ func (t Type) Underlying() Type {
 // kinds sharing IsIntegerKind is not enough to interoperate: a binary op
 // still requires exact Type equality (see Equal/resolveNumericOperands), so
 // an i32 and a u32 no more mix implicitly than an i32 and an i64.
-func (t Type) IsIntegerKind() bool {
-	switch t.Kind {
-	case TypeI8,
-		TypeI16,
-		TypeI32,
-		TypeI64,
-		TypeU8,
-		TypeU16,
-		TypeU32,
-		TypeU64,
-		TypeUntypedInt:
-		return true
-	default:
-		return false
-	}
-}
+func (t Type) IsIntegerKind() bool { return t.Kind.Integer() }
 
 // IsUnsigned reports whether t is an unsigned integer type (u8/u16/u32/u64) -
 // codegen uses this to pick unsigned instructions (udiv/urem/zext/unsigned
 // compares) over their signed defaults.
-func (t Type) IsUnsigned() bool {
-	switch t.Kind {
-	case TypeU8,
-		TypeU16,
-		TypeU32,
-		TypeU64:
-		return true
-	default:
-		return false
-	}
-}
+func (t Type) IsUnsigned() bool { return t.Kind.Unsigned() }
 
 // IsFloatKind reports whether t is a floating-point type of any width
 // (f32/f64) or the untyped-float constant kind.
-func (t Type) IsFloatKind() bool {
-	switch t.Kind {
-	case TypeF32,
-		TypeF64,
-		TypeUntypedFloat:
-		return true
-	default:
-		return false
-	}
-}
+func (t Type) IsFloatKind() bool { return t.Kind.Float() }
 
 // IsNumeric reports whether t is any numeric type at all - a concrete
 // integer or float width, or either untyped-constant kind.
@@ -332,32 +258,23 @@ func (t Type) IsNumeric() bool {
 // IsUntyped reports whether t is one of the two untyped-constant kinds a
 // numeric literal starts life as, before context resolves it to a concrete
 // type - see checkNumberLit/resolveNumericOperands/checkAssignable in
-// typecheck.go, and AGENTS.md's Types section.
-func (t Type) IsUntyped() bool {
-	return t.Kind == TypeUntypedInt || t.Kind == TypeUntypedFloat
-}
+// typecheck.go, and AGENTS.md's Types section. Deliberately excludes
+// TypeUntypedNil - type_kind.yml's own untyped column is set only on the two
+// numeric untyped kinds.
+func (t Type) IsUntyped() bool { return t.Kind.Untyped() }
 
 // Bits reports the concrete bit width of a numeric Type (i8/i16/i32/i64,
 // f32/f64) - meaningful only for those six concrete kinds. codegen's
 // genConversion is the only caller, deciding sext/trunc vs fpext/fptrunc by
 // comparing two Bits() results; never called on an untyped/non-numeric Type.
+// Wraps the generated TypeKind.Bits() accessor (0 for any kind that doesn't
+// declare a bits: column) to restore this panic - a generated accessor can
+// only return the zero value for an unset column, never panic on its own.
 func (t Type) Bits() int {
-	switch t.Kind {
-	case TypeI8, TypeU8:
-		return 8
-	case TypeI16, TypeU16:
-		return 16
-	case TypeI32, TypeU32:
-		return 32
-	case TypeI64, TypeU64:
-		return 64
-	case TypeF32:
-		return 32
-	case TypeF64:
-		return 64
-	default:
-		panic(fmt.Sprintf("sema: Bits called on non-numeric type %s", t))
+	if b := t.Kind.Bits(); b != 0 {
+		return b
 	}
+	panic(fmt.Sprintf("sema: Bits called on non-numeric type %s", t))
 }
 
 // Equal reports whether t and u are the exact same type. There is no
@@ -425,36 +342,6 @@ func (t Type) Equal(u Type) bool {
 // distinguish from "int" anyway since both produce the identical Type value.
 func (t Type) String() string {
 	switch t.Kind {
-	case TypeInvalid:
-		return "<invalid>"
-	case TypeVoid:
-		return "void"
-	case TypeI8:
-		return "i8"
-	case TypeI16:
-		return "i16"
-	case TypeI32:
-		return "int"
-	case TypeI64:
-		return "i64"
-	case TypeU8:
-		return "u8"
-	case TypeU16:
-		return "u16"
-	case TypeU32:
-		return "u32"
-	case TypeU64:
-		return "u64"
-	case TypeF32:
-		return "f32"
-	case TypeF64:
-		return "f64"
-	case TypeString:
-		return "string"
-	case TypeCString:
-		return "cstring"
-	case TypeBool:
-		return "bool"
 	case TypeStruct:
 		if t.Struct == nil {
 			return "<struct>"
@@ -478,12 +365,6 @@ func (t Type) String() string {
 		return funcTypeString("func", t)
 	case TypeCFunc:
 		return funcTypeString("cfunc", t)
-	case TypeUntypedInt:
-		return "untyped int"
-	case TypeUntypedFloat:
-		return "untyped float"
-	case TypeUntypedNil:
-		return "nil"
 	case TypeMultiReturn:
 		parts := make([]string, len(t.Params))
 		for i, p := range t.Params {
@@ -498,7 +379,12 @@ func (t Type) String() string {
 		}
 		return "coroutine " + t.Elem.String()
 	default:
-		return "<unknown type>"
+		// Every other kind's display string is a flat per-kind fact with no
+		// payload dependency - see type_kind.yml's display column.
+		if !t.Kind.Valid() {
+			return "<unknown type>"
+		}
+		return t.Kind.Display()
 	}
 }
 

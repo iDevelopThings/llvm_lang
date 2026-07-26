@@ -1,16 +1,17 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
 	"go/format"
 	"strings"
+
+	"llvm_lang/src/codewriter"
 )
 
 // renderGo produces the generated Go source for one enum spec.
 func renderGo(s *spec, fields []field, entries []entry, srcName string) ([]byte, error) {
-	var b bytes.Buffer
-	p := func(format string, a ...any) { fmt.Fprintf(&b, format+"\n", a...) }
+	w := codewriter.New(codewriter.Grow(4096))
+	p := w.Linef
 
 	members := liveEntries(entries)
 
@@ -294,10 +295,10 @@ func renderGo(s *spec, fields []field, entries []entry, srcName string) ([]byte,
 		p("}")
 	}
 
-	src, err := format.Source(b.Bytes())
+	src, err := format.Source(w.Bytes())
 	if err != nil {
 		// dump the unformatted source so the failure is debuggable
-		return nil, fmt.Errorf("gofmt: %w\n%s", err, b.String())
+		return nil, fmt.Errorf("gofmt: %w\n%s", err, w.String())
 	}
 	return src, nil
 }
