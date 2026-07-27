@@ -88,6 +88,23 @@ func TestStubFuncGenericParsesInStubsFile(t *testing.T) {
 	}
 }
 
+// TestStubFuncTypeRegistryBuiltinsParse proves the actual std/stubs.llx
+// declarations for the type registry builtins (TypeId/TypeIdOf/TypeByName/
+// AnyNew/AnySet) are syntactically legal stub funcs - these were initially
+// missed when the feature landed, leaving the JB plugin's stubs.llx-driven
+// tooling with no signature for them at all.
+func TestStubFuncTypeRegistryBuiltinsParse(t *testing.T) {
+	src := "stub func TypeId[T]() int\n" +
+		"stub func TypeIdOf(x Any) int\n" +
+		"stub func TypeByName(name string) []int\n" +
+		"stub func AnyNew(id int) (Any, bool)\n" +
+		"stub func AnySet[T](field Any, value T) bool\n"
+	diags := checkNamedSrc(t, "stubs.llx", src)
+	if diags.HasErrors() {
+		t.Fatalf("unexpected check errors: %v", diags.All())
+	}
+}
+
 func TestStubFuncAllowedUnderCaseInsensitiveBasename(t *testing.T) {
 	// Matches loader's EqualFold skip of stubs.llx on case-insensitive FS.
 	src := "stub func args() []string\n"
