@@ -84,12 +84,6 @@ Run a multi-file example by passing its directory:
 | [`log_demo`](../examples/log_demo/log_demo.llx) | `std:log` |
 | [`test_demo`](../examples/test_demo/test_demo.llx) | `std:test` and `llvmc -test`; intentionally fails |
 
-## Compiler gaps
-
-[compiler_gaps](../examples/compiler_gaps/README.md) held minimal repros
-for language/compiler gaps found while growing `std/` - all are now fixed
-and turned into regression tests (see that page for pointers to them).
-
 ## C interop
 
 | Example | Shows |

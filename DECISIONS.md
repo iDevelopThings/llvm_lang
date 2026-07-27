@@ -2551,17 +2551,17 @@ value pattern, non-type name, and a type pattern in an enum/value match.
 
 **Decision:** `std/os` introduces a shared `Error` enum (`Ok` + classified
 unit variants + `Unknown(i32)`) and small non-generic result enums
-(`StringResult` / `BytesResult`) for `match`-friendly fallible ops. No
-`Result[T]` — generic enums are unsupported. Hot paths avoid string error
-payloads; `Error.String()` is for display only.
+(`FileResult` / `StringResult` / `BytesResult`) for `match`-friendly
+fallible ops. No `Result[T]` — generic enums are unsupported. Hot paths
+avoid string error payloads; `Error.String()` is for display only.
+
+Exported success/error sentinels are package vars (`os.Ok`, `os.NotFound`),
+not zero-arg funcs — same for `path.Separator` and `mathutil.Pi`.
 
 `std/path`, `Duration`/`Sleep` in `std/time` (QPC kept for monotonic),
-`std/sort`, `std/maps`, string `Parse*`, and mathutil trig landed in the
-same pass. File I/O and env are deferred pending `cstring == nil` and
-`cstring(*u8)` (see `examples/compiler_gaps`).
+file/env in `std/os`, `std/sort`, `std/maps` (`IterKeys`/`IterValues` plus
+allocating collectors), string `Parse*`, and mathutil trig landed around
+the same stretch.
 
-**Cross-package enum construction** (`os.Error.Ok`) is not available;
-`os.Ok()` / `os.NotFound()` constructors paper over it until that gap closes.
-
-**Status:** partial — Error/path/time Duration/Sleep/sort/maps/parse/trig
-shipped with `tests{}` and demos; os file/env still open.
+**Status:** shipped (cstring/index/cross-package enum+var gaps closed in
+follow-up compiler rounds).

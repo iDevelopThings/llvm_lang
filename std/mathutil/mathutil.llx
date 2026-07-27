@@ -126,9 +126,7 @@ func Atan2(y f64, x f64) f64 {
 	return atan2(y, x)
 }
 
-func Pi() f64 {
-	return 3.141592653589793
-}
+var Pi f64 = 3.141592653589793
 
 tests {
 	import "std:test"
@@ -136,8 +134,8 @@ tests {
 	func TestTrig(t *test.Runner) {
 		t.AssertApprox(Sin(0.0), 0.0, 0.0000001, "sin0")
 		t.AssertApprox(Cos(0.0), 1.0, 0.0000001, "cos0")
-		t.AssertApprox(Sin(Pi() / 2.0), 1.0, 0.0000001, "sin pi/2")
-		t.AssertApprox(Cos(Pi()), -1.0, 0.0000001, "cos pi")
+		t.AssertApprox(Sin(Pi / 2.0), 1.0, 0.0000001, "sin pi/2")
+		t.AssertApprox(Cos(Pi), -1.0, 0.0000001, "cos pi")
 		t.AssertApprox(Atan2(0.0, 1.0), 0.0, 0.0000001, "atan2")
 		t.AssertApprox(Tan(0.0), 0.0, 0.0000001, "tan0")
 	}

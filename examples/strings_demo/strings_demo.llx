@@ -86,8 +86,22 @@ func main() int {
     print(strings.F64ToString(0.0))          // "0.0000"
     print(strings.F64ToString(2.0))          // "2.0000"
 
-        print(strings.ParseInt("13"))
-    print(strings.ParseF64("1.5"))
+    match strings.ParseInt("13") {
+        strings.IntParseResult.Ok(n) => {
+            print(n)
+        }
+        _ => {
+            print(-1)
+        }
+    }
+    match strings.ParseF64("1.5") {
+        strings.F64ParseResult.Ok(v) => {
+            print(v)
+        }
+        _ => {
+            print(-1.0)
+        }
+    }
 
     return partsLen + dIdx   // 3 + 10 = 13
 }

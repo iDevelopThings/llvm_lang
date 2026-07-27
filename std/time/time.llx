@@ -102,14 +102,14 @@ func (Duration) SecondsF64() f64 {
 // Sleep blocks for d via nanosleep. Negative/zero returns Ok immediately.
 func Sleep(d Duration) os.Error {
     if d.ns <= 0 {
-        return os.Ok()
+        return os.Ok
     }
     sec := d.ns / 1000000000
     nsec := i32(d.ns % 1000000000)
     req := timespec{tv_sec: sec, tv_nsec: nsec}
     rc := nanosleep(&req, nil)
     if rc == 0 {
-        return os.Ok()
+        return os.Ok
     }
     return os.LastErrno()
 }

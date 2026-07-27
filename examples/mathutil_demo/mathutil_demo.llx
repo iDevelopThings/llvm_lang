@@ -26,7 +26,7 @@ func main() int {
 
     print(mathutil.Sin(0.0))
     print(mathutil.Cos(0.0))
-    print(mathutil.Pi())
+    print(mathutil.Pi)
 
     return absResult + minResult + maxResult
 }

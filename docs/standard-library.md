@@ -59,7 +59,7 @@ Files: `Open` / `Create` → `FileResult` (destructor closes), `Read` /
 
 ## `std:path`
 
-`Join` / `Clean` accept `/` and `\` and emit `Separator()` (`\` on the
+`Join` / `Clean` accept `/` and `\` and emit `Separator` (`\` on the
 current Windows target). `Base`, `Dir`, `Ext`, and `IsAbs` cover the usual
 path queries.
 

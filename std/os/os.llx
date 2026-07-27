@@ -91,13 +91,8 @@ func LastErrno() Error {
     return FromErrno(*p)
 }
 
-func Ok() Error {
-    return Error.Ok
-}
-
-func NotFound() Error {
-    return Error.NotFound
-}
+var Ok Error = Error.Ok
+var NotFound Error = Error.NotFound
 
 func (Error) IsOk() bool {
     match this {
@@ -410,10 +405,10 @@ tests {
         }
     }
 
-    func TestOkConstructor(t *test.Runner) {
-        t.AssertEqual(Ok(), Error.Ok, "Ok()")
-        t.Assert(Ok().IsOk(), "IsOk")
-        t.Assert(NotFound().IsNotFound(), "IsNotFound")
+    func TestOkVars(t *test.Runner) {
+        t.AssertEqual(Ok, Error.Ok, "Ok")
+        t.Assert(Ok.IsOk(), "IsOk")
+        t.Assert(NotFound.IsNotFound(), "IsNotFound")
     }
 
     func TestStringResultMatch(t *test.Runner) {

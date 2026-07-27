@@ -1,9 +1,7 @@
 // path.llx - std/path: slash-aware path helpers. Pure .llx, no FFI.
-// Accepts both / and \ on input; Join/Clean emit Separator() (\ on this target).
+// Accepts both / and \ on input; Join/Clean emit Separator (\ on this target).
 
-func Separator() string {
-    return "\\"
-}
+var Separator string = "\\"
 
 func isSep(c string) bool {
     return c == "/" || c == "\\"
@@ -43,7 +41,7 @@ func Base(path string) string {
         end = end - 1
     }
     if end == 0 {
-        return Separator()
+        return Separator
     }
     start := end
     for start > 0 && !isSep(path[start-1:start]) {
@@ -61,7 +59,7 @@ func Dir(path string) string {
         end = end - 1
     }
     if end == 0 {
-        return Separator()
+        return Separator
     }
     start := end
     for start > 0 && !isSep(path[start-1:start]) {
@@ -75,16 +73,16 @@ func Dir(path string) string {
     }
     if start == 0 {
         if isSep(path[0:1]) {
-            return Separator()
+            return Separator
         }
         return "."
     }
     vol := volumeLen(path)
     if start <= vol {
         if vol > 0 {
-            return path[0:vol] + Separator()
+            return path[0:vol] + Separator
         }
-        return Separator()
+        return Separator
     }
     return path[0:start]
 }
@@ -124,7 +122,7 @@ func Join(elem ...string) string {
         } else if isSep(e[0:1]) {
             result = result + e
         } else {
-            result = result + Separator() + e
+            result = result + Separator + e
         }
         i = i + 1
     }
@@ -173,28 +171,28 @@ func Clean(path string) string {
         out = path[0:vol]
     }
     if rooted {
-        out = out + Separator()
+        out = out + Separator
     }
     j := 0
     for j < len(parts) {
         if j > 0 || rooted || vol > 0 {
             if !(j == 0 && rooted) {
                 if len(out) == 0 || !isSep(out[len(out)-1:len(out)]) {
-                    out = out + Separator()
+                    out = out + Separator
                 }
             } else if j > 0 {
-                out = out + Separator()
+                out = out + Separator
             }
         }
         if j == 0 && rooted {
             // already have root sep
             if len(out) == 0 || !isSep(out[len(out)-1:len(out)]) {
-                out = out + Separator()
+                out = out + Separator
             }
         }
         if j > 0 {
             if len(out) == 0 || !isSep(out[len(out)-1:len(out)]) {
-                out = out + Separator()
+                out = out + Separator
             }
         }
         out = out + parts[j]
@@ -207,9 +205,9 @@ func Clean(path string) string {
     // Fix awkward Join of root-only
     if rooted && len(parts) == 0 {
         if vol > 0 {
-            return path[0:vol] + Separator()
+            return path[0:vol] + Separator
         }
-        return Separator()
+        return Separator
     }
     return out
 }
@@ -218,7 +216,7 @@ tests {
     import "std:test"
 
     func TestSeparator(t *test.Runner) {
-        t.AssertEqual(Separator(), "\\", "windows separator")
+        t.AssertEqual(Separator, "\\", "windows separator")
     }
 
     func TestIsAbs(t *test.Runner) {

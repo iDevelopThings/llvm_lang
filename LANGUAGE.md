@@ -3078,7 +3078,7 @@ error if it can't be found.
 
 - **`std/mathutil`** - libc `<math.h>` wrappers (`Sqrt`, `Pow`, `Floor`,
   `Ceil`, `Fabs`, `Sin`, `Cos`, `Tan`, `Atan2`, all `f64`) plus
-  `Pi() f64` and generic `Abs`/`Min`/`Max`/`Clamp`/`Normalize2D`. Named
+  `Pi` and generic `Abs`/`Min`/`Max`/`Clamp`/`Normalize2D`. Named
   "mathutil" to read distinctly from `examples/imports`'s demo fixture.
 - **`std/strings`** - `Contains`, `IndexOf`, `HasPrefix`, `HasSuffix`,
   `TrimSpace` (ASCII space only), `Split` (Go-`strings.Split` edge cases),
@@ -3089,10 +3089,10 @@ error if it can't be found.
   `Overflow` as applicable). Pure `.llx` (no `extern`); `string` is not
   FFI-safe (see "External functions (FFI)" above).
 - **`std/path`** - `Separator`, `Join`, `Clean`, `Base`, `Dir`, `Ext`,
-  `IsAbs`. Accepts `/` and `\` on input; `Join`/`Clean` emit `Separator()`
+  `IsAbs`. Accepts `/` and `\` on input; `Join`/`Clean` emit `Separator`
   (`\` on the current Windows target).
 - **`std/os`** - shared `Error` enum (`Ok`, classified unit variants,
-  `Unknown(i32)`), `FromErrno`, `Ok()`/`NotFound()` / `IsOk` /
+  `Unknown(i32)`), `FromErrno`, exported `Ok`/`NotFound` vars, `IsOk` /
   `IsNotFound`, result enums `FileResult` / `BytesResult` /
   `StringResult`, and libc/CRT-backed file + env helpers: `Open` /
   `Create`, `File` (destructor closes), `ReadFile` / `WriteFile` /
