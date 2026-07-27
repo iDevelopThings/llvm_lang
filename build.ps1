@@ -12,7 +12,12 @@
 # CLI convenience (e.g. for CI or a quick terminal build).
 #
 # Usage:
-#   .\build.ps1            # build llvmc.exe and llvmc-lsp.exe
+#   .\build.ps1            # build llvmc.exe and llvmc-lsp.exe, and copy both
+#                          # to GOBIN (or GOPATH\bin) so plain `llvmc`/
+#                          # `llvmc-lsp` work from any directory, PROVIDED
+#                          # that directory is already on your own PATH -
+#                          # this script only copies the file, it never
+#                          # touches your persistent PATH itself.
 #   .\build.ps1 -Run       # build, then run llvmc.exe
 
 param([switch]$Run)
@@ -30,5 +35,16 @@ Write-Host "Built llvmc.exe (LLVM 22)" -ForegroundColor Green
 go build -tags=llvm22 -o llvmc-lsp.exe ./cmd/llvmc-lsp
 if ($LASTEXITCODE -ne 0) { throw "go build (cmd/llvmc-lsp) failed ($LASTEXITCODE)" }
 Write-Host "Built llvmc-lsp.exe (LLVM 22)" -ForegroundColor Green
+
+$gobin = go env GOBIN
+if (-not $gobin) { $gobin = Join-Path (go env GOPATH) "bin" }
+if ($gobin -and (Test-Path $gobin)) {
+    Copy-Item llvmc.exe (Join-Path $gobin "llvmc.exe") -Force
+    Copy-Item llvmc-lsp.exe (Join-Path $gobin "llvmc-lsp.exe") -Force
+    Write-Host "Copied to $gobin" -ForegroundColor Green
+    if ($env:Path -notlike "*$gobin*") {
+        Write-Host "$gobin is not on your PATH - add it yourself to invoke llvmc/llvmc-lsp from anywhere." -ForegroundColor Yellow
+    }
+}
 
 if ($Run) { Write-Host "--- running ---" -ForegroundColor DarkGray; & .\llvmc.exe }
