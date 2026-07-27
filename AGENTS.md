@@ -145,6 +145,17 @@ silently conflict with or even delete work that landed in the meantime
 was missing an entire since-landed feature, and diffing it against current
 local master showed real code from that feature as "to be removed").
 
+**Confirmed root cause of most staleness in practice: automated worktree
+creation bases new worktrees on `origin/master`, not local `master`** - this
+has been directly verified (a worktree's own first commit exactly matched
+`origin/master`'s tip at creation time, dozens of commits behind local
+`master`). Since this happens before an agent gets to read this file, the
+agent itself has to self-correct: **the first thing any agent working in a
+provisioned worktree must do, before any other work, is compare its own
+`HEAD` against local `master` (not `origin/master`) and rebase onto local
+`master` immediately if behind** - don't wait until the work is finished and
+a merge/rebase conflict surfaces the staleness after the fact.
+
 # Project Info
 
 ## Enums
