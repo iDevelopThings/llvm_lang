@@ -5237,9 +5237,15 @@ func (c *checker) calleeNeverVariadic(callee ast.NodeIndex) bool {
 // calleeIsAsyncFunc reports whether callee names a declared async func (see
 // LANGUAGE.md's "Coroutines" section) - async functions are top-level-only
 // this round (no closures/FuncLit - see LANGUAGE.md), so callee is always a
-// plain Ident resolving to a SymFunc with a real FuncDecl when this is true.
+// plain Ident (an ordinary direct call) or an IndexExpr (an explicit generic
+// instantiation, `Foo[int](...)` - checkGenericCall assigns Refs on the
+// IndexExpr itself, not just the bare name inside it) resolving to a SymFunc
+// with a real FuncDecl when this is true - never any other shape, since
+// nothing else can reference a function by name at all.
 func (c *checker) calleeIsAsyncFunc(callee ast.NodeIndex) bool {
-	if c.tree.Nodes[callee].Kind != enums.NodeKinds.Ident {
+	switch c.tree.Nodes[callee].Kind {
+	case enums.NodeKinds.Ident, enums.NodeKinds.IndexExpr:
+	default:
 		return false
 	}
 	sym, ok := c.info.Refs[callee]

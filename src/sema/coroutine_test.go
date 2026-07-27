@@ -320,3 +320,27 @@ func TestVoidAsyncFuncReferencedAsBareValueIsError(t *testing.T) {
 	src := "async func Coro() {\n\tawait\n}\n\nfunc f() {\n\tg := Coro\n\tprint(g)\n}\n"
 	expectCheckErrors(t, src, 1)
 }
+
+// TestGenericAsyncFuncCallWrapsResultAsCoroutine proves an explicit-type-
+// argument call to a generic async function (`Foo[int](x)`) infers a real
+// coroutine handle, not the bare instantiated return type directly -
+// checkGenericCall's own tail needed the same TypeCoroutine wrap
+// checkOrdinaryCall's calleeIsAsyncFunc branch already gives a non-generic
+// async call, which it was missing entirely before this fix (h would have
+// inferred as plain `int`, and resume(h)/result(h) would both be rejected).
+func TestGenericAsyncFuncCallWrapsResultAsCoroutine(t *testing.T) {
+	src := "async func Foo[T](x T) T {\n\tawait\n\treturn x\n}\n\nfunc f() {\n\th := Foo[int](1)\n\tresume(h)\n\tv := result(h)\n\tprint(v)\n\tdelete h\n}\n"
+	checkSrc(t, src)
+}
+
+// TestGenericAsyncFuncCallIsFreshConstruction proves a generic async call's
+// own handle is recognized as fresh (not requiring `move`) exactly like a
+// non-generic async call already is - calleeIsAsyncFunc used to assume its
+// own callee argument was always a bare Ident, which is false for an
+// explicit generic instantiation (`Foo[int](x)`'s own callee is an
+// IndexExpr wrapping the Ident), so isFreshConstruction silently treated
+// this as a copy instead of a fresh construction before this fix.
+func TestGenericAsyncFuncCallIsFreshConstruction(t *testing.T) {
+	src := "async func Foo[T](x T) T {\n\tawait\n\treturn x\n}\n\nfunc take(h coroutine) {\n\tdelete h\n}\n\nfunc f() {\n\ttake(Foo[int](1))\n}\n"
+	checkSrc(t, src)
+}

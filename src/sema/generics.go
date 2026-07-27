@@ -852,6 +852,14 @@ func (c *checker) checkGenericCall(n, callee ast.NodeIndex, args []ast.NodeIndex
 	restore()
 
 	c.checkCallArgs(n, args, argTypes, sig)
+
+	// A generic async function's call result is a coroutine handle, not its
+	// own declared return type directly - the same wrap checkOrdinaryCall's
+	// calleeIsAsyncFunc branch already gives every non-generic async call.
+	if sym.Tree.FuncIsAsync(sym.Decl) {
+		ret := sig.Return
+		return Type{Kind: TypeCoroutine, Elem: &ret}, true
+	}
 	return sig.Return, true
 }
 

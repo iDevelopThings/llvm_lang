@@ -496,6 +496,32 @@ func run() int {
 	}
 }
 
+// TestCoroResult_GenericAsyncFuncExplicitTypeArg proves a generic async
+// function's own explicit-instantiation call (`Foo[int](x)`) round-trips a
+// real result value end to end, not just type-checks - both the missing
+// TypeCoroutine wrap in checkGenericCall and calleeIsAsyncFunc's own
+// Ident-only assumption (breaking isFreshConstruction for this callee
+// shape) were real bugs found while building the type registry feature.
+func TestCoroResult_GenericAsyncFuncExplicitTypeArg(t *testing.T) {
+	jm := compileAndJITOptimized(t, `
+async func Echo[T](x T) T {
+	await
+	return x
+}
+
+func run() int {
+	h := Echo[int](99)
+	resume(h)
+	v := result(h)
+	delete h
+	return v
+}
+`)
+	if got := jm.runInt32(t, "run"); got != 99 {
+		t.Errorf("run() = %d, want 99", got)
+	}
+}
+
 // TestCoroResult_BeforeDoneIsZeroValue proves result(h) called before the
 // coroutine is actually done returns int's zero value, not garbage - then,
 // against the SAME handle, driving it to completion and calling result(h)
