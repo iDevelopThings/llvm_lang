@@ -17,6 +17,18 @@ This is a quick list of deliberate limits, not a roadmap.
   Only the left operand is ever checked for a matching overload - `scalar *
   vector` (the struct on the right) does not work, only `vector * scalar`.
 
+## Any
+
+- Boxing is limited to scalar types, pointers, and structs - an enum, a
+  dynamic or fixed-size array, a map, a function/cfunc value, or a
+  non-copyable type cannot be boxed into `Any`.
+- Boxing an `Any` into another `Any` is legal - a cheap no-op copy, not an
+  error.
+- `Any` is neither comparable (`==`/`!=`) nor printable (`print`), and
+  cannot cross an `extern func` signature.
+- `AnyKind` returns a raw `i32` ordinal, not a named/nameable enum value.
+- `AnyAs[T]` always needs an explicit type argument; `T` is never inferred.
+
 ## Collections
 
 - `append` adds one element per call.

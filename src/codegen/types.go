@@ -63,6 +63,11 @@ func (g *Generator) setupTypes() {
 	g.funcValTy = g.ctx.StructType([]llvm.Type{g.ptrTy, g.ptrTy}, false)
 	g.dynArrTy = g.ctx.StructType([]llvm.Type{g.ptrTy, g.i32Ty, g.i32Ty}, false)
 	g.enumValTy = g.ctx.StructType([]llvm.Type{g.i32Ty, g.ptrTy}, false)
+	// anyTy is a boxed Any value's (sema.TypeAny) LLVM representation: the
+	// literal struct {ptr, ptr} = {dataPtr, descriptorPtr} - see any.go and
+	// DECISIONS.md for the descriptor's own shape and why this round doesn't
+	// use a tagged-union-of-primitives design instead.
+	g.anyTy = g.ctx.StructType([]llvm.Type{g.ptrTy, g.ptrTy}, false)
 }
 
 // llvmType maps a sema.Type (the output of type-checking) to the LLVM type
@@ -162,6 +167,9 @@ func (g *Generator) llvmType(t sema.Type) llvm.Type {
 		// table (Go's own real map-is-a-reference-type behavior): copying
 		// this pointer value is all an assignment/argument/return ever does.
 		return g.ptrTy
+	case sema.TypeAny:
+		// {dataPtr, descriptorPtr} - see any.go and this file's setupTypes.
+		return g.anyTy
 	default:
 		panic(fmt.Sprintf("codegen: type %s reached llvmType - only valid, checked types are supported", t))
 	}

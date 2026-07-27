@@ -2078,6 +2078,8 @@ func (c *checker) typeFromSymbol(sym *Symbol) Type {
 			// TypeCoroutine (see the call-expr construction site below).
 			ret := voidType
 			return Type{Kind: TypeCoroutine, Elem: &ret}
+		case "Any":
+			return Type{Kind: TypeAny}
 		default:
 			return invalidType
 		}
@@ -2329,7 +2331,10 @@ func (c *checker) typeIsComparable(t Type) bool {
 			return false
 		}
 		return t.Elem == nil || c.typeIsComparable(*t.Elem)
-	case TypeFunc, TypeCFunc, TypeMap, TypeCString:
+	case TypeFunc, TypeCFunc, TypeMap, TypeCString, TypeAny:
+		// Any is deliberately excluded this round - see LANGUAGE.md's "Any"
+		// section: no defined `==` lowering (genValueEqual has no TypeAny
+		// case), the same reasoning TypeCString's own doc comment gives.
 		return false
 	case TypeStruct:
 		if t.Struct == nil {
@@ -2405,7 +2410,10 @@ func (c *checker) typeIsPrintable(t Type) bool {
 	switch t.Kind {
 	case TypeArray:
 		return t.Elem == nil || c.typeIsPrintable(*t.Elem)
-	case TypeFunc, TypeCFunc, TypeMap, TypeCString:
+	case TypeFunc, TypeCFunc, TypeMap, TypeCString, TypeAny:
+		// Any is deliberately excluded this round - see LANGUAGE.md's "Any"
+		// section: wiring it into print() is explicit future work, not this
+		// round's scope, same reasoning as TypeCString's own exclusion.
 		return false
 	case TypeStruct:
 		if t.Struct == nil {
@@ -2964,6 +2972,22 @@ func (c *checker) checkRangeForStmt(n ast.NodeIndex) {
 		c.seedRangeBinding(keyNode, i32Type)
 		c.seedRangeBindingChecked(valueNode, *subjType.Elem, "range value binding")
 	case TypeGenerator:
+		if c.isAnyFieldsRangeSubject(subjectNode) {
+			// AnyFields(a) is the one deliberate exception to "a generator
+			// produces at most 1 value" below: it always yields a (field
+			// name, field value) pair, so ranging over it always binds two
+			// loop variables, exactly like a map's (key, value) - not
+			// generalized to real generators, which have no comparable
+			// paired-yield shape.
+			if valueNode == ast.InvalidNode {
+				c.errorAt(subjectNode, "range over AnyFields requires two bindings: for name, value := range AnyFields(a) { ... }")
+				c.seedRangeBinding(keyNode, invalidType)
+			} else {
+				c.seedRangeBindingChecked(keyNode, stringType, "range field-name binding")
+				c.seedRangeBindingChecked(valueNode, Type{Kind: TypeAny}, "range field-value binding")
+			}
+			break
+		}
 		c.checkGeneratorRangeSubject(subjectNode)
 		if c.curFunc != nil && c.curFunc.isGenerator {
 			c.errorAt(subjectNode, "a generator function's own body cannot range over another generator (nested generator composition is not supported)")
@@ -3010,6 +3034,20 @@ func (c *checker) checkGeneratorRangeSubject(subjectNode ast.NodeIndex) {
 	if _, ok := directFuncCallSymbol(c.tree, c.info, subjectNode); !ok {
 		c.errorAt(subjectNode, "range over a generator requires calling it directly by name (for v := range Gen(...) { ... }), not through a stored function value or any other indirection")
 	}
+}
+
+// isAnyFieldsRangeSubject reports whether subjectNode is a direct
+// AnyFields(...) call - checkRangeForStmt's own signal to take its 2-binding
+// (name, value) path instead of an ordinary generator's 1-binding one.
+// AnyFields is a predeclared builtin (Decl == ast.InvalidNode, see
+// universeScope), not a real FuncDecl, so it deliberately bypasses
+// directFuncCallSymbol/checkGeneratorRangeSubject rather than trying to
+// satisfy their "real declared generator" requirement.
+func (c *checker) isAnyFieldsRangeSubject(subjectNode ast.NodeIndex) bool {
+	if c.tree.Nodes[subjectNode].Kind != enums.NodeKinds.CallExpr {
+		return false
+	}
+	return c.isBuiltinCall(c.tree.Child(subjectNode, 0), "AnyFields")
 }
 
 // seedRangeBinding seeds nameNode's (a RangeForStmt's key or value binding,
@@ -4908,6 +4946,15 @@ func (c *checker) checkCallExpr(n ast.NodeIndex) Type {
 	if c.isBuiltinCall(callee, "done") {
 		return c.checkDoneCall(n, args)
 	}
+	if c.isBuiltinCall(callee, "AnyKind") {
+		return c.checkAnyKindCall(n, args)
+	}
+	if c.isBuiltinCall(callee, "AnyName") {
+		return c.checkAnyNameCall(n, args)
+	}
+	if c.isBuiltinCall(callee, "AnyFields") {
+		return c.checkAnyFieldsCall(n, args)
+	}
 	if t, ok := c.checkConstructorCall(n, callee, args); ok {
 		return t
 	}
@@ -4915,6 +4962,9 @@ func (c *checker) checkCallExpr(n ast.NodeIndex) Type {
 		return t
 	}
 	if t, ok := c.checkConversionCall(n, callee, args); ok {
+		return t
+	}
+	if t, ok := c.checkAnyAsCall(n, callee, args); ok {
 		return t
 	}
 	if t, ok := c.checkGenericCall(n, callee, args); ok {
@@ -5364,6 +5414,120 @@ func (c *checker) checkArgsCall(n ast.NodeIndex, args []ast.NodeIndex) Type {
 	return Type{Kind: TypeArray, Dynamic: true, Elem: &stringType}
 }
 
+// checkAnyArgCall type-checks the identical "exactly one Any-typed argument"
+// shape AnyKind/AnyName/AnyFields all share, reporting a real diagnostic (not
+// a silent accept) for a wrong argument count or a non-Any argument - see
+// checkCoroHandleArgCall's own identical resume/done-sharing precedent.
+func (c *checker) checkAnyArgCall(n ast.NodeIndex, args []ast.NodeIndex, name string) bool {
+	if len(args) != 1 {
+		c.errorAtNodes(args, n, "%s takes exactly 1 argument, got %d", name, len(args))
+		for _, a := range args {
+			c.checkValueExpr(a)
+		}
+		return false
+	}
+	t := c.checkValueExpr(args[0])
+	if t.IsInvalid() {
+		return false
+	}
+	if t.Kind != TypeAny {
+		c.errorAt(args[0], "%s requires an Any argument, got %s", name, t)
+		return false
+	}
+	return true
+}
+
+// checkAnyKindCall type-checks the predeclared `AnyKind(a Any) i32` builtin
+// (see LANGUAGE.md's "Any" section) - the boxed value's own runtime
+// sema.TypeKind wire value, as a plain i32. This round deliberately doesn't
+// expose TypeKind itself as a nameable language-level enum (see DECISIONS.md)
+// - AnyName/AnyAs already cover the "what kind is this" use case a named
+// enum constant would otherwise be for.
+func (c *checker) checkAnyKindCall(n ast.NodeIndex, args []ast.NodeIndex) Type {
+	if !c.checkAnyArgCall(n, args, "AnyKind") {
+		return invalidType
+	}
+	return i32Type
+}
+
+// checkAnyNameCall type-checks the predeclared `AnyName(a Any) string`
+// builtin (see LANGUAGE.md's "Any" section) - the boxed value's own concrete
+// type's display name.
+func (c *checker) checkAnyNameCall(n ast.NodeIndex, args []ast.NodeIndex) Type {
+	if !c.checkAnyArgCall(n, args, "AnyName") {
+		return invalidType
+	}
+	return stringType
+}
+
+// checkAnyFieldsCall type-checks the predeclared `AnyFields(a Any)` builtin
+// (see LANGUAGE.md's "Any" section) - legal only as a range-for's own
+// subject expression, exactly like a real generator call. Unlike every other
+// generator, ranging over AnyFields binds two loop variables (a field's own
+// name and its recursively-boxed value), not one - see checkRangeForStmt's
+// own AnyFields special case for why that's handled there rather than by
+// generalizing TypeGenerator's single-binding rule.
+func (c *checker) checkAnyFieldsCall(n ast.NodeIndex, args []ast.NodeIndex) Type {
+	if !c.checkAnyArgCall(n, args, "AnyFields") {
+		return invalidType
+	}
+	anyElem := Type{Kind: TypeAny}
+	return Type{Kind: TypeGenerator, Elem: &anyElem}
+}
+
+// checkAnyAsCall type-checks the predeclared `AnyAs[T](a Any) (T, bool)`
+// builtin (see LANGUAGE.md's "Any" section) - Go's own type-assertion shape
+// (`v, ok := x.(int)`), reusing this language's existing generics/multi-
+// return machinery for the surface syntax and result shape rather than
+// inventing either from scratch. T is never inferred (a's own static type is
+// already fully erased) - every call needs an explicit type argument,
+// `AnyAs[i32](a)`.
+//
+// AnyAs is registered in universeScope with a Generic (see that doc comment)
+// but no real Decl/Tree, so it must be intercepted here, before
+// checkGenericCall - which would otherwise dereference gi.Tree/gi.Decl
+// assuming a real user declaration to clone.
+func (c *checker) checkAnyAsCall(n, callee ast.NodeIndex, args []ast.NodeIndex) (Type, bool) {
+	gi, explicit, ok := c.genericCallee(callee)
+	if !ok || gi.Symbol.Name != "AnyAs" {
+		return invalidType, false
+	}
+
+	if len(args) != 1 {
+		c.errorAtNodes(args, n, "AnyAs takes exactly 1 argument, got %d", len(args))
+		for _, a := range args {
+			c.checkValueExpr(a)
+		}
+		return invalidType, true
+	}
+	if explicit == ast.InvalidNode {
+		c.errorAt(n, "AnyAs requires an explicit type argument, e.g. AnyAs[i32](a)")
+		c.checkValueExpr(args[0])
+		return invalidType, true
+	}
+	typeArgs, ok := c.typeArgsFromNode(explicit, gi)
+	if !ok {
+		c.checkValueExpr(args[0])
+		return invalidType, true
+	}
+	target := typeArgs[0]
+
+	argType := c.checkValueExpr(args[0])
+	if argType.IsInvalid() || target.IsInvalid() {
+		return invalidType, true
+	}
+	if argType.Kind != TypeAny {
+		c.errorAt(args[0], "AnyAs requires an Any argument, got %s", argType)
+		return invalidType, true
+	}
+	if !isBoxableIntoAny(target) {
+		c.errorAt(explicit, "AnyAs[%s]: %s can never have been boxed into Any", target, target)
+		return invalidType, true
+	}
+
+	return Type{Kind: TypeMultiReturn, Params: []Type{target, boolType}}, true
+}
+
 // checkConstructorCall recognizes and type-checks `Name(args)` where Name
 // resolves to a struct type with at least one declared constructor (see
 // LANGUAGE.md's "Constructors" section) - callee may be a plain Ident (a
@@ -5566,6 +5730,32 @@ func (c *checker) checkConversionCall(n, callee ast.NodeIndex, args []ast.NodeIn
 		return target, true
 	}
 
+	// Any(x): boxing an arbitrary value into a type-erased Any (see
+	// LANGUAGE.md's "Any" section) - deliberately not numeric, so checked
+	// ahead of the numeric-only fallback below, exactly like the cstring<->
+	// string crossing above. Any(x) where x is already Any is a legal,
+	// cheap no-op copy - the same "redundant same-type conversion stays
+	// legal" precedent i64(someI64) already establishes for the numeric
+	// path (see isBoxableIntoAny).
+	if target.Kind == TypeAny {
+		if !isBoxableIntoAny(argType) {
+			c.errorAt(n, "cannot box %s into Any - enums, arrays, maps, function values, and multi-value/generator/coroutine results have no Any representation this round", argType)
+			c.info.Types[n] = invalidType
+			return invalidType, true
+		}
+		if c.typeIsNonCopyable(argType) {
+			c.errorAt(n, "cannot box non-copyable type %s into Any - Any(x) always copies x's bytes, which isn't sound for a type that isn't copyable", argType)
+			c.info.Types[n] = invalidType
+			return invalidType, true
+		}
+		if argType.IsUntyped() {
+			def := c.defaultUntyped(argType)
+			c.retypeUntyped(args[0], def)
+		}
+		c.info.Types[n] = target
+		return target, true
+	}
+
 	if !target.IsNumeric() || !argType.IsNumeric() {
 		c.errorAt(n, "cannot convert %s to %s", argType, target)
 		c.info.Types[n] = invalidType
@@ -5585,6 +5775,23 @@ func (c *checker) checkConversionCall(n, callee ast.NodeIndex, args []ast.NodeIn
 
 	c.info.Types[n] = target
 	return target, true
+}
+
+// isBoxableIntoAny reports whether t has a defined Any-boxing representation
+// this round (see LANGUAGE.md's "Any" section): every scalar/primitive kind,
+// TypePointer, TypeStruct, and TypeAny itself (a no-op re-box) - not an enum
+// (variant-payload descriptor shape not designed yet), a dynamic/fixed array
+// or map (no descriptor shape), a function/cfunc value, or any of the three
+// kinds that are never a real storable value at all (TypeMultiReturn/
+// TypeGenerator/TypeCoroutine).
+func isBoxableIntoAny(t Type) bool {
+	switch t.Kind {
+	case TypeEnum, TypeArray, TypeMap, TypeFunc, TypeCFunc,
+		TypeMultiReturn, TypeGenerator, TypeCoroutine:
+		return false
+	default:
+		return true
+	}
 }
 
 // checkNewExpr type-checks `new T(args)`/`new T{...}` (see LANGUAGE.md's

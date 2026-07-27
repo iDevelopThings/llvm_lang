@@ -41,6 +41,7 @@ const (
 	TypeMultiReturn  TypeKind = 25
 	TypeGenerator    TypeKind = 26
 	TypeCoroutine    TypeKind = 27
+	TypeAny          TypeKind = 28
 	TypeInt                   = TypeI32
 )
 
@@ -73,6 +74,7 @@ type TypeKindContainer struct {
 	MultiReturn  TypeKind
 	Generator    TypeKind
 	Coroutine    TypeKind
+	Any          TypeKind
 }
 
 // TypeKinds is the entry point for the TypeKind enum.
@@ -105,6 +107,7 @@ var TypeKinds = TypeKindContainer{
 	MultiReturn:  TypeMultiReturn,
 	Generator:    TypeGenerator,
 	Coroutine:    TypeCoroutine,
+	Any:          TypeAny,
 }
 
 // TypeKindInfo is the static metadata attached to a TypeKind.
@@ -429,6 +432,17 @@ var typeKindInfos = [...]TypeKindInfo{
 		Float:     false,
 		Untyped:   false,
 	},
+	TypeAny: {
+		TypeKind:  TypeAny,
+		Name:      "Any",
+		Display:   "Any",
+		Bits:      0,
+		Integer:   false,
+		Primitive: false,
+		Unsigned:  false,
+		Float:     false,
+		Untyped:   false,
+	},
 }
 
 var typeKindValues = []TypeKind{
@@ -460,6 +474,7 @@ var typeKindValues = []TypeKind{
 	TypeMultiReturn,
 	TypeGenerator,
 	TypeCoroutine,
+	TypeAny,
 }
 
 var typeKindByName = map[string]TypeKind{
@@ -491,6 +506,7 @@ var typeKindByName = map[string]TypeKind{
 	"multireturn":  TypeMultiReturn,
 	"generator":    TypeGenerator,
 	"coroutine":    TypeCoroutine,
+	"any":          TypeAny,
 }
 
 // Values returns every declared value in declaration order.

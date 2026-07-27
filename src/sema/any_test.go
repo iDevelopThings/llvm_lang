@@ -1,0 +1,205 @@
+package sema
+
+import "testing"
+
+// --- valid: boxing ---
+
+func TestAnyBoxPrimitiveKinds(t *testing.T) {
+	for _, tc := range []struct {
+		src  string
+		kind TypeKind
+	}{
+		{"func f() { a := Any(5) }\n", TypeI32},
+		{"func f() { a := Any(5.0) }\n", TypeF64},
+		{"func f() { a := Any(true) }\n", TypeBool},
+		{"func f() { a := Any(\"hi\") }\n", TypeString},
+	} {
+		tree, info := checkSrc(t, tc.src)
+		decl := tree.Children(tree.Root)[0]
+		body := tree.FuncBody(decl)
+		shortVar := tree.Children(body)[0]
+		init := tree.Child(shortVar, 1)
+		got := info.Types[init]
+		if got.Kind != TypeAny {
+			t.Fatalf("%q: Types[init].Kind = %v, want Any", tc.src, got.Kind)
+		}
+	}
+}
+
+func TestAnyBoxStruct(t *testing.T) {
+	tree, info := checkSrc(t, "struct Point {\n\tX int\n}\n"+
+		"func f() {\n\tp := Point{X: 1}\n\ta := Any(p)\n}\n")
+	decl := tree.Children(tree.Root)[1]
+	body := tree.FuncBody(decl)
+	stmts := tree.Children(body)
+	init := tree.Child(stmts[1], 1)
+	if got := info.Types[init]; got.Kind != TypeAny {
+		t.Fatalf("Types[init].Kind = %v, want Any", got.Kind)
+	}
+}
+
+func TestAnyBoxPointer(t *testing.T) {
+	checkSrc(t, "func f() {\n\tx := 5\n\tp := &x\n\ta := Any(p)\n}\n")
+}
+
+func TestAnyIntoAnyIsNoOpCopy(t *testing.T) {
+	checkSrc(t, "func f() {\n\ta := Any(5)\n\tb := Any(a)\n}\n")
+}
+
+// --- valid: reflection builtins ---
+
+func TestAnyKindReturnsI32(t *testing.T) {
+	tree, info := checkSrc(t, "func f() {\n\ta := Any(5)\n\tk := AnyKind(a)\n}\n")
+	decl := tree.Children(tree.Root)[0]
+	body := tree.FuncBody(decl)
+	stmts := tree.Children(body)
+	init := tree.Child(stmts[1], 1)
+	if got := info.Types[init]; got.Kind != TypeI32 {
+		t.Fatalf("Types[AnyKind call] = %v, want i32", got)
+	}
+}
+
+func TestAnyNameReturnsString(t *testing.T) {
+	tree, info := checkSrc(t, "func f() {\n\ta := Any(5)\n\tn := AnyName(a)\n}\n")
+	decl := tree.Children(tree.Root)[0]
+	body := tree.FuncBody(decl)
+	stmts := tree.Children(body)
+	init := tree.Child(stmts[1], 1)
+	if got := info.Types[init]; got.Kind != TypeString {
+		t.Fatalf("Types[AnyName call] = %v, want string", got)
+	}
+}
+
+func TestAnyAsRoundTripType(t *testing.T) {
+	tree, info := checkSrc(t, "func f() {\n\ta := Any(5)\n\tv, ok := AnyAs[int](a)\n}\n")
+	decl := tree.Children(tree.Root)[0]
+	body := tree.FuncBody(decl)
+	stmts := tree.Children(body)
+	names := tree.MultiShortVarDeclNames(stmts[1])
+	if got := info.Types[names[0]]; got.Kind != TypeI32 {
+		t.Errorf("v's Type = %v, want int", got)
+	}
+	if got := info.Types[names[1]]; got.Kind != TypeBool {
+		t.Errorf("ok's Type = %v, want bool", got)
+	}
+}
+
+func TestAnyFieldsRangeBindings(t *testing.T) {
+	tree, info := checkSrc(t, "struct Point {\n\tX int\n}\n"+
+		"func f() {\n\tp := Point{X: 1}\n\ta := Any(p)\n"+
+		"\tfor name, v := range AnyFields(a) {\n\t\tprint(name)\n\t}\n}\n")
+	decl := tree.Children(tree.Root)[1]
+	body := tree.FuncBody(decl)
+	stmts := tree.Children(body)
+	rangeFor := stmts[2]
+	keyNode := tree.RangeForKey(rangeFor)
+	valueNode := tree.RangeForValue(rangeFor)
+	if got := info.Types[keyNode]; got.Kind != TypeString {
+		t.Errorf("range key (name) Type = %v, want string", got)
+	}
+	if got := info.Types[valueNode]; got.Kind != TypeAny {
+		t.Errorf("range value (v) Type = %v, want Any", got)
+	}
+}
+
+// --- invalid: boxing ---
+
+func TestAnyBoxEnumRejected(t *testing.T) {
+	expectCheckErrors(t, "enum Shape {\n\tPoint\n}\n"+
+		"func f() {\n\ts := Shape.Point\n\ta := Any(s)\n}\n", 1)
+}
+
+func TestAnyBoxDynamicArrayRejected(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\ts := []int{1, 2}\n\ta := Any(s)\n}\n", 1)
+}
+
+func TestAnyBoxFixedArrayRejected(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\ts := [2]int{1, 2}\n\ta := Any(s)\n}\n", 1)
+}
+
+func TestAnyBoxMapRejected(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\tm := make(map[string]int)\n\ta := Any(m)\n}\n", 1)
+}
+
+func TestAnyBoxFuncValueRejected(t *testing.T) {
+	expectCheckErrors(t, "func g() {}\n"+
+		"func f() {\n\ta := Any(g)\n}\n", 1)
+}
+
+func TestAnyBoxNonCopyableStructRejected(t *testing.T) {
+	expectCheckErrors(t, "struct Res {\n\tx int\n\tdestructor() {\n\t\tthis.x = 0\n\t}\n}\n"+
+		"func f() {\n\tr := Res{0}\n\ta := Any(move r)\n}\n", 1)
+}
+
+// --- invalid: reflection builtins on a non-Any argument ---
+
+func TestAnyKindNonAnyArgRejected(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\tk := AnyKind(5)\n}\n", 1)
+}
+
+func TestAnyNameNonAnyArgRejected(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\tn := AnyName(5)\n}\n", 1)
+}
+
+func TestAnyFieldsNonAnyArgRejected(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\tfor name, v := range AnyFields(5) {\n\t\tprint(name)\n\t}\n}\n", 1)
+}
+
+func TestAnyAsNonAnyArgRejected(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\tv, ok := AnyAs[int](5)\n}\n", 1)
+}
+
+func TestAnyAsMissingTypeArgRejected(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\ta := Any(5)\n\tv, ok := AnyAs(a)\n}\n", 1)
+}
+
+func TestAnyAsUnboxableTypeArgRejected(t *testing.T) {
+	expectCheckErrors(t, "enum Shape {\n\tPoint\n}\n"+
+		"func f() {\n\ta := Any(5)\n\tv, ok := AnyAs[Shape](a)\n}\n", 1)
+}
+
+// TestAnyFieldsOutsideRangeForRejected proves AnyFields' TypeGenerator
+// result reuses the existing "a generator's result is only legal as a
+// range-for's own subject" restriction (rejectGeneratorValue) with no extra
+// code of its own - storing it in a variable is rejected exactly like any
+// other generator call would be.
+func TestAnyFieldsOutsideRangeForRejected(t *testing.T) {
+	expectCheckErrors(t, "struct Point {\n\tX int\n}\n"+
+		"func f() {\n\tp := Point{X: 1}\n\ta := Any(p)\n\tx := AnyFields(a)\n}\n", 1)
+}
+
+func TestAnyFieldsSingleBindingRejected(t *testing.T) {
+	expectCheckErrors(t, "struct Point {\n\tX int\n}\n"+
+		"func f() {\n\tp := Point{X: 1}\n\ta := Any(p)\n"+
+		"\tfor name := range AnyFields(a) {\n\t\tprint(name)\n\t}\n}\n", 1)
+}
+
+// --- invalid: Any is neither comparable nor printable this round ---
+
+func TestAnyEqualityRejected(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\ta := Any(5)\n\tb := Any(6)\n\tif a == b {\n\t}\n}\n", 1)
+}
+
+func TestAnyPrintRejected(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\ta := Any(5)\n\tprint(a)\n}\n", 1)
+}
+
+// --- invalid: Any has no composite literal or field access ---
+
+func TestAnyCompositeLitRejected(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\ta := Any{}\n}\n", 1)
+}
+
+func TestAnyFieldAccessRejected(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\ta := Any(5)\n\tx := a.foo\n}\n", 1)
+}
+
+// --- invalid: Any crossing an extern func signature ---
+
+func TestExternFuncAnyParamRejected(t *testing.T) {
+	expectCheckErrors(t, "extern func f(a Any) int\n", 1)
+}
+
+func TestExternFuncAnyReturnRejected(t *testing.T) {
+	expectCheckErrors(t, "extern func f() Any\n", 1)
+}

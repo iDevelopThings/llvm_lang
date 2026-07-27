@@ -82,10 +82,11 @@ func sizeAlign(t Type, resolve ResolveStructFields, visiting map[*StructInfo]boo
 		// (arena-allocated, out-of-line) control block - see
 		// codegen.Generator's own mapCtrlTy doc comment.
 		return 8, 8, true
-	case TypeString, TypeFunc, TypeEnum:
-		// {ptr, i32} / {ptr, ptr} / {i32, ptr} respectively - three fixed
-		// two-field shapes that each carry a real pointer, so natural
-		// alignment rounds all three up to the same 16 bytes/align 8.
+	case TypeString, TypeFunc, TypeEnum, TypeAny:
+		// {ptr, i32} / {ptr, ptr} / {i32, ptr} / {dataPtr, descriptorPtr}
+		// respectively - four fixed two-field shapes that each carry a real
+		// pointer, so natural alignment rounds all four up to the same 16
+		// bytes/align 8. See DECISIONS.md for TypeAny's own {ptr, ptr} shape.
 		return 16, 8, true
 	case TypeArray:
 		if t.Dynamic {

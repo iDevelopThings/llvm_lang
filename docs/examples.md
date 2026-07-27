@@ -54,6 +54,7 @@ Run a multi-file example by passing its directory:
 | [`generics`](../examples/generics/generics.llx) | Generic functions, structs, and methods |
 | [`generators`](../examples/generators/generators.llx) | Yielding values into range loops |
 | [`coroutines`](../examples/coroutines/coroutines.llx) | Suspend, resume, completion, and cleanup |
+| [`any_demo`](../examples/any_demo/any_demo.llx) | Boxing values into `Any`, `AnyKind`/`AnyName`/`AnyAs`/`AnyFields` |
 
 ## Packages and standard library
 

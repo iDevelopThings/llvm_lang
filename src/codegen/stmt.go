@@ -876,6 +876,9 @@ func (g *Generator) genRangeForStmt(n ast.NodeIndex) bool {
 	case sema.TypeArray:
 		return g.genRangeForArray(keyNode, valueNode, subjectNode, bodyNode, subjType)
 	case sema.TypeGenerator:
+		if g.isAnyFieldsRangeSubject(subjectNode) {
+			return g.genRangeForAnyFields(keyNode, valueNode, subjectNode, bodyNode)
+		}
 		return g.genRangeForGenerator(n, keyNode, subjectNode, bodyNode, subjType)
 	default:
 		// Unreachable on a tree that already passed sema.Check (see

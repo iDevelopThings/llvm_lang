@@ -193,6 +193,11 @@ type structLayout struct {
 	fieldIndex     map[*sema.Symbol]int
 	fieldTypes     []llvm.Type
 	fieldSemaTypes []sema.Type
+	// fieldNames is parallel to fieldTypes/fieldSemaTypes, in declaration
+	// order - only populated for Any's own per-struct field descriptor
+	// table (see any.go); every other consumer of a struct's layout keys by
+	// *sema.Symbol (fieldIndex) instead, which already carries the name.
+	fieldNames []string
 }
 
 // Generator holds every piece of state needed to lower a whole package (one
@@ -266,6 +271,16 @@ type Generator struct {
 	// place as the table grows or entries are removed (genMapGrowIfNeeded,
 	// genMapRemoveCall).
 	mapCtrlTy llvm.Type
+
+	// anyTy is a boxed Any value's LLVM representation - see types.go's
+	// setupTypes doc comment and any.go's top-of-file doc comment for the
+	// full descriptor design (typeDescriptorTy/fieldDescriptorTy,
+	// anyPrimitiveDescs, structAnyDescs).
+	anyTy             llvm.Type
+	typeDescriptorTy  llvm.Type
+	fieldDescriptorTy llvm.Type
+	anyPrimitiveDescs map[sema.TypeKind]llvm.Value
+	structAnyDescs    map[*sema.StructInfo]llvm.Value
 
 	// fmtMapNilTrap is the cached format-string global for the "assignment
 	// to entry in nil map" runtime trap (genMapTrapIfNil, maps.go) - built
@@ -680,6 +695,7 @@ func GeneratePackage(trees []*ast.Tree, infos map[*ast.Tree]*sema.Info, moduleNa
 	g.setupTypes()
 	g.setupMapTypes()
 	g.setupRuntime()
+	g.setupAnyRuntime()
 	if programUsesCoroutines(trees, infos) {
 		// Lazy, like g.argsGlobal/argsUsed just below - not merely for
 		// cleanliness here: coroDestroyLocalFn's own body calls
@@ -901,17 +917,20 @@ func (g *Generator) defineStructBody(decl ast.NodeIndex) {
 	fieldNodes := g.tree.StructFields(decl)
 	fieldTypes := make([]llvm.Type, len(fieldNodes))
 	fieldSemaTypes := make([]sema.Type, len(fieldNodes))
+	fieldNames := make([]string, len(fieldNodes))
 	i := 0
 	for fieldNameNode, fieldTypeNode := range g.tree.StructFieldNodes(decl) {
 		sym := g.info.Refs[fieldNameNode]
 
 		fieldSemaTypes[i] = g.info.Types[fieldTypeNode]
 		fieldTypes[i] = g.llvmType(fieldSemaTypes[i])
+		fieldNames[i] = sym.Name
 		layout.fieldIndex[sym] = i
 		i++
 	}
 	layout.fieldTypes = fieldTypes
 	layout.fieldSemaTypes = fieldSemaTypes
+	layout.fieldNames = fieldNames
 	layout.llvmType.StructSetBody(fieldTypes, false)
 }
 

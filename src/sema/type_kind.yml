@@ -114,5 +114,8 @@ values:
   - name: Generator
   - name: Coroutine
 
+  - name: Any
+    display: "Any"
+
   - name: Int
     aliasOf: I32

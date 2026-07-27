@@ -716,6 +716,7 @@ func universeScope() *Scope {
 		"cstring",
 		"bool",
 		"coroutine",
+		"Any",
 	} {
 		u.Define(&Symbol{
 			Name:  name,
@@ -752,6 +753,35 @@ func universeScope() *Scope {
 			Scope: u,
 		})
 	}
+	// AnyKind/AnyName/AnyFields are predeclared exactly like len/make/etc -
+	// see LANGUAGE.md's "Any" section: reflection builtins over a boxed Any
+	// value, dispatched by name (isBuiltinCall) rather than a real signature.
+	for _, name := range []string{"AnyKind", "AnyName", "AnyFields"} {
+		u.Define(&Symbol{
+			Name:  name,
+			Kind:  SymFunc,
+			Scope: u,
+		})
+	}
+	// AnyAs[T](a Any) (T, bool) needs an explicit type argument at every call
+	// site (T can never be inferred from a's own erased static type), so it
+	// wears the same `Name[T](...)` call shape a real generic function does.
+	// Giving it a Generic (with no real Decl/Tree - checkAnyAsCall intercepts
+	// it in checkCallExpr before the ordinary checkGenericCall/instantiateFunc
+	// path would ever dereference those) is what makes Resolve treat its
+	// [T] as a type argument (see resolveExpr's IndexExpr case) instead of an
+	// ordinary index expression.
+	anyAsSym := &Symbol{
+		Name:  "AnyAs",
+		Kind:  SymFunc,
+		Scope: u,
+	}
+	anyAsSym.Generic = &GenericInfo{
+		Symbol: anyAsSym,
+		Decl:   ast.InvalidNode,
+		Params: []string{"T"},
+	}
+	u.Define(anyAsSym)
 	// nil is a predeclared value (see LANGUAGE.md's "Pointers" section) -
 	// deliberately scoped to pointer types only this round, not a general
 	// zero-value concept: it starts life as the untyped TypeUntypedNil (same

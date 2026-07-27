@@ -1,0 +1,60 @@
+// any_demo.llx - exercises the type-erased Any type and its four reflection
+// builtins: AnyKind, AnyName, AnyAs, AnyFields.
+//
+// Run with:
+//   .\llvmc.exe examples\any_demo\any_demo.llx
+//   echo $LASTEXITCODE   # (PowerShell) -> 5  (all five sanity checks passed)
+
+struct Point {
+    X int
+    Y int
+}
+
+func main() int {
+    ok := 0
+
+    // Box a primitive, read it back with AnyName/AnyAs.
+    boxedInt := Any(42)
+    print(AnyName(boxedInt))   // "int"
+    v, matched := AnyAs[int](boxedInt)
+    if matched && v == 42 {
+        ok = ok + 1
+    }
+
+    // A mismatched AnyAs[T] returns false, not a crash or a garbage value.
+    _, wrongKind := AnyAs[f64](boxedInt)
+    if !wrongKind {
+        ok = ok + 1
+    }
+
+    // Box a struct; AnyKind is stable across two values of the same kind.
+    p := Point{X: 3, Y: 4}
+    boxedPoint := Any(p)
+    print(AnyName(boxedPoint))   // "Point"
+    if AnyKind(boxedInt) == AnyKind(Any(7)) {
+        ok = ok + 1
+    }
+
+    // Walk a boxed struct's own fields - each itself boxed as an Any.
+    sum := 0
+    for name, field := range AnyFields(boxedPoint) {
+        print(name)   // "X" then "Y"
+        fv, fok := AnyAs[int](field)
+        if fok {
+            sum = sum + fv
+        }
+    }
+    if sum == 7 {
+        ok = ok + 1
+    }
+
+    // Any(x) where x is already Any is a legal no-op copy.
+    reboxed := Any(boxedInt)
+    rv, rok := AnyAs[int](reboxed)
+    if rok && rv == 42 {
+        ok = ok + 1
+    }
+
+    print(ok)   // 5
+    return ok
+}

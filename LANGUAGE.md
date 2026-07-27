@@ -1407,13 +1407,13 @@ g := i32(a)     // same type - passes the value through unchanged, no
 ```
 
 Scoped to **numeric-to-numeric only**, plus two dedicated FFI crossings -
-`cstring(s)` and `string(cs)` (see "The `cstring` type" above) - checked as
-their own special case ahead of the numeric-only rule. Every other
-conversion whose target or argument isn't numeric (`i64("hello")`,
-`Point(x)`, `bool(x)`) is rejected: `struct`/`array`/`bool` conversions
-aren't meaningfully "conversions" in the C-cast sense this feature covers,
-and are out of scope. A wrong argument count (`i64(1, 2)` or `i64()`) is also
-a real error
+`cstring(s)` and `string(cs)` (see "The `cstring` type" above) - and boxing
+into `Any` (see "Any" below), all three checked as their own special case
+ahead of the numeric-only rule. Every other conversion whose target or
+argument isn't numeric (`i64("hello")`, `Point(x)`, `bool(x)`) is rejected:
+`struct`/`array`/`bool` conversions aren't meaningfully "conversions" in the
+C-cast sense this feature covers, and are out of scope. A wrong argument
+count (`i64(1, 2)` or `i64()`) is also a real error
 ("conversion to i64 requires exactly one argument, got N"). The conversion's
 own target `Type` is recorded as the `CallExpr` node's own type in
 `Info.Types`, exactly like any other expression - codegen recognizes the
@@ -2480,6 +2480,67 @@ inference-only), and using a generic name as a value without instantiating it
 rejected once its type arguments nest past a fixed depth. Ordinary breadth -
 however many distinct instantiations a program legitimately reaches - is not
 capped in any way a real program can hit.
+
+## Any
+
+`Any` is a built-in, type-erased boxed value - a predeclared type name, like
+`int`/`string`, not a user-declarable struct. Boxing a value into one reuses
+the same explicit-conversion call syntax "Explicit conversions" above
+describes for `i64(x)`:
+
+```go
+a := Any(5)        // boxes an i32
+b := Any(somePoint) // boxes a struct
+c := Any(b)         // Any(x) where x is already Any: a cheap no-op copy
+```
+
+Every scalar/primitive type (`i8`/`i16`/`i32`/`i64`/`u8`/`u16`/`u32`/`u64`/
+`f32`/`f64`/`bool`/`string`/`cstring`/a pointer) and any struct type can be
+boxed. Boxing copies the value's own bytes into a fresh, arena-allocated slot
+(see "Memory model" - the same allocator dynamic arrays and strings already
+use) - a boxed value stays valid regardless of whether it outlives the stack
+frame it was boxed in, at the cost of one allocation per `Any(x)` call, so
+this isn't meant for a hot path. **Not boxable this round**: an enum, a
+dynamic or fixed-size array, a map, a function/cfunc value, or a non-
+copyable type (one that declares a `destructor()`) - each is a real,
+reported error, not a crash.
+
+Four predeclared builtins read a boxed value back out:
+
+```go
+AnyKind(a Any) i32      // the boxed value's own raw TypeKind wire value
+AnyName(a Any) string   // its display name, e.g. "int" or "Point"
+AnyAs[T](a Any) (T, bool)
+```
+
+`AnyAs[T]` mirrors Go's own type-assertion shape (`v, ok := x.(int)`): if
+`a`'s boxed kind matches `T`, it returns the real value and `true`;
+otherwise a zero `T` and `false` - never a crash, and the mismatched branch
+never reads the boxed bytes at all, so a smaller boxed value is never read
+out of bounds. `T` is never inferred (there is nothing left in `a`'s own
+static type to infer it from) - every call needs an explicit type argument,
+`AnyAs[i32](a)`, the same way an otherwise-uninferrable generic call
+(`NewSlotMap[int]()`) already does.
+
+A boxed struct's own fields - each itself recursively boxed as an `Any` -
+are walked with `AnyFields`, consumed with a two-binding range-for exactly
+like ranging over a map's (key, value) pairs:
+
+```go
+for name, value := range AnyFields(a) {
+    fv, ok := AnyAs[int](value)
+    ...
+}
+```
+
+`AnyKind`/`AnyName`/`AnyAs`/`AnyFields` all require a real `Any`-typed
+argument - calling one on a value of any other static type is a compile-time
+error, not something inferred or coerced.
+
+`Any` is neither comparable (`==`/`!=`) nor printable (`print`) this round,
+and cannot cross an `extern func` signature (no defined C ABI shape) - each
+a clean diagnostic. See `docs/current-limitations.md` for the full list of
+what boxing doesn't support yet.
 
 ## External functions (FFI)
 

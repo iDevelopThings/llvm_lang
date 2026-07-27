@@ -62,6 +62,44 @@ with `-no-opt`.
 
 For timed work, use `std/scheduler`.
 
+## Any
+
+`Any` is a built-in, type-erased boxed value. Box a value with the same
+call syntax an explicit conversion uses:
+
+```go
+a := Any(5)
+b := Any(somePoint)
+```
+
+Every scalar type (`i8`...`i64`, `u8`...`u64`, `f32`, `f64`, `bool`,
+`string`, `cstring`, a pointer) and any struct can be boxed. Boxing copies
+the value into a fresh allocation, so a boxed value stays valid even after
+the code that boxed it returns.
+
+Four builtins read a boxed value back out:
+
+```go
+AnyKind(a)              // a raw kind ordinal (i32)
+AnyName(a)              // a display name, e.g. "int" or "Point"
+v, ok := AnyAs[int](a)  // the real value if the kind matches, else (0, false)
+
+for name, value := range AnyFields(a) {
+    fv, ok := AnyAs[int](value)
+}
+```
+
+`AnyAs[T]` always needs an explicit type argument - there is nothing left in
+a boxed value to infer it from. `AnyFields` walks a boxed struct's own
+fields, each itself boxed as an `Any`.
+
+Not boxable this round: enums, arrays, maps, function values, and any
+non-copyable type. `Any` cannot be compared with `==`, printed with
+`print`, or cross an `extern func` signature. See
+[Current limitations](current-limitations.md) and
+[the Any section](../LANGUAGE.md#any) of the language spec for the exact
+rules.
+
 ## Calling C
 
 Declare a C symbol with `extern func`:
@@ -102,3 +140,4 @@ Try:
 - [`coroutines.llx`](../examples/coroutines/coroutines.llx)
 - [`scheduler_demo.llx`](../examples/scheduler_demo/scheduler_demo.llx)
 - [`scope_timer.llx`](../examples/scope_timer/scope_timer.llx)
+- [`any_demo.llx`](../examples/any_demo/any_demo.llx)

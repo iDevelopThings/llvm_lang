@@ -1189,6 +1189,15 @@ func (g *Generator) genCallExpr(n ast.NodeIndex) llvm.Value {
 	if g.isBuiltinCall(calleeNode, "done") {
 		return g.genDoneCall(g.genExpr(argNodes[0]))
 	}
+	if g.isBuiltinCall(calleeNode, "AnyKind") {
+		return g.genAnyKindCall(argNodes[0])
+	}
+	if g.isBuiltinCall(calleeNode, "AnyName") {
+		return g.genAnyNameCall(argNodes[0])
+	}
+	if g.isAnyAsCall(calleeNode) {
+		return g.genAnyAsCall(n, argNodes[0])
+	}
 	if g.isConstructorCall(calleeNode) {
 		return g.genConstructorCall(calleeNode, argNodes)
 	}
@@ -1543,6 +1552,10 @@ func (g *Generator) genConversion(n, argNode ast.NodeIndex) llvm.Value {
 		return g.genStringToCString(argNode, v)
 	case to.Kind == sema.TypeString && from.Kind == sema.TypeCString:
 		return g.genCStringToString(v)
+	}
+
+	if to.Kind == sema.TypeAny {
+		return g.genAnyBox(from, v)
 	}
 
 	toLLT := g.llvmType(to)
