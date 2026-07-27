@@ -69,7 +69,9 @@ Inside the function, `nums` is an ordinary `[]int` - see
 [Dynamic arrays](collections.md#dynamic-arrays) for what that means (`len`,
 indexing, `range`, passing it on to another `[]int` parameter, all work
 unchanged). Each collected argument is checked against the element type with
-this language's usual no-implicit-conversion rule.
+this language's usual no-implicit-conversion rule - except a `...Any`
+parameter, where each argument boxes automatically (see
+[Any](advanced-features.md#any)).
 
 Forward an existing slice instead of collecting a new one with a trailing
 `...` after the argument:

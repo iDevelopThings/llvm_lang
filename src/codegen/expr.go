@@ -1790,14 +1790,32 @@ func (g *Generator) genCompositeLitInto(dst llvm.Value, n ast.NodeIndex) {
 // {ptr, count, count} value into dst (a pointer to the dynArrTy struct)
 // field-by-field via CreateStructGEP, the same way a struct literal's own
 // fields are filled.
+//
+// Also reused by variadic collection (genCallArgValues) to build a `...Any`
+// parameter's real []Any argument - when t.Elem is Any, each element whose
+// own static type isn't already Any gets boxed (genAnyBox) rather than
+// stored as-is, matching checkVariadicCallArgs's own implicit-boxing rule.
+// An ordinary `[]T{...}` literal never reaches this branch already
+// type-mismatched (sema requires an exact element-type match there), so
+// this adds no new behavior for that case.
 func (g *Generator) genDynArrayLitInto(dst llvm.Value, t sema.Type, elems []ast.NodeIndex) {
 	elemLLType := g.llvmType(*t.Elem)
 	count := llvm.ConstInt(g.i32Ty, uint64(len(elems)), false)
+	boxIntoAny := t.Elem.Kind == sema.TypeAny
 
 	buf, _, _ := g.genArenaAllocElems(elemLLType, count)
 	for i, e := range elems {
 		idx := llvm.ConstInt(g.i32Ty, uint64(i), false)
 		addr := g.builder.CreateInBoundsGEP(elemLLType, buf, []llvm.Value{idx}, "")
+		if boxIntoAny {
+			from := g.info.Types[e]
+			v := g.genExpr(e)
+			if from.Kind != sema.TypeAny {
+				v = g.genAnyBox(from, v)
+			}
+			g.builder.CreateStore(v, addr)
+			continue
+		}
 		g.storeValueInto(addr, e)
 	}
 

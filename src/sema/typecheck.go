@@ -5057,6 +5057,14 @@ func (c *checker) checkCallArgs(n ast.NodeIndex, args []ast.NodeIndex, argTypes 
 // already enforces everywhere else); otherwise each trailing argument is
 // checked individually against T, the element type, and collected at the
 // call site (see codegen's genCallArgValues).
+//
+// When T is Any, collection is the one deliberate exception to this
+// language's no-implicit-conversion rule: each trailing argument is boxed
+// automatically (see isBoxableIntoAny) rather than requiring `Any(x)` at
+// every call site - the same real-world justification Go's own `...any`
+// variadics have. This is scoped to variadic collection specifically, not a
+// general assignability change - an ordinary `var x Any = 5` still needs an
+// explicit `Any(5)`.
 func (c *checker) checkVariadicCallArgs(n ast.NodeIndex, args []ast.NodeIndex, argType func(int) Type, sig funcSignature) {
 	fixed := sig.Params[:len(sig.Params)-1]
 	sliceType := sig.Params[len(sig.Params)-1]
@@ -5096,10 +5104,34 @@ func (c *checker) checkVariadicCallArgs(n ast.NodeIndex, args []ast.NodeIndex, a
 	for j, a := range tail {
 		i := len(fixed) + j
 		at := argType(i)
+		if elemType.Kind == TypeAny && at.Kind != TypeAny {
+			c.checkBoxableIntoAny(a, at)
+			continue
+		}
 		if c.checkAssignable(a, elemType, at, fmt.Sprintf("argument %d", i+1)) {
 			c.checkNoIllegalCopy(a, elemType, true, fmt.Sprintf("argument %d", i+1))
 		}
 	}
+}
+
+// checkBoxableIntoAny is the shared `Any(x)` boxing check (isBoxableIntoAny/
+// typeIsNonCopyable/untyped-defaulting) - both an explicit `Any(x)`
+// conversion (checkConversionCall) and implicit collect-time boxing into a
+// `...Any` variadic parameter (checkVariadicCallArgs) enforce the exact same
+// rules through this one function. Reports whether at may be boxed at all.
+func (c *checker) checkBoxableIntoAny(a ast.NodeIndex, at Type) bool {
+	if !isBoxableIntoAny(at) {
+		c.errorAt(a, "cannot box %s into Any - enums, arrays, maps, function values, and multi-value/generator/coroutine results have no Any representation this round", at)
+		return false
+	}
+	if c.typeIsNonCopyable(at) {
+		c.errorAt(a, "cannot box non-copyable type %s into Any - Any(x) always copies x's bytes, which isn't sound for a type that isn't copyable", at)
+		return false
+	}
+	if at.IsUntyped() {
+		c.retypeUntyped(a, c.defaultUntyped(at))
+	}
+	return true
 }
 
 // calleeNeverVariadic reports whether callee names a callable form that can
@@ -5738,19 +5770,9 @@ func (c *checker) checkConversionCall(n, callee ast.NodeIndex, args []ast.NodeIn
 	// legal" precedent i64(someI64) already establishes for the numeric
 	// path (see isBoxableIntoAny).
 	if target.Kind == TypeAny {
-		if !isBoxableIntoAny(argType) {
-			c.errorAt(n, "cannot box %s into Any - enums, arrays, maps, function values, and multi-value/generator/coroutine results have no Any representation this round", argType)
+		if !c.checkBoxableIntoAny(args[0], argType) {
 			c.info.Types[n] = invalidType
 			return invalidType, true
-		}
-		if c.typeIsNonCopyable(argType) {
-			c.errorAt(n, "cannot box non-copyable type %s into Any - Any(x) always copies x's bytes, which isn't sound for a type that isn't copyable", argType)
-			c.info.Types[n] = invalidType
-			return invalidType, true
-		}
-		if argType.IsUntyped() {
-			def := c.defaultUntyped(argType)
-			c.retypeUntyped(args[0], def)
 		}
 		c.info.Types[n] = target
 		return target, true

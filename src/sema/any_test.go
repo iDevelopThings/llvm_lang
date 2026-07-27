@@ -203,3 +203,40 @@ func TestExternFuncAnyParamRejected(t *testing.T) {
 func TestExternFuncAnyReturnRejected(t *testing.T) {
 	expectCheckErrors(t, "extern func f() Any\n", 1)
 }
+
+// --- collecting into a ...Any variadic parameter implicitly boxes each
+// argument (checkVariadicCallArgs), the one deliberate exception to this
+// language's no-implicit-conversion rule - see LANGUAGE.md's "Variadic
+// parameters" section ---
+
+func TestVariadicAnyCollectImplicitlyBoxesRawValues(t *testing.T) {
+	checkSrc(t, "func Log(args ...Any) int {\n\treturn len(args)\n}\n"+
+		"func f() int {\n\treturn Log(5, \"x\", true, 3.5)\n}\n")
+}
+
+func TestVariadicAnyCollectAcceptsAlreadyBoxedValues(t *testing.T) {
+	checkSrc(t, "func Log(args ...Any) int {\n\treturn len(args)\n}\n"+
+		"func f() int {\n\treturn Log(Any(5), 7)\n}\n")
+}
+
+func TestVariadicAnyCollectRejectsUnboxableType(t *testing.T) {
+	expectCheckErrors(t, "enum Shape {\n\tCircle(int)\n}\n"+
+		"func Log(args ...Any) int {\n\treturn len(args)\n}\n"+
+		"func f() {\n\ts := Shape.Circle(5)\n\tLog(s)\n}\n", 1)
+}
+
+func TestVariadicAnyCollectRejectsNonCopyableType(t *testing.T) {
+	expectCheckErrors(t, "struct Resource {\n\tv int\n\tdestructor() {\n\t\tthis.v = 0\n\t}\n}\n"+
+		"func Log(args ...Any) int {\n\treturn len(args)\n}\n"+
+		"func f() {\n\tr := Resource{1}\n\tLog(r)\n}\n", 1)
+}
+
+// TestVariadicAnySpreadStillRequiresExactSliceType covers the boundary the
+// implicit boxing above deliberately doesn't cross - spread forwards an
+// existing slice value directly, not one argument at a time, so it keeps
+// this language's ordinary no-implicit-conversion rule: a []int can't
+// spread into a ...Any parameter without first being built as []Any.
+func TestVariadicAnySpreadStillRequiresExactSliceType(t *testing.T) {
+	expectCheckErrors(t, "func Log(args ...Any) int {\n\treturn len(args)\n}\n"+
+		"func f() {\n\tnums := []int{1, 2, 3}\n\tLog(nums...)\n}\n", 1)
+}

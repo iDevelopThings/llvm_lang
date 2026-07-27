@@ -212,7 +212,6 @@ func f() int {
 	// 1+2+5+6 = 14.
 	if got := jm.runInt32(t, "f"); got != 14 {
 		t.Errorf("f() = %d, want 14", got)
-		t.Errorf("f() = %d, want 1256", got)
 	}
 }
 
@@ -235,5 +234,33 @@ func f() int {
 `)
 	if got := jm.runInt32(t, "f"); got != 2 {
 		t.Errorf("f() = %d, want 2", got)
+	}
+}
+
+// TestVariadicAnyCollectImplicitlyBoxesJIT is a real, JIT-executed proof
+// that collecting a raw int/string/bool into a ...Any parameter (no
+// explicit Any(x) at the call site - see sema's checkVariadicCallArgs)
+// produces correctly boxed, correctly discriminated values, not just that
+// it compiles.
+func TestVariadicAnyCollectImplicitlyBoxesJIT(t *testing.T) {
+	jm := compileAndJIT(t, `
+func Log(args ...Any) int {
+	sum := 0
+	for _, a := range args {
+		iv, ok := AnyAs[int](a)
+		if ok {
+			sum = sum + iv
+		}
+	}
+	return len(args)*100 + sum
+}
+
+func f() int {
+	return Log(5, 7, "bob", true)
+}
+`)
+	// len(args)=4, sum of the two ints=12 -> 4*100+12=412.
+	if got := jm.runInt32(t, "f"); got != 412 {
+		t.Errorf("f() = %d, want 412", got)
 	}
 }

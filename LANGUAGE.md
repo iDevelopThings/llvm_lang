@@ -1802,6 +1802,21 @@ parameter is variadic (`func F[T](items ...T)`, `T` inferred from every
 collected argument, or from a spread argument's own element type) all just
 work, since the call already looks like an ordinary one from here on.
 
+**Collecting into `...Any` implicitly boxes each argument** (see "Any"
+below) - the one deliberate exception to this language's no-implicit-
+conversion rule, since requiring `Any(x)` at every call site would defeat
+the point of a variadic logging/formatting function:
+
+```go
+func Log(args ...Any) { ... }
+Log(5, "x", true)   // each argument boxed automatically, no Any(...) needed
+```
+
+Spread keeps the ordinary rule - forwarding an existing slice still needs
+it to already be exactly `[]Any` (build it with `Any(x)` per element, or
+via `AnyFields`), since spread passes one existing value through rather
+than boxing arguments one at a time.
+
 ### Not supported
 
 A variadic function referenced as a bare value (`f := Join`, not
@@ -2496,7 +2511,9 @@ c := Any(b)         // Any(x) where x is already Any: a cheap no-op copy
 
 Every scalar/primitive type (`i8`/`i16`/`i32`/`i64`/`u8`/`u16`/`u32`/`u64`/
 `f32`/`f64`/`bool`/`string`/`cstring`/a pointer) and any struct type can be
-boxed. Boxing copies the value's own bytes into a fresh, arena-allocated slot
+boxed (collecting into a `...Any` variadic parameter boxes implicitly, no
+`Any(x)` needed - see "Variadic parameters" above). Boxing copies the
+value's own bytes into a fresh, arena-allocated slot
 (see "Memory model" - the same allocator dynamic arrays and strings already
 use) - a boxed value stays valid regardless of whether it outlives the stack
 frame it was boxed in, at the cost of one allocation per `Any(x)` call, so
