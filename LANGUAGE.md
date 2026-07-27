@@ -2511,22 +2511,23 @@ c := Any(b)         // Any(x) where x is already Any: a cheap no-op copy
 
 Every scalar/primitive type (`i8`/`i16`/`i32`/`i64`/`u8`/`u16`/`u32`/`u64`/
 `f32`/`f64`/`bool`/`string`/`cstring`/a pointer), any struct type, a
-dynamic or fixed-size array, and a map can be boxed (collecting into a
-`...Any` variadic parameter boxes implicitly, no `Any(x)` needed - see
+dynamic or fixed-size array, a map, and an enum can be boxed (collecting into
+a `...Any` variadic parameter boxes implicitly, no `Any(x)` needed - see
 "Variadic parameters" above). A struct or array is boxable only if every one
-of its own field/element types is, recursively - `Any` itself is one such
-unboxable nested type (`[]Any` and a struct field typed `Any` are both
-rejected), boxable only as the top-level value passed to `Any(x)` directly.
-A map is boxable regardless of its own key/value types - only *iterating* a
-boxed map's own entries (key/value pairs) remains unsupported, unlike
-`AnyFields` for a struct. Boxing copies the value's own bytes
+of its own field/element types is, and an enum only if every one of its own
+variants' every associated-data type is, all recursively - `Any` itself is
+one such unboxable nested type (`[]Any` and a struct field typed `Any` are
+both rejected), boxable only as the top-level value passed to `Any(x)`
+directly. A map is boxable regardless of its own key/value types - only
+*iterating* a boxed map's own entries (key/value pairs) remains unsupported,
+unlike `AnyFields` for a struct or enum. Boxing copies the value's own bytes
 into a fresh, arena-allocated slot (see "Memory model" - the same allocator
 dynamic arrays and strings already use) - a boxed value stays valid
 regardless of whether it outlives the stack frame it was boxed in, at the
 cost of one allocation per `Any(x)` call, so this isn't meant for a hot
-path. **Not boxable this round**: an enum, a function/cfunc value, or
-a non-copyable type (one that declares a `destructor()`) - each is a real,
-reported error, not a crash.
+path. **Not boxable this round**: a function/cfunc value, or a non-copyable
+type (one that declares a `destructor()`, struct or enum alike) - each is a
+real, reported error, not a crash.
 
 Six predeclared builtins read a boxed value back out:
 
@@ -2547,8 +2548,10 @@ static type to infer it from) - every call needs an explicit type argument,
 `AnyAs[i32](a)`, the same way an otherwise-uninferrable generic call
 (`NewSlotMap[int]()`) already does. For a map, only the boxed *kind* (map vs.
 not) is checked, not the key/value types - `AnyAs[map[int]bool]` can match a
-boxed `map[string]int`, unlike a struct or array, which are also checked by
-descriptor identity.
+boxed `map[string]int`. A struct, array, or enum is checked more precisely,
+by descriptor identity: `AnyAs[Shape]` matches a boxed value of any of
+`Shape`'s own variants, but never a different enum type's boxed value, even
+one that happens to declare an identically-shaped variant.
 
 A boxed struct's own fields - each itself recursively boxed as an `Any` -
 are walked with `AnyFields`, consumed with a two-binding range-for exactly
@@ -2565,6 +2568,25 @@ A pointer field's own descriptor never carries a field table, so `AnyFields`
 can never recurse through one - a self-referential struct (one holding a
 pointer to its own type) is safe to walk this way, unlike a naive recursive
 stringifier over the raw fields would be.
+
+A boxed enum's `AnyName` is its own *active variant's* name (`"Circle"`, not
+the enum type's own name `"Shape"`) - the same "most useful runtime
+information" precedent `print()` already uses for an enum value. `AnyFields`
+walks that same active variant's own associated data: nothing for a unit
+variant, positional `"0"`/`"1"`/... names for a tuple variant, or its real
+declared names for a struct variant. Boxing two different values of the same
+enum type, each holding a different variant, is not a shared or stale
+descriptor - each one's own `AnyKind`/`AnyName`/`AnyFields` always reflects
+whichever variant is genuinely active in that specific value, decided at
+runtime from its own discriminant.
+
+```go
+a := Any(Shape.Circle(2.0))
+AnyName(a)          // "Circle"
+for name, v := range AnyFields(a) {
+    // name == "0", v holds 2.0
+}
+```
 
 A boxed array's own length and elements are read with `AnyLen`/`AnyIndex`,
 mirroring Go's own `len`/bounds-checked-index shape:

@@ -283,6 +283,17 @@ type Generator struct {
 	structAnyDescs    map[*sema.StructInfo]llvm.Value
 	arrayAnyDescs     map[arrayAnyDescKey]llvm.Value
 
+	// variantAnyDescs/enumAnyDescs are an enum's own two distinct descriptor
+	// flavors (any.go's own top-of-file doc comment) - one per
+	// *sema.EnumVariant (the precise, per-variant descriptor a runtime
+	// discriminant switch selects among when an enum value is boxed
+	// directly), and one per *sema.EnumInfo (a variant-agnostic placeholder
+	// used only when an enum type appears nested inside a struct field or
+	// array element, where no runtime value is available to pick a variant
+	// from).
+	variantAnyDescs map[*sema.EnumVariant]llvm.Value
+	enumAnyDescs    map[*sema.EnumInfo]llvm.Value
+
 	// fmtMapNilTrap is the cached format-string global for the "assignment
 	// to entry in nil map" runtime trap (genMapTrapIfNil, maps.go) - built
 	// once, in setupMapTypes, exactly like every other cached trap-message

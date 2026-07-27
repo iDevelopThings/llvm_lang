@@ -692,6 +692,297 @@ func f() int {
 	}
 }
 
+// --- enum boxing (see LANGUAGE.md's "Any" section) ---
+
+// TestAnyBoxEnumUnitVariantKindAndName proves a boxed unit variant's own
+// AnyName is the variant's own name, and AnyFields yields zero iterations
+// (no associated data to walk) - same "nothing to walk" precedent every
+// other field-less kind already establishes.
+func TestAnyBoxEnumUnitVariantKindAndName(t *testing.T) {
+	jm := compileAndJIT(t, `
+enum Shape {
+	Point,
+	Circle(f64),
+	Triangle { base f64, height f64 }
+}
+func f() int {
+	a := Any(Shape.Point)
+	ok := 0
+	if AnyName(a) == "Point" {
+		ok = ok + 1
+	}
+	count := 0
+	for name, v := range AnyFields(a) {
+		count = count + 1
+	}
+	if count == 0 {
+		ok = ok + 1
+	}
+	return ok
+}
+`)
+	if got := jm.runInt32(t, "f"); got != 2 {
+		t.Errorf("f() = %d, want 2", got)
+	}
+}
+
+// TestAnyBoxEnumTupleVariantFieldsPositional proves a boxed tuple variant's
+// own AnyFields yields positional "0"/"1"/... names, and each one's own real
+// value round-trips through AnyAs.
+func TestAnyBoxEnumTupleVariantFieldsPositional(t *testing.T) {
+	jm := compileAndJIT(t, `
+enum Shape {
+	Point,
+	Circle(f64),
+	Triangle { base f64, height f64 }
+}
+func f() int {
+	a := Any(Shape.Circle(5.0))
+	ok := 0
+	if AnyName(a) == "Circle" {
+		ok = ok + 1
+	}
+	for name, v := range AnyFields(a) {
+		if name == "0" {
+			fv, fok := AnyAs[f64](v)
+			if fok && fv == 5.0 {
+				ok = ok + 1
+			}
+		}
+	}
+	return ok
+}
+`)
+	if got := jm.runInt32(t, "f"); got != 2 {
+		t.Errorf("f() = %d, want 2", got)
+	}
+}
+
+// TestAnyBoxEnumStructVariantFieldsNamed proves a boxed struct variant's own
+// AnyFields yields its real declared field names, each one's own real value
+// round-tripping through AnyAs.
+func TestAnyBoxEnumStructVariantFieldsNamed(t *testing.T) {
+	jm := compileAndJIT(t, `
+enum Shape {
+	Point,
+	Circle(f64),
+	Triangle { base f64, height f64 }
+}
+func f() int {
+	a := Any(Shape.Triangle{base: 3.0, height: 4.0})
+	ok := 0
+	if AnyName(a) == "Triangle" {
+		ok = ok + 1
+	}
+	sum := 0.0
+	for name, v := range AnyFields(a) {
+		fv, fok := AnyAs[f64](v)
+		if fok {
+			if name == "base" {
+				sum = sum + fv
+			}
+			if name == "height" {
+				sum = sum + fv
+			}
+		}
+	}
+	if sum == 7.0 {
+		ok = ok + 1
+	}
+	return ok
+}
+`)
+	if got := jm.runInt32(t, "f"); got != 2 {
+		t.Errorf("f() = %d, want 2", got)
+	}
+}
+
+// TestAnyBoxEnumTwoDifferentActiveVariantsReflectIndependently is the single
+// most important behavioral proof of this feature: two boxed values of the
+// SAME enum type, each holding a different active variant, must each report
+// their OWN AnyName/AnyFields - not the other's, and not always the
+// first-declared variant regardless of which is genuinely active. A broken
+// runtime discriminant switch (genEnumAnyDescriptor) could easily always
+// select one fixed variant and still pass every single-value test above.
+func TestAnyBoxEnumTwoDifferentActiveVariantsReflectIndependently(t *testing.T) {
+	jm := compileAndJIT(t, `
+enum Shape {
+	Point,
+	Circle(f64),
+	Triangle { base f64, height f64 }
+}
+func f() int {
+	a := Any(Shape.Circle(5.0))
+	b := Any(Shape.Triangle{base: 3.0, height: 4.0})
+
+	ok := 0
+	if AnyName(a) == "Circle" {
+		ok = ok + 1
+	}
+	if AnyName(b) == "Triangle" {
+		ok = ok + 1
+	}
+
+	aCount := 0
+	for name, v := range AnyFields(a) {
+		aCount = aCount + 1
+	}
+	if aCount == 1 {
+		ok = ok + 1
+	}
+
+	bCount := 0
+	for name, v := range AnyFields(b) {
+		bCount = bCount + 1
+	}
+	if bCount == 2 {
+		ok = ok + 1
+	}
+
+	return ok
+}
+`)
+	if got := jm.runInt32(t, "f"); got != 4 {
+		t.Errorf("f() = %d, want 4", got)
+	}
+}
+
+// TestAnyAsEnumRoundTrip proves AnyAs[EnumType] round-trips a boxed enum
+// value's real active variant and data, not just that the kind matches.
+func TestAnyAsEnumRoundTrip(t *testing.T) {
+	jm := compileAndJIT(t, `
+enum Shape {
+	Point,
+	Circle(f64)
+}
+func f() int {
+	a := Any(Shape.Circle(7.0))
+	v, ok := AnyAs[Shape](a)
+	if !ok {
+		return -1
+	}
+	match v {
+		Shape.Circle(r) => {
+			if r == 7.0 {
+				return 1
+			}
+		}
+		_ => {}
+	}
+	return 0
+}
+`)
+	if got := jm.runInt32(t, "f"); got != 1 {
+		t.Errorf("f() = %d, want 1", got)
+	}
+}
+
+// TestAnyAsEnumMismatchedEnumTypeReturnsFalse proves AnyAs[T]'s identity
+// check (genAnyAsCall's own TypeEnum case) tells two DIFFERENT enum types
+// apart, even though both are single-unit-variant (structurally identical
+// shape) - each variant descriptor is interned by *sema.EnumVariant pointer
+// identity, never shared across declarations, so this isn't just checking
+// "some enum was boxed here" the way a map's own kind-only check does.
+func TestAnyAsEnumMismatchedEnumTypeReturnsFalse(t *testing.T) {
+	jm := compileAndJIT(t, `
+enum Shape {
+	Point
+}
+enum Color {
+	Red
+}
+func f() bool {
+	a := Any(Shape.Point)
+	_, ok := AnyAs[Color](a)
+	return ok
+}
+`)
+	if got := jm.runBool(t, "f"); got {
+		t.Errorf("f() = %v, want false (different enum types)", got)
+	}
+}
+
+// TestAnyBoxStructWithEnumFieldRoundTrip proves a struct's own enum-typed
+// field composes correctly through the containing struct's boxing - mirrors
+// TestAnyBoxStructWithMapFieldRoundTrip's own template. The field's own
+// descriptor in the struct's static field table is enumNestedDescriptor's
+// variant-agnostic placeholder (built at struct-descriptor time, with no
+// runtime value in hand to pick a real variant), but AnyAs[Shape] still
+// round-trips the field's own real bytes correctly - see DECISIONS.md for
+// why.
+func TestAnyBoxStructWithEnumFieldRoundTrip(t *testing.T) {
+	jm := compileAndJIT(t, `
+enum Shape {
+	Point,
+	Circle(f64)
+}
+struct Bag {
+	Item Shape
+}
+func f() int {
+	b := Bag{Item: Shape.Circle(9.0)}
+	a := Any(b)
+	ok := 0
+	for name, v := range AnyFields(a) {
+		if name == "Item" {
+			sv, sok := AnyAs[Shape](v)
+			if sok {
+				match sv {
+					Shape.Circle(r) => {
+						if r == 9.0 {
+							ok = ok + 1
+						}
+					}
+					_ => {}
+				}
+			}
+		}
+	}
+	return ok
+}
+`)
+	if got := jm.runInt32(t, "f"); got != 1 {
+		t.Errorf("f() = %d, want 1", got)
+	}
+}
+
+// TestAnyIndexArrayOfEnumsRoundTrip mirrors
+// TestAnyIndexArrayOfStructsFieldsWalk for an array of enums - proves the
+// nested (array-element) enum descriptor path composes correctly too, not
+// just the struct-field one above.
+func TestAnyIndexArrayOfEnumsRoundTrip(t *testing.T) {
+	jm := compileAndJIT(t, `
+enum Shape {
+	Point,
+	Circle(f64)
+}
+func f() int {
+	shapes := [2]Shape{Shape.Point, Shape.Circle(6.0)}
+	a := Any(shapes)
+	e, ok := AnyIndex(a, 1)
+	if !ok {
+		return -1
+	}
+	sv, sok := AnyAs[Shape](e)
+	if !sok {
+		return -2
+	}
+	match sv {
+		Shape.Circle(r) => {
+			if r == 6.0 {
+				return 1
+			}
+		}
+		_ => {}
+	}
+	return 0
+}
+`)
+	if got := jm.runInt32(t, "f"); got != 1 {
+		t.Errorf("f() = %d, want 1", got)
+	}
+}
+
 // TestVariadicGenericFuncInstantiatedAtAnyJIT is a real, JIT-executed proof
 // that a generic function's own variadic parameter, explicitly instantiated
 // at T=Any, gets the same implicit boxing an ordinary (non-generic) ...Any

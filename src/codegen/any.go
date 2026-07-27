@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"strconv"
 
 	"llvm_lang/src/ast"
 	"llvm_lang/src/enums"
@@ -51,6 +52,20 @@ import (
 // to GEP against (T is fully erased at that call site, unlike genAnyBox's
 // own from-type-still-in-hand case) - this third field goes beyond what was
 // originally scoped for this round, see DECISIONS.md.
+//
+// An enum needs two distinct descriptor flavors, unlike every other kind
+// above (a single compile-time-constant descriptor is enough for those):
+// variantDescriptor builds one per *sema.EnumVariant (fieldCount/fieldsPtr
+// naming that variant's own associated-data fields, kind always TypeEnum,
+// name the variant's own name), selected at runtime by genEnumAnyDescriptor
+// off the boxed value's own discriminant - which variant is active is a
+// runtime, not compile-time, property, so genAnyBox can't just call
+// typeDescriptorFor the way every other kind does. enumNestedDescriptor
+// builds one per *sema.EnumInfo instead (fieldCount 0, no variant known) for
+// the one context with no runtime value in hand at all: an enum-typed struct
+// field/array element's entry in a struct/array descriptor's own
+// compile-time-constant field table. See DECISIONS.md for why AnyAs[T] still
+// round-trips correctly through either flavor.
 
 // anyPrimitiveKinds is every non-struct kind this round gives Any a
 // descriptor for (see LANGUAGE.md's "Any" section and sema's
@@ -94,6 +109,8 @@ func (g *Generator) setupAnyRuntime() {
 	g.anyPrimitiveDescs = make(map[sema.TypeKind]llvm.Value, len(anyPrimitiveKinds))
 	g.structAnyDescs = make(map[*sema.StructInfo]llvm.Value)
 	g.arrayAnyDescs = make(map[arrayAnyDescKey]llvm.Value)
+	g.variantAnyDescs = make(map[*sema.EnumVariant]llvm.Value)
+	g.enumAnyDescs = make(map[*sema.EnumInfo]llvm.Value)
 	noElemDesc, noArrayLen, noElemSize := llvm.ConstNull(g.ptrTy), llvm.ConstInt(g.i32Ty, 0, false), llvm.ConstInt(g.i64Ty, 0, false)
 	for _, k := range anyPrimitiveKinds {
 		name := anyPrimitiveDisplayName(k)
@@ -139,13 +156,19 @@ func (g *Generator) constFieldOffset(structLLType llvm.Type, fieldIdx int) llvm.
 
 // typeDescriptorFor returns t's own shared type descriptor - structDescriptor/
 // arrayDescriptor's own lazy build/intern for a struct/array, or a plain
-// primitive-kind lookup for everything else.
+// primitive-kind lookup for everything else. TypeEnum here always means a
+// NESTED enum (a struct field/array element - see enumNestedDescriptor's own
+// doc comment): boxing an enum value directly never reaches this function -
+// genAnyBox special-cases TypeEnum before ever calling here, since only it
+// has the real value in hand to pick a variant from.
 func (g *Generator) typeDescriptorFor(t sema.Type) llvm.Value {
 	switch t.Kind {
 	case sema.TypeStruct:
 		return g.structDescriptor(t.Struct)
 	case sema.TypeArray:
 		return g.arrayDescriptor(t)
+	case sema.TypeEnum:
+		return g.enumNestedDescriptor(t.Enum)
 	default:
 		desc, ok := g.anyPrimitiveDescs[t.Kind]
 		if !ok {
@@ -233,6 +256,124 @@ func (g *Generator) arrayDescriptor(t sema.Type) llvm.Value {
 	return desc
 }
 
+// enumNestedDescriptor returns info's own shared, variant-agnostic
+// TypeDescriptor, for use only when an enum type appears NESTED - a struct
+// field or array element (typeDescriptorFor's own TypeEnum case) - rather
+// than boxed directly. Unlike genEnumAnyDescriptor's real per-value runtime
+// dispatch, a struct/array descriptor's own field/element table is a single
+// compile-time-constant global built once, with no runtime value available
+// to read a discriminant from, so this can't name a specific variant:
+// fieldCount 0/fieldsPtr null (AnyFields yields nothing directly on this
+// placeholder, rather than risking a type-confused field read against
+// whichever variant happens to be live), name is the enum's own type name.
+// AnyAs[EnumType] still round-trips correctly through this placeholder -
+// genAnyAsCall's own TypeEnum case matches it alongside every real variant
+// descriptor, and the actual value it loads always comes from the field's
+// real bytes, never from this descriptor's own (empty) field table - see
+// DECISIONS.md.
+func (g *Generator) enumNestedDescriptor(info *sema.EnumInfo) llvm.Value {
+	if desc, ok := g.enumAnyDescs[info]; ok {
+		return desc
+	}
+	noElemDesc, noArrayLen, noElemSize := llvm.ConstNull(g.ptrTy), llvm.ConstInt(g.i32Ty, 0, false), llvm.ConstInt(g.i64Ty, 0, false)
+	desc := g.buildTypeDescriptorGlobal(sema.TypeEnum, info.Symbol.Name, 0, llvm.ConstNull(g.ptrTy), noElemDesc, noArrayLen, noElemSize, ".any.desc."+info.Symbol.Name)
+	g.enumAnyDescs[info] = desc
+	return desc
+}
+
+// variantDescriptor returns variant's own shared TypeDescriptor, building and
+// interning it the first time it's needed - keyed by *sema.EnumVariant
+// pointer identity, the enum-kind counterpart to structDescriptor's
+// *sema.StructInfo identity. name is the variant's OWN name ("Circle", not
+// "Shape") - the same "most useful runtime information, not the fully-
+// qualified type" precedent print()'s own genPrintEnumVariant already sets
+// for an enum value. A tuple variant's own field "names" are its positional
+// index as a string ("0", "1", ...); a struct variant's are its own real
+// field names (variantFieldName); a unit variant has neither (fieldCount 0,
+// the same "nothing to walk" convention every other kind-with-no-fields
+// already uses).
+func (g *Generator) variantDescriptor(variant *sema.EnumVariant) llvm.Value {
+	if desc, ok := g.variantAnyDescs[variant]; ok {
+		return desc
+	}
+	layout := g.enumLayouts[variant.Enum]
+	payloadTy := layout.variantPayloadType[variant]
+	fieldTypes := layout.variantPayloadTypes[variant]
+
+	fieldCount := len(fieldTypes)
+	fieldsPtr := llvm.ConstNull(g.ptrTy)
+	if fieldCount > 0 {
+		fieldDescs := make([]llvm.Value, fieldCount)
+		for i, ft := range fieldTypes {
+			fieldDescs[i] = g.ctx.ConstStruct([]llvm.Value{
+				g.constStringValue(variantFieldName(variant, i)),
+				g.typeDescriptorFor(ft),
+				g.constFieldOffset(payloadTy, i),
+			}, false)
+		}
+		arrConst := llvm.ConstArray(g.fieldDescriptorTy, fieldDescs)
+		glob := llvm.AddGlobal(g.mod, arrConst.Type(), ".any.fields."+variant.Enum.Symbol.Name+"."+variant.Name)
+		glob.SetInitializer(arrConst)
+		glob.SetGlobalConstant(true)
+		glob.SetLinkage(llvm.PrivateLinkage)
+		fieldsPtr = glob
+	}
+
+	noElemDesc, noArrayLen, noElemSize := llvm.ConstNull(g.ptrTy), llvm.ConstInt(g.i32Ty, 0, false), llvm.ConstInt(g.i64Ty, 0, false)
+	globalName := ".any.desc." + variant.Enum.Symbol.Name + "." + variant.Name
+	desc := g.buildTypeDescriptorGlobal(sema.TypeEnum, variant.Name, fieldCount, fieldsPtr, noElemDesc, noArrayLen, noElemSize, globalName)
+	g.variantAnyDescs[variant] = desc
+	return desc
+}
+
+// variantFieldName returns the i'th associated-data field's own display name
+// for variant's descriptor - a struct variant's own real field name, or a
+// tuple/unit variant's positional index as a string.
+func variantFieldName(variant *sema.EnumVariant, i int) string {
+	if variant.Kind == sema.EnumVariantStruct {
+		return variant.Fields[i].Name
+	}
+	return strconv.Itoa(i)
+}
+
+// genEnumAnyDescriptor selects, at runtime, v's own active variant's shared
+// descriptor - genAnyBox's TypeEnum-specific replacement for
+// typeDescriptorFor: every other kind has one compile-time-constant
+// descriptor, but an enum's correct descriptor depends on which variant is
+// actually active, a runtime-only property, so this needs a real switch
+// instead of a single lookup - mirrors genEnumEqual/genPrintEnumValue's own
+// tag-switch-plus-phi shape exactly (see enum.go), one case per variant
+// producing that variant's own descriptor, unreachable default since sema
+// guarantees every discriminant is covered.
+func (g *Generator) genEnumAnyDescriptor(t sema.Type, v llvm.Value) llvm.Value {
+	info := t.Enum
+	tag := g.builder.CreateExtractValue(v, 0, "")
+
+	unreachableBB := g.ctx.AddBasicBlock(g.curFn, "enumany.unreachable")
+	mergeBB := g.ctx.AddBasicBlock(g.curFn, "enumany.merge")
+	sw := g.builder.CreateSwitch(tag, unreachableBB, len(info.Order))
+
+	incomingVals := make([]llvm.Value, 0, len(info.Order))
+	incomingBlocks := make([]llvm.BasicBlock, 0, len(info.Order))
+	for _, variant := range info.Order {
+		caseBB := g.ctx.AddBasicBlock(g.curFn, "enumany.case."+variant.Name)
+		sw.AddCase(llvm.ConstInt(g.i32Ty, uint64(variant.Index), false), caseBB)
+
+		g.builder.SetInsertPointAtEnd(caseBB)
+		incomingVals = append(incomingVals, g.variantDescriptor(variant))
+		incomingBlocks = append(incomingBlocks, g.builder.GetInsertBlock())
+		g.builder.CreateBr(mergeBB)
+	}
+
+	g.builder.SetInsertPointAtEnd(unreachableBB)
+	g.builder.CreateUnreachable()
+
+	g.builder.SetInsertPointAtEnd(mergeBB)
+	phi := g.builder.CreatePHI(g.ptrTy, "")
+	phi.AddIncoming(incomingVals, incomingBlocks)
+	return phi
+}
+
 // genAnyBox lowers `Any(x)` (see genConversion's own TypeAny dispatch): x's
 // bytes are copied into a fresh arena slot (never a stack address - see this
 // file's top-of-file doc comment for why), paired with from's own shared
@@ -255,9 +396,19 @@ func (g *Generator) genAnyBox(from sema.Type, v llvm.Value) llvm.Value {
 	buf := g.genArenaAlloc(llvm.SizeOf(elemLLType))
 	g.builder.CreateStore(v, buf)
 
+	// An enum's own descriptor depends on which variant v actually holds -
+	// only genEnumAnyDescriptor (not typeDescriptorFor) has v in hand to
+	// pick one at runtime (see this file's top-of-file doc comment).
+	var descPtr llvm.Value
+	if from.Kind == sema.TypeEnum {
+		descPtr = g.genEnumAnyDescriptor(from, v)
+	} else {
+		descPtr = g.typeDescriptorFor(from)
+	}
+
 	result := llvm.Undef(g.anyTy)
 	result = g.builder.CreateInsertValue(result, buf, 0, "")
-	result = g.builder.CreateInsertValue(result, g.typeDescriptorFor(from), 1, "")
+	result = g.builder.CreateInsertValue(result, descPtr, 1, "")
 	return result
 }
 
@@ -325,6 +476,21 @@ func (g *Generator) genAnyAsCall(n, argNode ast.NodeIndex) llvm.Value {
 	case sema.TypeArray:
 		wantDesc := g.arrayDescriptor(target)
 		matches = g.builder.CreateAnd(matches, g.builder.CreateICmp(llvm.IntEQ, descPtr, wantDesc, ""), "")
+	case sema.TypeEnum:
+		// Unlike a struct/array, target.Enum has no single "wantDesc" - a
+		// boxed enum's descPtr is one of its own N per-variant descriptors
+		// (whichever was active when boxed), or, for a nested field/element,
+		// enumNestedDescriptor's placeholder. Matches iff descPtr is any one
+		// of those N+1 - unlike a map, an enum's own variant set is fully
+		// compile-time enumerable per distinct EnumInfo, so this costs only a
+		// few extra icmp/or instructions, not a documented gap (see
+		// DECISIONS.md).
+		anyVariant := g.builder.CreateICmp(llvm.IntEQ, descPtr, g.enumNestedDescriptor(target.Enum), "")
+		for _, variant := range target.Enum.Order {
+			eq := g.builder.CreateICmp(llvm.IntEQ, descPtr, g.variantDescriptor(variant), "")
+			anyVariant = g.builder.CreateOr(anyVariant, eq, "")
+		}
+		matches = g.builder.CreateAnd(matches, anyVariant, "")
 	}
 
 	matchBB := g.ctx.AddBasicBlock(g.curFn, "anyas.match")
@@ -362,6 +528,41 @@ func (g *Generator) isAnyFieldsRangeSubject(subjectNode ast.NodeIndex) bool {
 	return g.isBuiltinCall(g.tree.Child(subjectNode, 0), "AnyFields")
 }
 
+// anyFieldsBase resolves a's dataPtr into the real field-bearing base address
+// for genRangeForAnyFields - dataPtr directly, for every kind whose own bytes
+// ARE its fields (a struct), or, when kind is TypeEnum specifically, the real
+// payload pointer one level of indirection further in: dataPtr for a boxed
+// enum points at the arena-copied {tag, payload} pair genAnyBox's generic
+// byte copy produces (see this file's top-of-file doc comment), so the
+// actual variant field data lives wherever payload (offset 1) points, not at
+// dataPtr itself. Real control flow, not a blind load - interpreting a
+// smaller non-enum boxed value's own bytes as {i32, ptr} would risk an
+// out-of-bounds read, the same reasoning genAnyAsCall's own match/no-match
+// branching already documents.
+func (g *Generator) anyFieldsBase(kind, dataPtr llvm.Value) llvm.Value {
+	isEnum := g.builder.CreateICmp(llvm.IntEQ, kind, llvm.ConstInt(g.i32Ty, uint64(sema.TypeEnum), false), "")
+
+	enumBB := g.ctx.AddBasicBlock(g.curFn, "anyfields.enumbase")
+	directBB := g.ctx.AddBasicBlock(g.curFn, "anyfields.directbase")
+	contBB := g.ctx.AddBasicBlock(g.curFn, "anyfields.base")
+	g.builder.CreateCondBr(isEnum, enumBB, directBB)
+
+	g.builder.SetInsertPointAtEnd(enumBB)
+	payloadAddr := g.builder.CreateStructGEP(g.enumValTy, dataPtr, 1, "")
+	enumBase := g.builder.CreateLoad(g.ptrTy, payloadAddr, "")
+	enumEndBB := g.builder.GetInsertBlock()
+	g.builder.CreateBr(contBB)
+
+	g.builder.SetInsertPointAtEnd(directBB)
+	directEndBB := g.builder.GetInsertBlock()
+	g.builder.CreateBr(contBB)
+
+	g.builder.SetInsertPointAtEnd(contBB)
+	base := g.builder.CreatePHI(g.ptrTy, "")
+	base.AddIncoming([]llvm.Value{enumBase, dataPtr}, []llvm.BasicBlock{enumEndBB, directEndBB})
+	return base
+}
+
 // genRangeForAnyFields lowers `for name, value := range AnyFields(a) { ... }`
 // - unlike a real generator (genRangeForGenerator's push/callback lowering),
 // this is an ordinary runtime-bounded index loop (0..fieldCount-1) reading
@@ -377,6 +578,9 @@ func (g *Generator) genRangeForAnyFields(keyNode, valueNode, subjectNode, bodyNo
 	a := g.genExpr(argNode)
 	dataPtr := g.builder.CreateExtractValue(a, 0, "")
 	descPtr := g.builder.CreateExtractValue(a, 1, "")
+
+	kind := g.builder.CreateLoad(g.i32Ty, descPtr, "")
+	fieldBase := g.anyFieldsBase(kind, dataPtr)
 
 	fieldCount := g.builder.CreateLoad(g.i32Ty, g.builder.CreateStructGEP(g.typeDescriptorTy, descPtr, 2, ""), "")
 	fieldsPtr := g.builder.CreateLoad(g.ptrTy, g.builder.CreateStructGEP(g.typeDescriptorTy, descPtr, 3, ""), "")
@@ -400,7 +604,7 @@ func (g *Generator) genRangeForAnyFields(keyNode, valueNode, subjectNode, bodyNo
 	name := g.builder.CreateLoad(g.stringTy, g.builder.CreateStructGEP(g.fieldDescriptorTy, fieldAddr, 0, ""), "")
 	fieldDescPtr := g.builder.CreateLoad(g.ptrTy, g.builder.CreateStructGEP(g.fieldDescriptorTy, fieldAddr, 1, ""), "")
 	offset := g.builder.CreateLoad(g.i64Ty, g.builder.CreateStructGEP(g.fieldDescriptorTy, fieldAddr, 2, ""), "")
-	fieldDataPtr := g.builder.CreateInBoundsGEP(g.i8Ty, dataPtr, []llvm.Value{offset}, "")
+	fieldDataPtr := g.builder.CreateInBoundsGEP(g.i8Ty, fieldBase, []llvm.Value{offset}, "")
 
 	fieldValue := llvm.Undef(g.anyTy)
 	fieldValue = g.builder.CreateInsertValue(fieldValue, fieldDataPtr, 0, "")

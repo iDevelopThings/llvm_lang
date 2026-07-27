@@ -134,12 +134,82 @@ func TestAnyIndexUntypedIntLiteralRetyped(t *testing.T) {
 	checkSrc(t, "func f() {\n\ts := []int{1, 2}\n\ta := Any(s)\n\tv, ok := AnyIndex(a, 1)\n}\n")
 }
 
-// --- invalid: boxing ---
+// --- valid: boxing an enum (see LANGUAGE.md's "Any" section) ---
 
-func TestAnyBoxEnumRejected(t *testing.T) {
+// TestAnyBoxEnum{Unit,Tuple,Struct}VariantAccepted cover this round's new
+// enum support - all three variant kinds are boxable as long as their own
+// associated-data types are.
+func TestAnyBoxEnumUnitVariantAccepted(t *testing.T) {
 	expectCheckErrors(t, "enum Shape {\n\tPoint\n}\n"+
-		"func f() {\n\ts := Shape.Point\n\ta := Any(s)\n}\n", 1)
+		"func f() {\n\ts := Shape.Point\n\ta := Any(s)\n}\n", 0)
 }
+
+func TestAnyBoxEnumTupleVariantAccepted(t *testing.T) {
+	expectCheckErrors(t, "enum Shape {\n\tCircle(f64)\n}\n"+
+		"func f() {\n\ts := Shape.Circle(2.0)\n\ta := Any(s)\n}\n", 0)
+}
+
+func TestAnyBoxEnumStructVariantAccepted(t *testing.T) {
+	expectCheckErrors(t, "enum Shape {\n\tTriangle { base f64, height f64 }\n}\n"+
+		"func f() {\n\ts := Shape.Triangle{base: 3.0, height: 4.0}\n\ta := Any(s)\n}\n", 0)
+}
+
+// An enum is boxable only if every variant's every associated-data type is,
+// recursively - mirrors TestAnyBoxStructWithUnboxableFieldRejected for an
+// enum's own tuple/struct variant.
+func TestAnyBoxEnumWithUnboxableTupleFieldRejected(t *testing.T) {
+	expectCheckErrors(t, "func g() {}\n"+
+		"enum Wrapper {\n\tWrap(func())\n}\n"+
+		"func f() {\n\tw := Wrapper.Wrap(g)\n\ta := Any(w)\n}\n", 1)
+}
+
+func TestAnyBoxEnumWithUnboxableStructFieldRejected(t *testing.T) {
+	expectCheckErrors(t, "func g() {}\n"+
+		"enum Wrapper {\n\tWrap { fn func() }\n}\n"+
+		"func f() {\n\tw := Wrapper.Wrap{fn: g}\n\ta := Any(w)\n}\n", 1)
+}
+
+// An Any-typed variant field must be rejected the same way a struct field of
+// Any is (TestAnyBoxStructWithAnyFieldRejected) - this is the exact recurring
+// bug class DECISIONS.md's Any history keeps catching (a nested-type
+// boxability check not composing with a newly added kind): isBoxableIntoAny's
+// own TypeEnum case must recurse through isNestedBoxableIntoAny, not itself
+// directly.
+func TestAnyBoxEnumWithAnyTupleFieldRejected(t *testing.T) {
+	expectCheckErrors(t, "enum Wrapper {\n\tWrap(Any)\n}\n"+
+		"func f() {\n\tw := Wrapper.Wrap(Any(5))\n\ta := Any(w)\n}\n", 1)
+}
+
+func TestAnyBoxEnumWithAnyStructFieldRejected(t *testing.T) {
+	expectCheckErrors(t, "enum Wrapper {\n\tWrap { v Any }\n}\n"+
+		"func f() {\n\tw := Wrapper.Wrap{v: Any(5)}\n\ta := Any(w)\n}\n", 1)
+}
+
+// A struct containing an enum field composes correctly - mirrors
+// TestAnyBoxStructWithArrayFieldAccepted/TestAnyBoxStructWithMapFieldAccepted
+// for an enum field.
+func TestAnyBoxStructWithEnumFieldAccepted(t *testing.T) {
+	expectCheckErrors(t, "enum Shape {\n\tCircle(f64)\n}\n"+
+		"struct Bag {\n\tItem Shape\n}\n"+
+		"func f() {\n\tb := Bag{Item: Shape.Circle(2.0)}\n\ta := Any(b)\n}\n", 0)
+}
+
+func TestAnyAsEnumRoundTripType(t *testing.T) {
+	tree, info := checkSrc(t, "enum Shape {\n\tPoint\n}\n"+
+		"func f() {\n\ts := Shape.Point\n\ta := Any(s)\n\tv, ok := AnyAs[Shape](a)\n}\n")
+	decl := tree.Children(tree.Root)[1]
+	body := tree.FuncBody(decl)
+	stmts := tree.Children(body)
+	names := tree.MultiShortVarDeclNames(stmts[2])
+	if got := info.Types[names[0]]; got.Kind != TypeEnum {
+		t.Errorf("v's Type = %v, want Shape (enum)", got)
+	}
+	if got := info.Types[names[1]]; got.Kind != TypeBool {
+		t.Errorf("ok's Type = %v, want bool", got)
+	}
+}
+
+// --- invalid: boxing ---
 
 // TestAnyBoxDynamicArrayAccepted/TestAnyBoxFixedArrayAccepted cover this
 // round's new array support (see LANGUAGE.md's "Any" section) - both array
@@ -153,11 +223,11 @@ func TestAnyBoxFixedArrayAccepted(t *testing.T) {
 }
 
 // TestAnyBoxArrayWithUnboxableElementRejected proves an array is only
-// boxable if its own element type is - an enum has no Any descriptor shape
-// this round, so an array of enums must still be rejected.
+// boxable if its own element type is - a function value has no Any
+// descriptor shape, so an array of them must still be rejected.
 func TestAnyBoxArrayWithUnboxableElementRejected(t *testing.T) {
-	expectCheckErrors(t, "enum Shape {\n\tPoint\n}\n"+
-		"func f() {\n\ts := []Shape{Shape.Point}\n\ta := Any(s)\n}\n", 1)
+	expectCheckErrors(t, "func g() {}\n"+
+		"func f() {\n\ts := []func(){g}\n\ta := Any(s)\n}\n", 1)
 }
 
 // An array of Any is rejected the same way a struct field of Any is
@@ -197,18 +267,27 @@ func TestAnyBoxNonCopyableStructRejected(t *testing.T) {
 		"func f() {\n\tr := Res{0}\n\ta := Any(move r)\n}\n", 1)
 }
 
-// A struct containing a field of an otherwise-unboxable kind (here an enum -
-// arrays and maps are both boxable now, see TestAnyBoxDynamicArrayAccepted/
-// TestAnyBoxMapAccepted above) must be rejected at this same compile-time
-// checkpoint, not just when boxing that field type directly - codegen's
-// structDescriptor recurses into every field's own type descriptor
+// An enum can be non-copyable (LANGUAGE.md's "Enums" section) exactly like a
+// struct - Any(x) always copies x's bytes, unsound for a non-copyable type
+// regardless of kind.
+func TestAnyBoxNonCopyableEnumRejected(t *testing.T) {
+	expectCheckErrors(t, "enum Res {\n\tWrap(int)\n\tdestructor() {\n\t}\n}\n"+
+		"func f() {\n\tr := Res.Wrap(5)\n\ta := Any(move r)\n}\n", 1)
+}
+
+// A struct containing a field of an otherwise-unboxable kind (here a function
+// value - arrays, maps, and enums are all boxable now, see
+// TestAnyBoxDynamicArrayAccepted/TestAnyBoxMapAccepted/
+// TestAnyBoxEnumUnitVariantAccepted above) must be rejected at this same
+// compile-time checkpoint, not just when boxing that field type directly -
+// codegen's structDescriptor recurses into every field's own type descriptor
 // unconditionally, so letting this compile would panic the first time Bag
 // is ever boxed anywhere in the program, rather than reporting a clean
 // diagnostic here.
 func TestAnyBoxStructWithUnboxableFieldRejected(t *testing.T) {
-	expectCheckErrors(t, "enum Shape {\n\tPoint\n}\n"+
-		"struct Bag {\n\tItems Shape\n}\n"+
-		"func f() {\n\tb := Bag{Items: Shape.Point}\n\ta := Any(b)\n}\n", 1)
+	expectCheckErrors(t, "func g() {}\n"+
+		"struct Bag {\n\tItems func()\n}\n"+
+		"func f() {\n\tb := Bag{Items: g}\n\ta := Any(b)\n}\n", 1)
 }
 
 // TestAnyBoxStructWithArrayFieldAccepted proves a struct field that's itself
@@ -286,8 +365,7 @@ func TestAnyAsMissingTypeArgRejected(t *testing.T) {
 }
 
 func TestAnyAsUnboxableTypeArgRejected(t *testing.T) {
-	expectCheckErrors(t, "enum Shape {\n\tPoint\n}\n"+
-		"func f() {\n\ta := Any(5)\n\tv, ok := AnyAs[Shape](a)\n}\n", 1)
+	expectCheckErrors(t, "func f() {\n\ta := Any(5)\n\tv, ok := AnyAs[func()](a)\n}\n", 1)
 }
 
 // TestAnyFieldsOutsideRangeForRejected proves AnyFields' TypeGenerator
@@ -352,9 +430,9 @@ func TestVariadicAnyCollectAcceptsAlreadyBoxedValues(t *testing.T) {
 }
 
 func TestVariadicAnyCollectRejectsUnboxableType(t *testing.T) {
-	expectCheckErrors(t, "enum Shape {\n\tCircle(int)\n}\n"+
+	expectCheckErrors(t, "func g() {}\n"+
 		"func Log(args ...Any) int {\n\treturn len(args)\n}\n"+
-		"func f() {\n\ts := Shape.Circle(5)\n\tLog(s)\n}\n", 1)
+		"func f() {\n\tLog(g)\n}\n", 1)
 }
 
 func TestVariadicAnyCollectRejectsNonCopyableType(t *testing.T) {

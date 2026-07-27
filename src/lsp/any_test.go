@@ -138,6 +138,41 @@ func f(a Any) int {
 	}
 }
 
+// TestAny_Definition_BoxedEnumTypeArgLandsOnDecl mirrors
+// TestAny_Definition_BoxedStructFieldLandsOnDecl for an enum type argument -
+// enums are boxable into Any now (see LANGUAGE.md's "Any" section), so
+// AnyAs[Shape]'s own type argument must resolve exactly like a struct's does.
+func TestAny_Definition_BoxedEnumTypeArgLandsOnDecl(t *testing.T) {
+	src := `enum Shape {
+	Point,
+	Circle(f64)
+}
+
+func f(a Any) int {
+	v, ok := AnyAs[Shape](a)
+	if ok {
+		return AnyKind(a)
+	}
+	return 0
+}
+`
+	w, path := singleFileWorkspace(t, src)
+	fa, _ := w.Analysis(path)
+
+	offset := strings.Index(fa.Tree.File.Src, "AnyAs[Shape]") + len("AnyAs[")
+	pos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(offset))
+
+	loc := w.Definition(path, pos)
+	if loc == nil {
+		t.Fatal("Definition returned nil for AnyAs[Shape]'s own type argument")
+	}
+	wantOffset := strings.Index(fa.Tree.File.Src, "enum Shape") + len("enum ")
+	wantPos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(wantOffset))
+	if loc.Range.Start != wantPos {
+		t.Errorf("Definition landed at %+v, want Shape's own declaration at %+v", loc.Range.Start, wantPos)
+	}
+}
+
 // TestAny_References_ParamFoundAtEveryUse covers References for the `a Any`
 // parameter, expecting a hit at every one of its own uses in describe's body.
 func TestAny_References_ParamFoundAtEveryUse(t *testing.T) {
