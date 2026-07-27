@@ -31,12 +31,8 @@ b := make([]int, 0, 8)
 
 `append` adds one value at a time and returns the updated array.
 
-Dynamic arrays are headers pointing at shared backing storage. Assignment
-does not clone their elements. They can be printed, but cannot be compared
-with `==` or `!=`.
-
-An invalid index, slice bound, length, or capacity prints the values involved
-and then aborts the process. It is not a recoverable exception.
+Assignment shares a dynamic array's backing storage. Dynamic arrays can be
+printed, but not compared with `==` or `!=`.
 
 ## Slicing
 
@@ -51,11 +47,10 @@ print(numbers[1]) // 99
 ```
 
 The forms `x[a:b]`, `x[:b]`, `x[a:]`, and `x[:]` work on dynamic arrays,
-fixed arrays, and strings. Slicing a fixed array produces a dynamic array.
+fixed arrays, and strings. An omitted bound uses the start or length.
 
-An explicit high bound may extend a dynamic array up to its capacity.
-Strings are bounded by their length. A fixed array must be addressable
-because the result keeps pointing into its storage.
+An explicit high bound may extend a dynamic array up to its capacity. Slicing
+a fixed array produces a dynamic array that shares its storage.
 
 ## Maps
 
@@ -73,9 +68,8 @@ print(len(scores))
 A missing key returns the value type's zero value. The second result tells
 you whether the key existed.
 
-Maps are reference values: assigning or passing one keeps sharing the same
-table. Keys must be comparable, so dynamic arrays, maps, and function values
-cannot be keys.
+Maps share their table when assigned or passed. Keys must be comparable, and
+both key and value types must be copyable.
 
 A map element has no stable address. `&scores["Ada"]`, `scores["Ada"]++`,
 and compound assignment to a map element are rejected; read, calculate, and
@@ -85,7 +79,7 @@ There is no map literal yet. Map iteration order is unspecified.
 
 ## Range loops
 
-Use two names when you need both the index/key and value:
+Use `range` to visit the elements:
 
 ```go
 for i, value := range numbers {
@@ -99,23 +93,8 @@ for key, value := range scores {
 }
 ```
 
-With one name, arrays provide the index and maps provide the key. A loop can
-also omit both names:
-
-```go
-for range numbers {
-    print("one item")
-}
-```
-
-The two-name form requires fresh names with `:=`; an `=` reuse form is not
-supported.
-
-There is no special blank identifier yet. Some examples use `_` as an
-ordinary, intentionally-unused name, but it is not a general discard
-operator.
-
-Strings and bare integers cannot be ranged over yet.
+With one name, arrays and slices produce the index; maps produce the key. See
+[control flow](control-flow.md#range-loops) for the other forms.
 
 Try:
 
@@ -124,4 +103,5 @@ Try:
 - [`word_freq.llx`](../examples/word_freq/word_freq.llx)
 - [`range.llx`](../examples/range/range.llx)
 
-Next: [Structs, enums, and match](structs-enums-and-match.md)
+[Previous: Functions](functions.md) ·
+[Next: Structs](structs.md)

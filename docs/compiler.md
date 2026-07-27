@@ -1,4 +1,26 @@
-# Compiler commands
+# Compiler and editor tools
+
+Build the tools with `.\build.ps1`. This produces `llvmc.exe` and
+`llvmc-lsp.exe`.
+
+## Run or build
+
+Run a file or package through the JIT:
+
+```powershell
+.\llvmc.exe .\path\to\program.llx
+.\llvmc.exe .\path\to\package
+```
+
+Passing one file still compiles every `.llx` file in its directory.
+
+Build a standalone executable:
+
+```powershell
+.\llvmc.exe -o program.exe .\path\to\package
+```
+
+The executable does not need Go, LLVM, or `llvmc` at runtime.
 
 ## Editor support
 
@@ -11,34 +33,11 @@ folding ranges, completion, and semantic highlighting for `.llx` files.
 - VS Code: use the included
   [development extension](../cmd/llvmc-lsp/vscode-extension/README.md).
 
-Every instantiation of a generic counts as the same declaration: find
-references and occurrence highlighting on `Sum[T]`'s declaration find every
-`Sum(...)` call, and vice versa. The outline shows each declaration's own
-signature or field list beside its name.
-
-Hovering a struct also shows its real in-memory layout: total size and
-alignment, each field's own byte offset, and how many bytes are spent on
-alignment padding rather than a field's own data. Hovering a single field
-instead shows which struct it belongs to and that one field's own
-size/alignment/offset, including any padding spent before the next field.
+Struct and field hovers include their real size, alignment, offsets, and
+padding. Generic references are grouped across their instantiations.
 
 Incremental parsing is not implemented yet - each edit re-analyzes the whole
 package.
-
-## Run with the JIT
-
-```powershell
-.\llvmc.exe .\path\to\program.llx
-.\llvmc.exe .\path\to\package
-```
-
-Passing one file still compiles every `.llx` file in that file's directory.
-
-## Build an executable
-
-```powershell
-.\llvmc.exe -o program.exe .\path\to\package
-```
 
 ## Inspect LLVM IR
 
@@ -48,56 +47,6 @@ Passing one file still compiles every `.llx` file in that file's directory.
 
 Add `-no-opt` to see the unoptimized IR. Coroutines cannot use `-no-opt`.
 `-emit-llvm` cannot be combined with `-o`, `-watch`, `-l`, or `-L`.
-
-## Run language tests
-
-```powershell
-.\llvmc.exe -test .\path\to\package
-```
-
-Tests are free functions named `TestXxx` with this exact shape:
-
-```go
-import "std:test"
-
-func TestAdd(t *test.Runner) {
-    t.AssertEqual(2 + 3, 5, "addition")
-}
-```
-
-See [`test_demo.llx`](../examples/test_demo/test_demo.llx). It intentionally
-contains one failing test.
-
-Only tests in the entry package are discovered. A package defining its own
-`main` conflicts with the generated test driver. No matching tests is a
-usage error.
-
-Each test's own PASS/FAIL line shows how long it took (e.g.
-`--- PASS: TestAdd (12.30us)`), and a final `=== TESTS DONE: ...` line shows
-the whole run's total - both via `std/time.FormattedDuration`.
-
-**Same-file tests:** a `tests { ... }` block lets `TestXxx` functions live
-directly in the file they test, instead of (or alongside) a standalone test
-package - see `LANGUAGE.md`'s "`tests{}`" section for the full rules:
-
-```go
-func add(a int, b int) int {
-    return a + b
-}
-
-tests {
-    import "std:test"
-
-    func TestAdd(t *test.Runner) {
-        t.AssertEqual(add(1, 1), 2, "1+1")
-    }
-}
-```
-
-`llvmc -test` discovers `TestAdd` the same as any standalone test file's;
-every other build mode treats the whole block as if it weren't there. See
-[`std/collections/collections.llx`](../std/collections/collections.llx) for
-a real stdlib package using this.
 
 ## Watch and reload
 
@@ -124,8 +73,20 @@ repeated and work with JIT or `-o`:
 .\llvmc.exe -o app.exe -L C:\libs -l physics .\app
 ```
 
+## Tooling-only stubs
+
+`stub func` declarations exist only in `std/stubs.llx`. They give the
+language server signatures for compiler built-ins such as `append` and
+reflection helpers. They are not callable package functions and cannot be
+written in ordinary source.
+
 ## Exit codes
 
 - `2`: invalid command or input path
 - `1`: compilation, verification, JIT, or link failure
 - otherwise: the JIT-run program's own `main` result
+
+Run language tests with [`llvmc -test`](testing.md).
+
+[Previous: C interop](ffi.md) ·
+[Back to the documentation map](README.md)

@@ -1,27 +1,49 @@
-# llvm_lang documentation
+# Learn llvm_lang
 
-llvm_lang is a small compiled language with Go-like syntax, LLVM code
-generation, and a few ideas borrowed from Rust and C#.
+llvm_lang is a compiled language with Go-like syntax, explicit ownership
+tools, and LLVM code generation.
 
-If you already program, start here:
+The walkthrough below visits every teaching page. Stop whenever you know
+enough to build what you want.
+
+## Start here
 
 1. [Install and run a program](getting-started.md)
-2. [Learn the everyday syntax](language-basics.md)
-3. [Work with collections](collections.md)
-4. [Build your own types](structs-enums-and-match.md)
-5. [Use functions, closures, and generics](functions-and-generics.md)
+2. [Program basics](basics.md)
+3. [Types and conversions](types-and-conversions.md)
+4. [Control flow](control-flow.md)
+5. [Functions](functions.md)
+6. [Collections](collections.md)
 
-Read these when you need them:
+## Define your own types
 
-- [Packages and the standard library](packages-and-stdlib.md)
-- [Ownership, `move`, and pointers](memory-and-pointers.md)
-- [Generators, coroutines, and C interop](advanced-features.md)
-- [Compiler commands](compiler.md)
-- [All runnable examples](examples.md)
-- [Complete feature index](feature-index.md)
-- [Current language limits](current-limitations.md)
+7. [Structs](structs.md)
+8. [Enums](enums.md)
+9. [`match`](match.md)
+10. [Ownership and `move`](ownership.md)
+11. [Pointers](pointers.md)
 
-These pages are a learning guide, not the compiler specification. For exact
-edge cases, see [`LANGUAGE.md`](../LANGUAGE.md). Compiler contributors should
-also read [`AGENTS.md`](../AGENTS.md), [`CODEGEN.md`](../CODEGEN.md),
-[`DECISIONS.md`](../DECISIONS.md), and [`BLOCKERS.md`](../BLOCKERS.md).
+## Reuse and organize code
+
+12. [Function values and lambdas](function-values.md)
+13. [Generics](generics.md)
+14. [Packages and imports](packages.md)
+15. [Standard library](standard-library.md)
+16. [Testing](testing.md)
+
+## Advanced features
+
+17. [Generators](generators.md)
+18. [Coroutines](coroutines.md)
+19. [`Any` and reflection](any-and-reflection.md)
+20. [C interop](ffi.md)
+21. [Compiler and editor tools](compiler.md)
+
+## Quick reference
+
+- [Runnable examples](examples.md)
+- [Feature index](feature-index.md)
+- [Current limitations](current-limitations.md)
+
+These pages teach the language without trying to be its specification. Use
+[`LANGUAGE.md`](../LANGUAGE.md) for exact rules and edge cases.

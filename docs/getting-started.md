@@ -57,5 +57,4 @@ Falling off the end of `main` returns `0`.
 
 The generated executable does not need Go, LLVM, or `llvmc` at runtime.
 
-Next: [Language basics](language-basics.md)
-
+[Next: Program basics](basics.md)

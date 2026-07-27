@@ -57,21 +57,26 @@ Run a multi-file example by passing its directory:
 | [`any_demo`](../examples/any_demo/any_demo.llx) | Boxing values into `Any`, `AnyKind`/`AnyName`/`AnyAs`/`AnyFields`/`AnyLen`/`AnyIndex` |
 | [`type_registry_demo`](../examples/type_registry_demo/type_registry_demo.llx) | `TypeId`/`TypeIdOf`/`TypeByName`/`AnyNew`/`AnySet` |
 
-## Packages and standard library
+## Packages
 
 | Example | Shows |
 | --- | --- |
 | [`multifile/main.llx`](../examples/multifile/main.llx), [`shapes.llx`](../examples/multifile/shapes.llx), [`util.llx`](../examples/multifile/util.llx) | One package split across three files |
 | [`imports/app`](../examples/imports/app/main.llx), [`imports/mathutils`](../examples/imports/mathutils/mathutils.llx) | Relative imports and exported names |
+
+## Standard library
+
+| Example | Shows |
+| --- | --- |
 | [`mathutil_demo`](../examples/mathutil_demo/mathutil_demo.llx) | `std:mathutil` |
 | [`strings_demo`](../examples/strings_demo/strings_demo.llx) | `std:strings` |
 | [`slices_demo`](../examples/slices_demo/slices_demo.llx) | `std:slices` |
-| [`collections_demo`](../examples/collections_demo/collections_demo.llx) | `std:collections`; its `SlotMap` tests live in a `tests{}` block inside [`collections.llx`](../std/collections/collections.llx) itself, run via `llvmc -test std/collections` |
+| [`collections_demo`](../examples/collections_demo/collections_demo.llx) | `std:collections` |
 | [`time_demo`](../examples/time_demo/time_demo.llx) | `std:time` |
 | [`scheduler_demo`](../examples/scheduler_demo/scheduler_demo.llx) | `std:scheduler` and coroutines |
-| [`vectors_demo`](../examples/vectors_demo/vectors_demo.llx) | `std:vectors` and `std:rect`; their own tests live in `tests{}` blocks inside [`vectors.llx`](../std/vectors/vectors.llx)/[`rect.llx`](../std/rect/rect.llx) themselves, run via `llvmc -test std/vectors`/`std/rect` |
-| [`rand_demo`](../examples/rand_demo/rand_demo.llx) | `std:rand`; its own tests live in a `tests{}` block inside [`rand.llx`](../std/rand/rand.llx) itself, run via `llvmc -test std/rand` |
-| [`log_demo`](../examples/log_demo/log_demo.llx) | `std:log`; its own tests live in a `tests{}` block inside [`log.llx`](../std/log/log.llx) itself, run via `llvmc -test std/log` |
+| [`vectors_demo`](../examples/vectors_demo/vectors_demo.llx) | `std:vectors` and `std:rect` |
+| [`rand_demo`](../examples/rand_demo/rand_demo.llx) | `std:rand` |
+| [`log_demo`](../examples/log_demo/log_demo.llx) | `std:log` |
 | [`test_demo`](../examples/test_demo/test_demo.llx) | `std:test` and `llvmc -test`; intentionally fails |
 
 ## C interop
@@ -80,3 +85,8 @@ Run a multi-file example by passing its directory:
 | --- | --- |
 | [`scope_timer`](../examples/scope_timer/scope_timer.llx) | Calling Windows APIs with `extern func` |
 
+## Tooling fixture
+
+[`ide_plugin_testing/a.llx`](../examples/ide_plugin_testing/a.llx) is a tiny
+compiler-valid file used while developing the JetBrains plugin. It is indexed
+here for completeness, not as part of the learning path.

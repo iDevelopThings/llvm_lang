@@ -91,12 +91,17 @@ For every new or changed user-visible feature:
 2. Add or update its row in `docs/feature-index.md`.
 3. Update `docs/current-limitations.md` when a limitation is introduced,
    removed, or narrowed.
-4. Update `docs/compiler.md` for CLI/editor behavior or
-   `docs/packages-and-stdlib.md` for package/stdlib behavior.
+4. Update `docs/compiler.md` for CLI/editor behavior,
+   `docs/packages.md` for package behavior, or
+   `docs/standard-library.md` for stdlib behavior.
 5. Add the runnable example to `docs/examples.md`, or explicitly use `—` in
    the feature index when no dedicated example exists.
 6. Keep `docs/README.md` navigation correct when pages are added, renamed, or
    moved.
+
+Every teaching page belongs in the numbered walkthrough in `docs/README.md`
+and links to the previous and next page. Reference pages such as the feature
+index, examples list, and current limitations stay outside that sequence.
 
 Avoid explaining the same feature independently on several pages. Give it one
 main home; other pages should summarize in a sentence and link there.

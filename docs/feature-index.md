@@ -1,88 +1,86 @@
 # Feature index
 
-Use this page when you know what you are looking for. The main guide stays
-short; this index makes the less-common features easy to find.
+Use this page when you already know what you need. `—` means there is no
+dedicated example yet.
 
 ## Core language
 
-| Feature | Documentation | Example |
+| Feature | Main page | Example |
 | --- | --- | --- |
-| Top-level declarations and global initialization | [Language basics](language-basics.md#top-level-code) | [`global_init`](../examples/global_init/global_init.llx) |
-| Variables, zero values, and inferred types | [Language basics](language-basics.md#variables-and-types) | [`features`](../examples/features/features.llx) |
-| Numeric types, untyped literals, and conversions | [Language basics](language-basics.md#variables-and-types) | [`time_demo`](../examples/time_demo/time_demo.llx) |
-| Operators, assignment, `++`, and `--` | [Language basics](language-basics.md#operators) | [`features`](../examples/features/features.llx) |
-| Block and shorthand `if` | [Language basics](language-basics.md#conditions) | — |
-| Three forms of `for`, `break`, and `continue` | [Language basics](language-basics.md#loops) | [`features`](../examples/features/features.llx) |
-| `print`, `args`, and `main` | [Getting started](getting-started.md), [Language basics](language-basics.md#simple-built-ins) | [`hello`](../examples/hello/hello.llx) |
-| Missing-return checking | [Language basics](language-basics.md#functions) | — |
-
-## Data and collections
-
-| Feature | Documentation | Example |
-| --- | --- | --- |
-| Fixed arrays and array-size rules | [Collections](collections.md#fixed-arrays) | [`features`](../examples/features/features.llx) |
-| Dynamic arrays, `make`, `append`, and `len` | [Collections](collections.md#dynamic-arrays) | [`dynamic_arrays`](../examples/dynamic_arrays/dynamic_arrays.llx) |
-| Array, dynamic-array, and string slicing | [Collections](collections.md#slicing) | [`slicing`](../examples/slicing/slicing.llx) |
-| Maps, two-result lookup, `remove`, and key rules | [Collections](collections.md#maps) | [`word_freq`](../examples/word_freq/word_freq.llx) |
-| Array and map range loops | [Collections](collections.md#range-loops) | [`range`](../examples/range/range.llx) |
-
-## User-defined types and ownership
-
-| Feature | Documentation | Example |
-| --- | --- | --- |
-| Structs, methods, and composite literals | [Structs](structs-enums-and-match.md#structs) | [`features`](../examples/features/features.llx) |
-| Constructors | [Constructors](structs-enums-and-match.md#constructors) | [`constructors`](../examples/constructors/constructors.llx) |
-| Operator overloading (`+ - * /`, unary `-`) | [Operator overloading](structs-enums-and-match.md#operator-overloading) | [`operators`](../examples/operators/operators.llx) |
-| Destructors and automatic scope cleanup | [Destructors](memory-and-pointers.md#destructors) | [`destructors`](../examples/destructors/destructors.llx) |
-| Non-copyable types and `move` | [Ownership and move](memory-and-pointers.md#move-semantics) | — |
-| Pointers, `nil`, `new`, and `delete` | [Pointers](memory-and-pointers.md#pointers) | [`pointers`](../examples/pointers/pointers.llx) |
-| Tagged-union enums | [Enums](structs-enums-and-match.md#enums) | [`enums`](../examples/enums/enums.llx) |
-| Enum and value match statements | [Match statements](structs-enums-and-match.md#match-statements) | [`match_values`](../examples/match_values/match_values.llx) |
-| Match expressions and `yield` | [Match expressions](structs-enums-and-match.md#match-expressions) | [`match_expr`](../examples/match_expr/match_expr.llx) |
+| Top-level declarations and globals | [Program basics](basics.md#top-level-declarations) | [`global_init`](../examples/global_init/global_init.llx) |
+| Variables, inference, and zero values | [Program basics](basics.md) | [`features`](../examples/features/features.llx) |
+| Built-in types and numeric conversions | [Types and conversions](types-and-conversions.md) | [`time_demo`](../examples/time_demo/time_demo.llx) |
+| Operators, assignment, `++`, and `--` | [Types and conversions](types-and-conversions.md#operators) | [`features`](../examples/features/features.llx) |
+| Brace and shorthand `if` | [Control flow](control-flow.md) | — |
+| `for`, `break`, and `continue` | [Control flow](control-flow.md#loops) | [`features`](../examples/features/features.llx) |
+| `print`, arguments, and `main` | [Program basics](basics.md#printing) | [`hello`](../examples/hello/hello.llx) |
 
 ## Functions
 
-| Feature | Documentation | Example |
+| Feature | Main page | Example |
 | --- | --- | --- |
-| Multiple returns and immediate unpacking | [Multiple return values](functions-and-generics.md#multiple-return-values) | [`multireturn`](../examples/multireturn/multireturn.llx) |
-| Parallel assignment | [Multiple return values](functions-and-generics.md#multiple-return-values) | [`multi_assign`](../examples/multi_assign/multi_assign.llx) |
-| Function types and first-class free functions | [Function values](functions-and-generics.md#function-values) | [`first_class_functions`](../examples/first_class_functions/first_class_functions.llx) |
-| Variadic parameters and spread calls | [Variadic parameters](functions-and-generics.md#variadic-parameters) | [`variadic`](../examples/variadic/variadic.llx) |
-| Lambdas, closures, and capture rules | [Lambdas and closures](functions-and-generics.md#lambdas-and-closures) | [`closures`](../examples/closures/closures.llx) |
-| Generic functions, structs, and methods | [Generics](functions-and-generics.md#generics) | [`generics`](../examples/generics/generics.llx) |
+| Functions and missing-return checking | [Functions](functions.md) | — |
+| Multiple returns | [Functions](functions.md#multiple-return-values) | [`multireturn`](../examples/multireturn/multireturn.llx) |
+| Parallel assignment | [Functions](functions.md#multiple-return-values) | [`multi_assign`](../examples/multi_assign/multi_assign.llx) |
+| Variadic parameters and spread calls | [Functions](functions.md#variadic-parameters) | [`variadic`](../examples/variadic/variadic.llx) |
+| Function types and free-function values | [Function values](function-values.md) | [`first_class_functions`](../examples/first_class_functions/first_class_functions.llx) |
+| Lambdas and capture | [Function values](function-values.md#lambdas) | [`closures`](../examples/closures/closures.llx) |
+| Generic functions, structs, and methods | [Generics](generics.md) | [`generics`](../examples/generics/generics.llx) |
 
-## Packages and advanced features
+## Collections
 
-| Feature | Documentation | Example |
+| Feature | Main page | Example |
 | --- | --- | --- |
-| Multi-file packages | [Packages](packages-and-stdlib.md#packages) | [`multifile`](../examples/multifile/main.llx) |
-| Relative imports and export rules | [Imports](packages-and-stdlib.md#imports) | [`imports`](../examples/imports/app/main.llx) |
-| Standard-library packages | [Standard library](packages-and-stdlib.md#standard-library) | [Standard-library examples](examples.md#packages-and-standard-library) |
-| Generator functions | [Generators](advanced-features.md#generators) | [`generators`](../examples/generators/generators.llx) |
-| Suspend/resume coroutines | [Coroutines](advanced-features.md#coroutines) | [`coroutines`](../examples/coroutines/coroutines.llx) |
-| Coroutine scheduling | [Coroutines](advanced-features.md#coroutines) | [`scheduler_demo`](../examples/scheduler_demo/scheduler_demo.llx) |
-| `extern func` | [Calling C](advanced-features.md#calling-c) | [`scope_timer`](../examples/scope_timer/scope_timer.llx) |
-| `stub func` / `std/stubs.llx` (IDE signatures) | [LANGUAGE.md Stub functions](../LANGUAGE.md#stub-functions) | — |
-| `cstring` conversions and `cfunc` callbacks | [Calling C](advanced-features.md#calling-c) | — |
-| `Any` boxing and `AnyKind`/`AnyName`/`AnyAs`/`AnyFields`/`AnyLen`/`AnyIndex` | [Any](advanced-features.md#any) | [`any_demo`](../examples/any_demo/any_demo.llx) |
-| `TypeId`/`TypeIdOf`/`TypeByName`/`AnyNew`/`AnySet` | [Type registry](advanced-features.md#type-registry) | [`type_registry_demo`](../examples/type_registry_demo/type_registry_demo.llx) |
+| Fixed arrays | [Collections](collections.md#fixed-arrays) | [`features`](../examples/features/features.llx) |
+| Dynamic arrays, `make`, `append`, and `len` | [Collections](collections.md#dynamic-arrays) | [`dynamic_arrays`](../examples/dynamic_arrays/dynamic_arrays.llx) |
+| Array and string slicing | [Collections](collections.md#slicing) | [`slicing`](../examples/slicing/slicing.llx) |
+| Maps, lookup, and `remove` | [Collections](collections.md#maps) | [`word_freq`](../examples/word_freq/word_freq.llx) |
+| Collection and generator `range` | [Control flow](control-flow.md#range-loops) | [`range`](../examples/range/range.llx) |
 
-## Compiler
+## User-defined types and memory
 
-| Feature | Documentation |
-| --- | --- |
-| Editor diagnostics, hover, and navigation | [Editor support](compiler.md#editor-support) |
-| JIT execution | [Run with the JIT](compiler.md#run-with-the-jit) |
-| Standalone executables | [Build an executable](compiler.md#build-an-executable) |
-| Optimized or unoptimized LLVM IR | [Inspect LLVM IR](compiler.md#inspect-llvm-ir) |
-| Language-level tests | [Run language tests](compiler.md#run-language-tests) |
-| Same-file `tests{}` blocks | [Run language tests](compiler.md#run-language-tests) |
-| Hot reload | [Watch and reload](compiler.md#watch-and-reload) |
-| External libraries | [Link libraries](compiler.md#link-libraries) |
-| Process exit behavior | [Exit codes](compiler.md#exit-codes) |
+| Feature | Main page | Example |
+| --- | --- | --- |
+| Structs, methods, and literals | [Structs](structs.md) | [`features`](../examples/features/features.llx) |
+| Constructors | [Structs](structs.md#constructors) | [`constructors`](../examples/constructors/constructors.llx) |
+| Operator overloading | [Structs](structs.md#operator-overloads) | [`operators`](../examples/operators/operators.llx) |
+| Enums and payloads | [Enums](enums.md) | [`enums`](../examples/enums/enums.llx) |
+| Enum and multi-pattern value matches | [`match`](match.md) | [`match_values`](../examples/match_values/match_values.llx) |
+| Match expressions and `yield` | [`match`](match.md#match-expressions) | [`match_expr`](../examples/match_expr/match_expr.llx) |
+| Destructors and scope cleanup | [Ownership](ownership.md) | [`destructors`](../examples/destructors/destructors.llx) |
+| Non-copyable values and `move` | [Ownership](ownership.md#transfer-with-move) | — |
+| Pointers, `nil`, `new`, and `delete` | [Pointers](pointers.md) | [`pointers`](../examples/pointers/pointers.llx) |
 
-See [Current language limits](current-limitations.md) for unsupported forms
-and important runtime caveats.
+## Packages and library
 
-For precise diagnostics and every rejected edge case, use the full
-[`LANGUAGE.md`](../LANGUAGE.md) specification.
+| Feature | Main page | Example |
+| --- | --- | --- |
+| Multi-file packages | [Packages](packages.md) | [`multifile`](../examples/multifile/main.llx) |
+| Imports, `std:`, `lib:`, and exports | [Packages](packages.md#import-a-package) | [`imports`](../examples/imports/app/main.llx) |
+| Standard-library packages | [Standard library](standard-library.md) | [Library examples](examples.md#standard-library) |
+| `tests {}` and `llvmc -test` | [Testing](testing.md) | [`test_demo`](../examples/test_demo/test_demo.llx) |
+
+## Advanced features
+
+| Feature | Main page | Example |
+| --- | --- | --- |
+| Generators and `yield` | [Generators](generators.md) | [`generators`](../examples/generators/generators.llx) |
+| Coroutines, `await`, and results | [Coroutines](coroutines.md) | [`coroutines`](../examples/coroutines/coroutines.llx) |
+| Coroutine scheduling | [Coroutines](coroutines.md) | [`scheduler_demo`](../examples/scheduler_demo/scheduler_demo.llx) |
+| `Any` boxing and inspection | [`Any` and reflection](any-and-reflection.md) | [`any_demo`](../examples/any_demo/any_demo.llx) |
+| Type IDs, lookup, construction, and mutation | [`Any` and reflection](any-and-reflection.md#type-registry) | [`type_registry_demo`](../examples/type_registry_demo/type_registry_demo.llx) |
+| `extern func`, `cstring`, and `cfunc` | [C interop](ffi.md) | [`scope_timer`](../examples/scope_timer/scope_timer.llx) |
+
+## Compiler and editor
+
+| Feature | Main page | Example |
+| --- | --- | --- |
+| JIT and standalone builds | [Compiler](compiler.md#run-or-build) | [`hello`](../examples/hello/hello.llx) |
+| LLVM IR output | [Compiler](compiler.md#inspect-llvm-ir) | — |
+| Watch mode | [Compiler](compiler.md#watch-and-reload) | — |
+| External library linking | [Compiler](compiler.md#link-libraries) | [`scope_timer`](../examples/scope_timer/scope_timer.llx) |
+| Language server and editor setup | [Compiler](compiler.md#editor-support) | — |
+| Tooling-only `stub func` declarations | [Compiler](compiler.md#tooling-only-stubs) | — |
+| Exit codes | [Compiler](compiler.md#exit-codes) | — |
+
+See [current limitations](current-limitations.md) for unsupported forms.
