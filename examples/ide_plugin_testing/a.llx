@@ -1,11 +1,31 @@
 import "std:collections"
 
+struct testing {
+    A int
+}
+
+func gen[T](v T) T {
+    return v
+}
+
+enum Empty {}
+enum Color {
+    Red
+}
 func main() {
 
     a := 1
     b := 2
     c := a + b
 
-    collections.NewSlotMap[int]()
+
+    col := collections.NewSlotMap[int]()
+
+    var x int
+
+
+    gen(1)
+
+
 
 }
