@@ -179,6 +179,43 @@ func f() int {
 	}
 }
 
+// TestAnyFieldsDirectSelfNesting proves a field value can be range'd via
+// AnyFields directly (for n2, v2 := range AnyFields(v)), not just passed
+// through AnyAs[T] first - a field's own Any value is statically typed Any,
+// so this needs no special support, just confirming it.
+func TestAnyFieldsDirectSelfNesting(t *testing.T) {
+	jm := compileAndJIT(t, `
+struct Point {
+	X int
+	Y int
+}
+struct Line {
+	Start Point
+	End   Point
+}
+
+func f() int {
+	l := Line{Start: Point{X: 1, Y: 2}, End: Point{X: 5, Y: 6}}
+	a := Any(l)
+	sum := 0
+	for _, outer := range AnyFields(a) {
+		for _, inner := range AnyFields(outer) {
+			v, ok := AnyAs[int](inner)
+			if ok {
+				sum = sum + v
+			}
+		}
+	}
+	return sum
+}
+`)
+	// 1+2+5+6 = 14.
+	if got := jm.runInt32(t, "f"); got != 14 {
+		t.Errorf("f() = %d, want 14", got)
+		t.Errorf("f() = %d, want 1256", got)
+	}
+}
+
 func TestAnyFieldsCountMatchesDeclaredFields(t *testing.T) {
 	jm := compileAndJIT(t, `
 struct Point {

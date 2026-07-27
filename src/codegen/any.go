@@ -163,7 +163,20 @@ func (g *Generator) structDescriptor(info *sema.StructInfo) llvm.Value {
 // bytes are copied into a fresh arena slot (never a stack address - see this
 // file's top-of-file doc comment for why), paired with from's own shared
 // type descriptor.
+//
+// Any(x) where x is itself already Any is specified as a flattening no-op
+// copy (LANGUAGE.md's "Any" section): v is already the real {dataPtr,
+// descriptorPtr} pair, so it's returned unchanged rather than re-wrapped in
+// a fresh box that would report TypeAny as its own kind - genConversion's
+// from.Kind == to.Kind check already takes this same shortcut before ever
+// calling here, but typeDescriptorFor has no TypeAny entry of its own (Any
+// isn't in anyPrimitiveKinds), so this case is handled here too rather than
+// relying solely on that caller never changing.
 func (g *Generator) genAnyBox(from sema.Type, v llvm.Value) llvm.Value {
+	if from.Kind == sema.TypeAny {
+		return v
+	}
+
 	elemLLType := g.llvmType(from)
 	buf := g.genArenaAlloc(llvm.SizeOf(elemLLType))
 	g.builder.CreateStore(v, buf)
