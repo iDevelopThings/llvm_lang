@@ -1454,16 +1454,14 @@ func (r *resolver) resolvePattern(scope *Scope, pattern ast.NodeIndex) {
 // pattern-resolution paths applies (a real enum-variant pattern with fresh
 // bindings - resolveMemberPatternRef - or an ordinary value expression -
 // resolveExpr), leaving the *real* resolution (which does record/report) to
-// whichever of those two it actually calls next.
+// whichever of those two it actually calls next. n's own object may itself be
+// a nested MemberExpr (`pkg.Type.Variant` - see peekQualifierSym).
 func (r *resolver) patternEnumVariantRef(scope *Scope, n ast.NodeIndex) (*Symbol, bool) {
 	if r.tree.Nodes[n].Kind != enums.NodeKinds.MemberExpr {
 		return nil, false
 	}
 	object := r.tree.Child(n, 0)
-	if r.tree.Nodes[object].Kind != enums.NodeKinds.Ident {
-		return nil, false
-	}
-	objSym, ok := scope.Lookup(r.tree.Text(object))
+	objSym, ok := r.peekQualifierSym(scope, object)
 	if !ok || objSym.Kind != SymEnum {
 		return nil, false
 	}
@@ -1490,6 +1488,30 @@ func (r *resolver) binaryPointerPatternParts(scope *Scope, pattern ast.NodeIndex
 		return ast.InvalidNode, ast.InvalidNode, false
 	}
 	return l, rr, true
+}
+
+// peekQualifierSym is patternEnumVariantRef's own qualifier resolver - the
+// side-effect-free counterpart to resolveQualifierRef, since a pattern's
+// object is only ever a *peek* (patternEnumVariantRef's own doc comment: no
+// Refs/diagnostics until the caller commits to the enum-variant reading).
+// Resolves a bare name (Ident) by ordinary lexical lookup, or a further-
+// nested `pkg.Type` chain (MemberExpr) by recursing one hop at a time - the
+// package-member lookup a real resolveQualifierRef/resolvePackageMemberExpr
+// would do, just without recording anything.
+func (r *resolver) peekQualifierSym(scope *Scope, n ast.NodeIndex) (*Symbol, bool) {
+	switch r.tree.Nodes[n].Kind {
+	case enums.NodeKinds.Ident:
+		return scope.Lookup(r.tree.Text(n))
+	case enums.NodeKinds.MemberExpr:
+		object := r.tree.Child(n, 0)
+		objSym, ok := r.peekQualifierSym(scope, object)
+		if !ok || objSym.Kind != SymPackage {
+			return nil, false
+		}
+		return objSym.Package.Scope.LookupLocal(r.tree.Text(n))
+	default:
+		return nil, false
+	}
 }
 
 // resolveMemberPatternRef records n's own EnumName.Variant reference - given
@@ -1598,49 +1620,71 @@ func (r *resolver) resolveType(scope *Scope, n ast.NodeIndex) {
 // (`Shape.Triangle{...}` - see LANGUAGE.md's "Enums" section: a struct-style
 // variant's construction syntax reuses this project's existing keyed-literal
 // grammar, so its own type-expr position is a MemberExpr exactly like a
-// package-qualified struct type's is). Neither needs any type information at
-// all (a package's own scope, or an enum's own variant catalog, is already
-// fully built by the time either is referenced), so - unlike an ordinary
-// struct-value field/method MemberExpr - both resolve entirely here, during
-// Resolve, not deferred to Check.
+// package-qualified struct type's is). Its own object may itself be a further
+// nested MemberExpr (`pkg.Type.Variant` - the enum type reached one hop
+// before the variant), resolved via resolveQualifierRef. Neither needs any
+// type information at all (a package's own scope, or an enum's own variant
+// catalog, is already fully built by the time either is referenced), so -
+// unlike an ordinary struct-value field/method MemberExpr - both resolve
+// entirely here, during Resolve, not deferred to Check.
 func (r *resolver) resolveTypeMemberExpr(scope *Scope, n ast.NodeIndex) {
 	object := r.tree.Child(n, 0)
-	if r.tree.Nodes[object].Kind != enums.NodeKinds.Ident {
-		r.errorAt(n, "invalid type expression")
-		return
-	}
-	objName := r.tree.Text(object)
-	objSym, ok := scope.Lookup(objName)
+	objSym, ok := r.resolveQualifierRef(scope, object)
 	if !ok {
-		r.errorAtLabel(object, "not found", "undefined: %s", objName)
 		return
 	}
-	r.info.Refs[object] = objSym
 
 	if objSym.Kind == SymEnum {
 		r.resolveEnumVariantRef(n, objSym.EnumInfo)
 		return
 	}
 	if objSym.Kind != SymPackage {
-		r.errorAt(n, "%s is not a package or a declared enum type", objName)
+		r.errorAt(n, "%s is not a package or a declared enum type", r.tree.Text(object))
 		return
 	}
 
 	name := r.tree.Text(n)
 	sym, ok := objSym.Package.Scope.LookupLocal(name)
 	if !ok {
-		r.errorAtLabel(n, "not found", "undefined: %s.%s", objName, name)
+		r.errorAtLabel(n, "not found", "undefined: %s.%s", r.tree.Text(object), name)
 		return
 	}
 	if !sym.Kind.IsType() {
-		r.errorAt(n, "%s.%s is not a type (declared as %s)", objName, name, sym.Kind)
+		r.errorAt(n, "%s.%s is not a type (declared as %s)", r.tree.Text(object), name, sym.Kind)
 		return
 	}
 	if !sym.Exported {
-		r.errorAtLabel(n, "unexported symbol", "%s.%s is not exported", objName, name)
+		r.errorAtLabel(n, "unexported symbol", "%s.%s is not exported", r.tree.Text(object), name)
 		return
 	}
 	r.info.Refs[n] = sym
+}
+
+// resolveQualifierRef resolves n - a MemberExpr's own object/qualifier
+// position - to whatever symbol it names: a bare package/enum name (Ident,
+// an ordinary lexical lookup) or a further-nested `pkg.Type` chain
+// (MemberExpr, recursing through resolveTypeMemberExpr itself), so a
+// `pkg.Type.Variant` qualifier chain resolves one hop at a time regardless of
+// depth. Any other node shape is not a valid qualifier at all.
+func (r *resolver) resolveQualifierRef(scope *Scope, n ast.NodeIndex) (*Symbol, bool) {
+	switch r.tree.Nodes[n].Kind {
+	case enums.NodeKinds.Ident:
+		name := r.tree.Text(n)
+		sym, ok := scope.Lookup(name)
+		if !ok {
+			r.errorAtLabel(n, "not found", "undefined: %s", name)
+			return nil, false
+		}
+		r.info.Refs[n] = sym
+		return sym, true
+	case enums.NodeKinds.MemberExpr:
+		r.resolveTypeMemberExpr(scope, n)
+		sym, ok := r.info.Refs[n]
+		return sym, ok
+	default:
+		r.errorAt(n, "invalid type expression")
+		return nil, false
+	}
 }
 
 // resolveEnumVariantRef resolves n's own Tok (see ast.Node's MemberExpr doc
@@ -1727,17 +1771,20 @@ func (r *resolver) resolveExpr(scope *Scope, n ast.NodeIndex) {
 		// resolved right here, same as resolveTypeMemberExpr's type-position
 		// counterpart - neither needs any type information, unlike an
 		// ordinary struct field/method access, which is deliberately left
-		// for type-checking (needs the object's type).
+		// for type-checking (needs the object's type). The object itself may
+		// be a nested MemberExpr (`pkg.Type.Variant`, object = `pkg.Type`) -
+		// the recursive resolveExpr(object) call above already resolved that
+		// hop and recorded its own Refs entry, so checking r.info.Refs[object]
+		// here (rather than requiring object to be a bare Ident) generalizes
+		// to a qualifier chain of any depth for free.
 		object := r.tree.Child(n, 0)
 		r.resolveExpr(scope, object)
-		if r.tree.Nodes[object].Kind == enums.NodeKinds.Ident {
-			if objSym, ok := r.info.Refs[object]; ok {
-				switch objSym.Kind {
-				case SymPackage:
-					r.resolvePackageMemberExpr(n, objSym)
-				case SymEnum:
-					r.resolveEnumVariantRef(n, objSym.EnumInfo)
-				}
+		if objSym, ok := r.info.Refs[object]; ok {
+			switch objSym.Kind {
+			case SymPackage:
+				r.resolvePackageMemberExpr(n, objSym)
+			case SymEnum:
+				r.resolveEnumVariantRef(n, objSym.EnumInfo)
 			}
 		}
 	case enums.NodeKinds.MultiValueExpr:

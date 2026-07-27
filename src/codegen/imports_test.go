@@ -349,6 +349,137 @@ func main() int {
 	}
 }
 
+// TestImports_PackageQualifiedVarRead covers reading an exported
+// package-level `var` through a package qualifier (`lib.X`) - genAddr's own
+// MemberExpr case previously always treated a MemberExpr as a struct-field
+// access, computing an address for the bare `lib` identifier itself (an
+// import alias with no real storage) and panicking; it must instead load the
+// foreign package's own global directly (isPackageQualifiedMember).
+func TestImports_PackageQualifiedVarRead(t *testing.T) {
+	jm := compileProgramAndJIT(t, []programPackage{
+		{
+			key: "lib",
+			files: []packageFile{
+				{"lib/lib.llx", `
+var X int = 42
+`},
+			},
+		},
+		{
+			key: "app",
+			files: []packageFile{
+				{"app/main.llx", `
+import "./lib"
+
+func main() int {
+	return lib.X
+}
+`},
+			},
+			imports: map[int][]sema.FileImport{
+				0: {{LocalName: "lib", TargetKey: "lib"}},
+			},
+		},
+	})
+	if got := jm.runInt32(t, "main"); got != 42 {
+		t.Errorf("main() = %d, want 42", got)
+	}
+}
+
+// TestImports_CrossPackageEnumUnitVariantConstruction covers constructing and
+// matching on a `pkg.Type.Variant` unit variant - a nested-MemberExpr
+// qualifier chain (object = `os.Error`, itself a MemberExpr) that
+// resolveTypeMemberExpr/resolveExpr previously only recognized as a single
+// bare-Ident qualifier.
+func TestImports_CrossPackageEnumUnitVariantConstruction(t *testing.T) {
+	jm := compileProgramAndJIT(t, []programPackage{
+		{
+			key: "os",
+			files: []packageFile{
+				{"os/os.llx", `
+enum Error {
+	Ok,
+	NotFound
+}
+`},
+			},
+		},
+		{
+			key: "app",
+			files: []packageFile{
+				{"app/main.llx", `
+import "./os"
+
+func main() int {
+	e := os.Error.Ok
+	match e {
+		os.Error.Ok => {
+			return 1
+		}
+		os.Error.NotFound => {
+			return 0
+		}
+	}
+}
+`},
+			},
+			imports: map[int][]sema.FileImport{
+				0: {{LocalName: "os", TargetKey: "os"}},
+			},
+		},
+	})
+	if got := jm.runInt32(t, "main"); got != 1 {
+		t.Errorf("main() = %d, want 1", got)
+	}
+}
+
+// TestImports_CrossPackageEnumMatchBindsTupleVariant covers a match arm
+// pattern reaching the identical `pkg.Type.Variant` qualifier chain through
+// pattern resolution (patternEnumVariantRef/peekQualifierSym) instead of a
+// plain expression - the tuple variant's own associated value must actually
+// bind, mirroring the compiler_gaps/cross_package_enum_match repro.
+func TestImports_CrossPackageEnumMatchBindsTupleVariant(t *testing.T) {
+	jm := compileProgramAndJIT(t, []programPackage{
+		{
+			key: "strings",
+			files: []packageFile{
+				{"strings/strings.llx", `
+enum IntParseResult {
+	Ok(int),
+	Err
+}
+`},
+			},
+		},
+		{
+			key: "app",
+			files: []packageFile{
+				{"app/main.llx", `
+import "./strings"
+
+func main() int {
+	r := strings.IntParseResult.Ok(13)
+	match r {
+		strings.IntParseResult.Ok(n) => {
+			return n
+		}
+		strings.IntParseResult.Err => {
+			return -1
+		}
+	}
+}
+`},
+			},
+			imports: map[int][]sema.FileImport{
+				0: {{LocalName: "strings", TargetKey: "strings"}},
+			},
+		},
+	})
+	if got := jm.runInt32(t, "main"); got != 13 {
+		t.Errorf("main() = %d, want 13", got)
+	}
+}
+
 // TestImports_ClosureReturnedAcrossPackageBoundary covers a lambda created
 // inside an imported package's own exported function, returned across the
 // package boundary, and called from the importing package - proving the

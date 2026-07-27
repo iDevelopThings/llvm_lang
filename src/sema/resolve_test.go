@@ -212,6 +212,29 @@ func TestArrayTypeElementResolves(t *testing.T) {
 	}
 }
 
+// TestNestedStructFieldChainStillDefersToCheck is a regression test for the
+// value-position MemberExpr generalization that made resolveExpr recognize a
+// `pkg.Type.Variant` qualifier chain (previously only a single bare-Ident
+// object was checked against Info.Refs) - an ordinary nested struct field
+// access (`o.inner.x`, neither hop a package/enum qualifier) must still defer
+// entirely to Check: Resolve must record nothing for the inner MemberExpr
+// (`o.inner`) itself, exactly as before.
+func TestNestedStructFieldChainStillDefersToCheck(t *testing.T) {
+	src := "struct Inner {\n\tx int\n}\n" +
+		"struct Outer {\n\tinner Inner\n}\n" +
+		"func f(o Outer) int {\n\treturn o.inner.x\n}\n"
+	tree, info := resolveSrc(t, src)
+	funcDecl := tree.Children(tree.Root)[2]
+	body := tree.Child(funcDecl, 5)
+	retStmt := tree.Child(body, 0)
+	outerMember := tree.Child(retStmt, 0)
+	innerMember := tree.Child(outerMember, 0)
+
+	if _, ok := info.Refs[innerMember]; ok {
+		t.Error("nested struct field access must not be resolved by Resolve (needs type info, deferred to Check)")
+	}
+}
+
 func TestFuncScopeOwnerMatchesDeclNode(t *testing.T) {
 	// Sanity check for closure-readiness: a function's Scope.Owner must be
 	// its own FuncDecl node, so a later capture-analysis pass can compare

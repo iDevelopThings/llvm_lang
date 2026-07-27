@@ -2445,6 +2445,12 @@ A package-qualified name can also appear in **type position**
 (`var p mathutils.Point`, a composite literal's type `mathutils.Point{...}`)
 - the exact same export rule applies there too.
 
+A package-qualified name also reaches an exported top-level **var**
+(`mathutils.Count`, read like any other value) and an exported **enum**'s
+variants (`pkg.Shape.Circle`, `pkg.Shape.Circle(1.0)`, or as a match-arm
+pattern - see "Enums" and "match" below) - the qualifier chain resolves one
+hop at a time regardless of how many packages/types it crosses.
+
 **Within one package, nothing here changes:** case still never matters for
 same-package visibility (see the "Multi-file packages" section above) -
 `Exported`/export enforcement only ever applies to a name reached through an

@@ -80,6 +80,14 @@ func (g *Generator) genAddr(n ast.NodeIndex) llvm.Value {
 			// like any other addressable rvalue (see default case below).
 			return g.genSpillToTemp(n)
 		}
+		if g.isPackageQualifiedMember(n) {
+			// `lib.X` - a foreign package's own top-level var (see
+			// LANGUAGE.md's "Imports" section). Its object names an import
+			// alias, not a struct value - there is no receiver to compute an
+			// address through, only the foreign global's own real storage
+			// (g.globals, from that package's own genGlobalVarDecl).
+			return g.addrOfSymbol(g.info.Refs[n])
+		}
 		objNode := g.tree.Child(n, 0)
 		base, structInfo := g.genReceiverAddr(objNode)
 		layout := g.structLayouts[structInfo]
@@ -1261,7 +1269,7 @@ func (g *Generator) genCallExpr(n ast.NodeIndex) llvm.Value {
 		return g.genConversion(n, argNodes[0])
 	}
 	switch {
-	case g.tree.Nodes[calleeNode].Kind == enums.NodeKinds.MemberExpr && g.isPackageQualifiedCall(calleeNode):
+	case g.tree.Nodes[calleeNode].Kind == enums.NodeKinds.MemberExpr && g.isPackageQualifiedMember(calleeNode):
 		// `mathutils.Add(...)` - a plain direct call to a free function
 		// exported from another package (see LANGUAGE.md's "Imports"
 		// section), already resolved straight to its own *sema.Symbol by
@@ -1282,15 +1290,18 @@ func (g *Generator) genCallExpr(n ast.NodeIndex) llvm.Value {
 	}
 }
 
-// isPackageQualifiedCall reports whether calleeNode (a MemberExpr) is a
-// package-qualified function call - its object is a bare Ident resolving
-// (via Info.Refs) to a SymPackage symbol (an import binding), as opposed to
-// an ordinary struct-value method call. Mirrors sema's own
-// memberObjectIsPackage (sema/typecheck.go) exactly, for the identical
-// reason isDirectFuncCall/isConversionCall already mirror their own sema
-// counterparts - see CODEGEN.md.
-func (g *Generator) isPackageQualifiedCall(calleeNode ast.NodeIndex) bool {
-	objNode := g.tree.Child(calleeNode, 0)
+// isPackageQualifiedMember reports whether memberNode (a MemberExpr) is a
+// package-qualified access (`pkg.Name`, whether called or just read) - its
+// object is a bare Ident resolving (via Info.Refs) to a SymPackage symbol
+// (an import binding), as opposed to an ordinary struct-value field/method
+// access. Mirrors sema's own memberObjectIsPackage (sema/typecheck.go)
+// exactly, for the identical reason isDirectFuncCall/isConversionCall
+// already mirror their own sema counterparts - see CODEGEN.md. Shared by
+// genCallExpr's own call-site dispatch and genAddr's MemberExpr case (a
+// package-qualified var read has no struct receiver to compute an address
+// through at all).
+func (g *Generator) isPackageQualifiedMember(memberNode ast.NodeIndex) bool {
+	objNode := g.tree.Child(memberNode, 0)
 	if g.tree.Nodes[objNode].Kind != enums.NodeKinds.Ident {
 		return false
 	}

@@ -86,10 +86,9 @@ Run a multi-file example by passing its directory:
 
 ## Compiler gaps
 
-[compiler_gaps](../examples/compiler_gaps/README.md) holds minimal
-repros for known language/compiler gaps (cross-package enums, package
-vars, method-on-variant construction). Each case documents expected vs
-actual behavior.
+[compiler_gaps](../examples/compiler_gaps/README.md) held minimal repros
+for language/compiler gaps found while growing `std/` - all are now fixed
+and turned into regression tests (see that page for pointers to them).
 
 ## C interop
 

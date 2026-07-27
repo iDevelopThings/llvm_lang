@@ -72,9 +72,6 @@ rejection rules live in [`LANGUAGE.md`](../LANGUAGE.md).
 
 ## Packages, FFI, and tools
 
-- Cross-package enum variant construction (pkg.Error.Ok) is unsupported;
-  export constructor helpers (for example os.Ok()) instead. Matching a
-  foreign enum's variants by qualified name has the same limit.
 - Imports have no aliases. The `lib:` namespace is reserved but not
   implemented.
 - C interop targets 64-bit Windows through mingw64. It has no external

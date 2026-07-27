@@ -473,3 +473,201 @@ func TestImports_QualifierNotAPackageInTypePositionIsError(t *testing.T) {
 
 	requireDiagContaining(t, resolveAndCheckProgram(t, units), "is not a package")
 }
+
+// TestImports_PackageQualifiedVarRead covers reading an exported
+// package-level `var` through a package qualifier (`lib.X`) - resolved the
+// same way any other package member is (resolvePackageMemberExpr), and typed
+// like a bare identifier reference (checkMemberExpr's own memberObjectIsPackage
+// branch).
+func TestImports_PackageQualifiedVarRead(t *testing.T) {
+	libTree := mustParseFile(t, "lib/lib.llx", "var X int = 42\n")
+	mainTree := mustParseFile(t, "app/main.llx", "import \"./lib\"\n\nfunc main() int {\n\treturn lib.X\n}\n")
+
+	units := []*PackageUnit{
+		{Key: "lib", Name: "lib", Trees: []*ast.Tree{libTree}},
+		{
+			Key:   "app",
+			Name:  "app",
+			Trees: []*ast.Tree{mainTree},
+			FileImports: map[*ast.Tree][]FileImport{
+				mainTree: {{LocalName: "lib", TargetKey: "lib"}},
+			},
+		},
+	}
+
+	requireNoDiags(t, resolveAndCheckProgram(t, units))
+}
+
+// TestImports_UnexportedVarIsError covers the negative half of
+// TestImports_PackageQualifiedVarRead: an unexported (lowercase) package-level
+// var stays unreachable through a package qualifier, same as any other
+// unexported top-level symbol.
+func TestImports_UnexportedVarIsError(t *testing.T) {
+	libTree := mustParseFile(t, "lib/lib.llx", "var x int = 42\n")
+	mainTree := mustParseFile(t, "app/main.llx", "import \"./lib\"\n\nfunc main() int {\n\treturn lib.x\n}\n")
+
+	units := []*PackageUnit{
+		{Key: "lib", Name: "lib", Trees: []*ast.Tree{libTree}},
+		{
+			Key:   "app",
+			Name:  "app",
+			Trees: []*ast.Tree{mainTree},
+			FileImports: map[*ast.Tree][]FileImport{
+				mainTree: {{LocalName: "lib", TargetKey: "lib"}},
+			},
+		},
+	}
+
+	requireDiagContaining(t, resolveAndCheckProgram(t, units), "not exported")
+}
+
+// TestImports_CrossPackageEnumUnitVariantConstruction covers a
+// `pkg.Type.Variant` qualifier chain (a nested MemberExpr - object =
+// `pkg.Type`, itself a MemberExpr, not a bare Ident) constructing a unit
+// variant of another package's enum - resolveTypeMemberExpr/resolveExpr's
+// MemberExpr case previously only recognized a single-hop qualifier.
+func TestImports_CrossPackageEnumUnitVariantConstruction(t *testing.T) {
+	osTree := mustParseFile(t, "os/os.llx", "enum Error {\n\tOk,\n\tNotFound\n}\n")
+	mainTree := mustParseFile(t, "app/main.llx", "import \"./os\"\n\nfunc main() {\n\te := os.Error.Ok\n}\n")
+
+	units := []*PackageUnit{
+		{Key: "os", Name: "os", Trees: []*ast.Tree{osTree}},
+		{
+			Key:   "app",
+			Name:  "app",
+			Trees: []*ast.Tree{mainTree},
+			FileImports: map[*ast.Tree][]FileImport{
+				mainTree: {{LocalName: "os", TargetKey: "os"}},
+			},
+		},
+	}
+
+	requireNoDiags(t, resolveAndCheckProgram(t, units))
+}
+
+// TestImports_CrossPackageEnumTupleVariantConstruction covers the tuple-
+// variant call form of the same qualifier chain (`pkg.Type.Variant(args)` -
+// the callee is the identical nested-MemberExpr shape).
+func TestImports_CrossPackageEnumTupleVariantConstruction(t *testing.T) {
+	stringsTree := mustParseFile(t, "strings/strings.llx", "enum IntParseResult {\n\tOk(int),\n\tErr\n}\n")
+	mainTree := mustParseFile(t, "app/main.llx", "import \"./strings\"\n\nfunc main() int {\n\tr := strings.IntParseResult.Ok(5)\n\treturn 0\n}\n")
+
+	units := []*PackageUnit{
+		{Key: "strings", Name: "strings", Trees: []*ast.Tree{stringsTree}},
+		{
+			Key:   "app",
+			Name:  "app",
+			Trees: []*ast.Tree{mainTree},
+			FileImports: map[*ast.Tree][]FileImport{
+				mainTree: {{LocalName: "strings", TargetKey: "strings"}},
+			},
+		},
+	}
+
+	requireNoDiags(t, resolveAndCheckProgram(t, units))
+}
+
+// TestImports_CrossPackageEnumMatchBindsTupleVariant covers the same
+// qualifier chain reached through match-pattern resolution instead of a
+// plain expression (patternEnumVariantRef/peekQualifierSym) - a tuple-variant
+// pattern's binding must still work.
+func TestImports_CrossPackageEnumMatchBindsTupleVariant(t *testing.T) {
+	stringsTree := mustParseFile(t, "strings/strings.llx", "enum IntParseResult {\n\tOk(int),\n\tErr\n}\n")
+	mainTree := mustParseFile(t, "app/main.llx", `import "./strings"
+
+func main() int {
+	r := strings.IntParseResult.Ok(5)
+	match r {
+		strings.IntParseResult.Ok(n) => {
+			return n
+		}
+		strings.IntParseResult.Err => {
+			return -1
+		}
+	}
+}
+`)
+
+	units := []*PackageUnit{
+		{Key: "strings", Name: "strings", Trees: []*ast.Tree{stringsTree}},
+		{
+			Key:   "app",
+			Name:  "app",
+			Trees: []*ast.Tree{mainTree},
+			FileImports: map[*ast.Tree][]FileImport{
+				mainTree: {{LocalName: "strings", TargetKey: "strings"}},
+			},
+		},
+	}
+
+	requireNoDiags(t, resolveAndCheckProgram(t, units))
+}
+
+// TestImports_CrossPackageEnumVariantUnexportedEnumIsError covers the
+// negative half: an unexported (lowercase) enum type stays unreachable
+// through a `pkg.Type.Variant` chain, exactly like any other unexported
+// package member - the chain must not silently construct anyway.
+func TestImports_CrossPackageEnumVariantUnexportedEnumIsError(t *testing.T) {
+	osTree := mustParseFile(t, "os/os.llx", "enum error {\n\tOk\n}\n")
+	mainTree := mustParseFile(t, "app/main.llx", "import \"./os\"\n\nfunc main() {\n\te := os.error.Ok\n}\n")
+
+	units := []*PackageUnit{
+		{Key: "os", Name: "os", Trees: []*ast.Tree{osTree}},
+		{
+			Key:   "app",
+			Name:  "app",
+			Trees: []*ast.Tree{mainTree},
+			FileImports: map[*ast.Tree][]FileImport{
+				mainTree: {{LocalName: "os", TargetKey: "os"}},
+			},
+		},
+	}
+
+	requireDiagContaining(t, resolveAndCheckProgram(t, units), "not exported")
+}
+
+// TestImports_CrossPackageEnumVariantUndefinedTypeIsError covers naming a
+// type the target package never declared at all as the first hop of a
+// `pkg.Type.Variant` chain - a clean "undefined: pkg.Type" diagnostic, not a
+// panic or a cascading/confusing message.
+func TestImports_CrossPackageEnumVariantUndefinedTypeIsError(t *testing.T) {
+	osTree := mustParseFile(t, "os/os.llx", "enum Error {\n\tOk\n}\n")
+	mainTree := mustParseFile(t, "app/main.llx", "import \"./os\"\n\nfunc main() {\n\te := os.NotAType.Ok\n}\n")
+
+	units := []*PackageUnit{
+		{Key: "os", Name: "os", Trees: []*ast.Tree{osTree}},
+		{
+			Key:   "app",
+			Name:  "app",
+			Trees: []*ast.Tree{mainTree},
+			FileImports: map[*ast.Tree][]FileImport{
+				mainTree: {{LocalName: "os", TargetKey: "os"}},
+			},
+		},
+	}
+
+	requireDiagContaining(t, resolveAndCheckProgram(t, units), "undefined: os.NotAType")
+}
+
+// TestImports_CrossPackageEnumVariantUndefinedVariantIsError covers naming a
+// real cross-package enum type but a variant it doesn't declare - a clean
+// "undefined: Error.Nonexistent" diagnostic (resolveEnumVariantRef, the exact
+// same message a same-package undefined variant already gets).
+func TestImports_CrossPackageEnumVariantUndefinedVariantIsError(t *testing.T) {
+	osTree := mustParseFile(t, "os/os.llx", "enum Error {\n\tOk\n}\n")
+	mainTree := mustParseFile(t, "app/main.llx", "import \"./os\"\n\nfunc main() {\n\te := os.Error.Nonexistent\n}\n")
+
+	units := []*PackageUnit{
+		{Key: "os", Name: "os", Trees: []*ast.Tree{osTree}},
+		{
+			Key:   "app",
+			Name:  "app",
+			Trees: []*ast.Tree{mainTree},
+			FileImports: map[*ast.Tree][]FileImport{
+				mainTree: {{LocalName: "os", TargetKey: "os"}},
+			},
+		},
+	}
+
+	requireDiagContaining(t, resolveAndCheckProgram(t, units), "undefined: Error.Nonexistent")
+}

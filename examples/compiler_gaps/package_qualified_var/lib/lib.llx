@@ -1,2 +1,0 @@
-// Exported package-level var for the app-side repro.
-var X int = 42
