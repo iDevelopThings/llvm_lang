@@ -60,6 +60,7 @@ dedicated example yet.
 | Imports, `std:`, `lib:`, and exports | [Packages](packages.md#import-a-package) | [`imports`](../examples/imports/app/main.llx) |
 | Standard-library packages | [Standard library](standard-library.md) | [Library examples](examples.md#standard-library) |
 | `tests {}` and `llvmc -test` | [Testing](testing.md) | [`test_demo`](../examples/test_demo/test_demo.llx) |
+| Testing a directory of packages (`-test -all`) | [Testing a whole directory tree](testing.md#testing-a-whole-directory-tree) | — |
 
 ## Advanced features
 

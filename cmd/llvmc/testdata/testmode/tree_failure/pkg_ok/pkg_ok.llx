@@ -1,0 +1,5 @@
+import "std:test"
+
+func TestOk(t *test.Runner) {
+    t.AssertEqual(1 + 1, 2, "1+1")
+}

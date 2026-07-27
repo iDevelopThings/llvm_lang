@@ -5,9 +5,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"llvm_lang/src/loader"
 
@@ -336,5 +338,144 @@ func TestBinary_TestMode_EmitLLVM(t *testing.T) {
 	}
 	if !strings.Contains(ir, "@main") {
 		t.Fatalf("expected the synthesized driver's own @main, got:\n%s", ir)
+	}
+}
+
+// --- -test -all: directory-of-packages mode (runTestAll, test.go).
+
+// TestRun_TestAll_RequiresTestMode confirms -all without -test is a plain
+// usage error, never silently ignored.
+func TestRun_TestAll_RequiresTestMode(t *testing.T) {
+	var stderr bytes.Buffer
+	code := run([]string{"-all", "testdata/testmode/tree_basic"}, &stderr)
+	if code != exitUsage {
+		t.Fatalf("exit = %d, want %d; stderr:\n%s", code, exitUsage, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "-all requires -test") {
+		t.Fatalf("stderr = %q, want -all-requires-test message", stderr.String())
+	}
+}
+
+// TestRun_TestAll_RejectsOutput confirms -test -all -o is a usage error -
+// multiple discovered packages would otherwise collide on one output path.
+func TestRun_TestAll_RejectsOutput(t *testing.T) {
+	var stderr bytes.Buffer
+	code := run([]string{"-test", "-all", "-o", "out.exe", "testdata/testmode/tree_basic"}, &stderr)
+	if code != exitUsage {
+		t.Fatalf("exit = %d, want %d; stderr:\n%s", code, exitUsage, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "-all cannot be used with -o") {
+		t.Fatalf("stderr = %q, want -all/-o conflict message", stderr.String())
+	}
+}
+
+// TestRun_TestAll_NoPackagesFound confirms a directory with no loadable
+// package anywhere in it (not even the root) is still a usage error, not a
+// silent empty PASS.
+func TestRun_TestAll_NoPackagesFound(t *testing.T) {
+	dir := t.TempDir()
+	var stderr bytes.Buffer
+	code := run([]string{"-test", "-all", dir}, &stderr)
+	if code != exitUsage {
+		t.Fatalf("exit = %d, want %d; stderr:\n%s", code, exitUsage, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "no packages found under") {
+		t.Fatalf("stderr = %q, want no-packages-found message", stderr.String())
+	}
+}
+
+// TestBinary_TestAll_Basic covers testdata/testmode/tree_basic: pkg_a and
+// pkg_b each pass, nested/deep (two levels down) is still discovered and
+// passes, and pkg_empty (zero Test* funcs) is silently skipped rather than
+// counted as run or failed.
+func TestBinary_TestAll_Basic(t *testing.T) {
+	dir := filepath.Join("testdata", "testmode", "tree_basic")
+	out, err := exec.Command(llvmcPath, "-test", "-all", dir).CombinedOutput()
+	if err != nil {
+		t.Fatalf("llvmc -test -all: %v\nout:\n%s", err, out)
+	}
+	got := string(out)
+	for _, want := range []string{
+		"--- PASS: TestA",
+		"--- PASS: TestB",
+		"--- PASS: TestDeep",
+		"=== SUMMARY: 3 package(s) run, 0 failed",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q; out:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "pkg_empty") {
+		t.Errorf("pkg_empty (zero tests) should never be mentioned in the walk; out:\n%s", got)
+	}
+	lines := strings.Split(strings.TrimRight(got, "\r\n"), "\n")
+	if !slices.Contains(lines, "PASS") {
+		t.Errorf("missing overall PASS summary line; out:\n%s", got)
+	}
+	if !tookDurationRe.MatchString(got) {
+		t.Errorf("summary line missing a %q-style total duration; out:\n%s", "took 1.23ms", got)
+	}
+}
+
+// tookDurationRe matches runTestAll's own aggregate "took <n.nn><unit>"
+// figure - see formatDuration's doc comment for why it mirrors
+// std/time.FormattedDuration's unit/precision convention rather than Go's
+// own time.Duration.String().
+var tookDurationRe = regexp.MustCompile(`took \d+\.\d\d(ns|us|ms|s)`)
+
+// TestFormatDuration mirrors std/time.llx's own
+// TestFormattedDurationPicksUnit/Boundaries cases, proving formatDuration
+// (the Go-side counterpart used only by runTestAll's aggregate line) picks
+// the identical unit/precision.
+func TestFormatDuration(t *testing.T) {
+	cases := []struct {
+		d    time.Duration
+		want string
+	}{
+		{500 * time.Nanosecond, "500.00ns"},
+		{1230 * time.Nanosecond, "1.23us"},
+		{time.Microsecond, "1.00us"},
+		{1500 * time.Microsecond, "1.50ms"},
+		{time.Millisecond, "1.00ms"},
+		{1500 * time.Millisecond, "1.50s"},
+		{time.Second, "1.00s"},
+		{0, "0.00ns"},
+	}
+	for _, c := range cases {
+		if got := formatDuration(c.d); got != c.want {
+			t.Errorf("formatDuration(%v) = %q, want %q", c.d, got, c.want)
+		}
+	}
+}
+
+// TestBinary_TestAll_FailureDoesNotAbortWalk covers
+// testdata/testmode/tree_failure: pkg_fail (sorted first) deliberately
+// fails, but pkg_ok and pkg_ok2 (sorted after it) still run and show PASS -
+// the walk must not stop at the first failure - and the aggregate exit code
+// and summary line reflect the one failure.
+func TestBinary_TestAll_FailureDoesNotAbortWalk(t *testing.T) {
+	dir := filepath.Join("testdata", "testmode", "tree_failure")
+	out, err := exec.Command(llvmcPath, "-test", "-all", dir).CombinedOutput()
+	ee, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("want ExitError (one failing package), got err=%v out:\n%s", err, out)
+	}
+	if ee.ExitCode() != 1 {
+		t.Fatalf("exit = %d, want 1; out:\n%s", ee.ExitCode(), out)
+	}
+	got := string(out)
+	for _, want := range []string{
+		"--- FAIL: TestFail",
+		"--- PASS: TestOk",
+		"--- PASS: TestOk2",
+		"=== SUMMARY: 3 package(s) run, 1 failed",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q; out:\n%s", want, got)
+		}
+	}
+	lines := strings.Split(strings.TrimRight(got, "\r\n"), "\n")
+	if !slices.Contains(lines, "FAIL") {
+		t.Errorf("missing overall FAIL summary line; out:\n%s", got)
 	}
 }

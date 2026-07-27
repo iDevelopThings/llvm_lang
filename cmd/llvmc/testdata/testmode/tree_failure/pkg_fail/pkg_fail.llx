@@ -1,0 +1,7 @@
+import "std:test"
+
+// Deliberately fails - proves runTestAll counts this package as a failure
+// but keeps walking to the packages after it.
+func TestFail(t *test.Runner) {
+    t.AssertEqual(1, 2, "want unequal ints to fail")
+}

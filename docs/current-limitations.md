@@ -78,4 +78,7 @@ rejection rules live in [`LANGUAGE.md`](../LANGUAGE.md).
   variables, variadic functions, or symbol aliases.
 - JIT programs receive no command-line arguments; built executables do.
 - The language server re-analyzes the whole package after each edit.
-- `llvmc -test` runs tests from the entry package only.
+- `llvmc -test` runs tests from the entry package only; `-test -all` runs a
+  whole directory tree, but each package still as its own separate entry
+  point, never via import (see
+  [Testing a whole directory tree](testing.md#testing-a-whole-directory-tree)).

@@ -1,0 +1,7 @@
+// deep is nested two levels below tree_basic - proves runTestAll's walk
+// finds a package regardless of depth.
+import "std:test"
+
+func TestDeep(t *test.Runner) {
+    t.AssertEqual(3 + 3, 6, "3+3")
+}

@@ -71,6 +71,13 @@
 // uses the ordinary compile/JIT/AOT path (composes with -o / -emit-llvm).
 // Mutually exclusive with -watch. See CODEGEN.md.
 //
+// -test -all treats <path> as a directory of packages instead of one
+// package: it recurses (loader.DiscoverPackages) and runs the same -test
+// flow once per discovered package directory, silently skipping any with no
+// Test* funcs, then prints an aggregate PASS/FAIL summary. Requires -test;
+// not compatible with -o (multiple packages would collide on one output
+// path). See docs/compiler.md.
+//
 // Source file extension: this project picks ".llx" for llvm_lang source
 // files - ".ll" is already LLVM's own textual IR format's extension, and
 // reusing it here would be a real (and confusing) collision with that. The
@@ -150,7 +157,7 @@ func main() {
 // usage is the short usage message printed on any usage error, and also
 // documents the -emit-llvm/-o/-no-opt flags (see the package doc comment
 // for the full exit-code writeup).
-const usage = "usage: llvmc [-emit-llvm | -o <output> | -watch | -test] [-init Name] [-tick Name] [-no-opt] [-l <lib>]... [-L <dir>]... <file.llx | directory>"
+const usage = "usage: llvmc [-emit-llvm | -o <output> | -watch | -test [-all]] [-init Name] [-tick Name] [-no-opt] [-l <lib>]... [-L <dir>]... <file.llx | directory>"
 
 // run is main's testable body: it never calls os.Exit itself, so a test can
 // invoke it directly and just inspect the returned code plus whatever was
@@ -181,6 +188,11 @@ func run(args []string, stderr io.Writer) int {
 		"test",
 		false,
 		"discover TestXxx(t *test.Runner) in the entry package, synthesize a driver main, run the suite",
+	)
+	testAll := fs.Bool(
+		"all",
+		false,
+		"with -test: treat <path> as a directory of packages, running every discovered package's own suite",
 	)
 	initName := fs.String(
 		"init",
@@ -238,6 +250,14 @@ func run(args []string, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "llvmc: -watch and -test are mutually exclusive")
 		return exitUsage
 	}
+	if *testAll && !*testMode {
+		fmt.Fprintln(stderr, "llvmc: -all requires -test")
+		return exitUsage
+	}
+	if *testAll && *output != "" {
+		fmt.Fprintln(stderr, "llvmc: -all cannot be used with -o (each discovered package would collide on the same output path)")
+		return exitUsage
+	}
 	if (initSet || tickSet) && !*watch {
 		fmt.Fprintln(stderr, "llvmc: -init and -tick require -watch")
 		return exitUsage
@@ -270,6 +290,9 @@ func run(args []string, stderr io.Writer) int {
 	}
 
 	if *testMode {
+		if *testAll {
+			return runTestAll(path, !*noOpt, *emitLLVM, linkLibs, linkDirs, stderr)
+		}
 		return runTest(path, !*noOpt, *output, *emitLLVM, linkLibs, linkDirs, stderr)
 	}
 

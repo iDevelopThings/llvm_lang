@@ -1,0 +1,4 @@
+// pkg_empty has no Test* funcs at all - proves runTestAll silently skips it.
+func helper() int {
+    return 1
+}

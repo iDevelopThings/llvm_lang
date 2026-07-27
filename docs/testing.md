@@ -20,6 +20,32 @@ func TestAdd(t *test.Runner) {
 `std:test` provides equality, inequality, boolean, `nil`, and approximate
 floating-point assertions.
 
+## Testing a whole directory tree
+
+Add `-all` to treat the path as a directory of packages instead of one
+package: it recurses into every subdirectory, running each discovered
+package's own suite independently (like `go test ./...`), rather than
+compiling the whole tree as a single program:
+
+```powershell
+.\llvmc.exe -test -all std
+```
+
+A package with no `TestXxx` funcs is silently skipped. Each package prints
+its own PASS/FAIL line, followed by one final summary:
+
+```
+=== PKG std\collections: PASS
+=== PKG std\rand: PASS
+=== SUMMARY: 6 package(s) run, 0 failed, took 1.32s
+PASS
+```
+
+The process exits non-zero if any discovered package fails; one package's
+failure never stops the rest of the walk from running. `-all` requires
+`-test` and cannot be combined with `-o` (every discovered package would
+otherwise collide on the same output path).
+
 ## Keep tests beside the code
 
 A `tests {}` block is included only by `llvmc -test`:
