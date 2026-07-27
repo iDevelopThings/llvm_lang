@@ -32,6 +32,7 @@ const (
 	KeywordNew         Keyword = "New"
 	KeywordDelete      Keyword = "Delete"
 	KeywordExtern      Keyword = "Extern"
+	KeywordStub        Keyword = "Stub"
 	KeywordMap         Keyword = "Map"
 	KeywordEnum        Keyword = "Enum"
 	KeywordMatch       Keyword = "Match"
@@ -64,6 +65,7 @@ type KeywordContainer struct {
 	New         Keyword
 	Delete      Keyword
 	Extern      Keyword
+	Stub        Keyword
 	Map         Keyword
 	Enum        Keyword
 	Match       Keyword
@@ -97,6 +99,7 @@ var Keywords = KeywordContainer{
 	New:         KeywordNew,
 	Delete:      KeywordDelete,
 	Extern:      KeywordExtern,
+	Stub:        KeywordStub,
 	Map:         KeywordMap,
 	Enum:        KeywordEnum,
 	Match:       KeywordMatch,
@@ -212,6 +215,11 @@ var keywordInfos = map[Keyword]KeywordInfo{
 		Name:    "Extern",
 		String:  "extern",
 	},
+	KeywordStub: {
+		Keyword: KeywordStub,
+		Name:    "Stub",
+		String:  "stub",
+	},
 	KeywordMap: {
 		Keyword: KeywordMap,
 		Name:    "Map",
@@ -284,6 +292,7 @@ var keywordValues = []Keyword{
 	KeywordNew,
 	KeywordDelete,
 	KeywordExtern,
+	KeywordStub,
 	KeywordMap,
 	KeywordEnum,
 	KeywordMatch,
@@ -316,6 +325,7 @@ var keywordByName = map[string]Keyword{
 	"new":         KeywordNew,
 	"delete":      KeywordDelete,
 	"extern":      KeywordExtern,
+	"stub":        KeywordStub,
 	"map":         KeywordMap,
 	"enum":        KeywordEnum,
 	"match":       KeywordMatch,

@@ -2469,3 +2469,27 @@ Motivating ask: the last piece of the `Any`/reflection effort, scoped in a desig
 **`AnyNew` excludes an enum's own id** (routing around `BLOCKERS.md`'s still-open enum-zero-value entry) **and a non-copyable struct/array's own id** - constructing a fresh non-copyable value is sound, but `AnyAs`/`AnySet` reading it back out would then perform the implicit copy this language otherwise never allows (a case that couldn't arise before, since `Any(x)` already rejects boxing a non-copyable value directly). `TypeIdOf(x)` never evaluates `x` - only its static type matters, mirroring `genLenCall`'s own fixed-array-length precedent.
 
 **Status:** shipped. `src/sema/any_test.go` gained type-checking coverage for all five builtins. `src/codegen/typeregistry_test.go` (new) gained JIT-executed coverage: id agreement across primitive/struct/array/enum (including the two-different-active-variants-share-one-id proof), distinct/interned struct ids, `TypeByName` (including a genuine two-package same-name test), `AnyNew` for a struct/map/array/out-of-range-id/enum-id/non-copyable-struct-id, and `AnySet`'s write-visible-through-the-reread-box and mismatch-leaves-value-unchanged proofs. `src/lsp/typeregistry_test.go` (new) mirrors `any_test.go`'s own capability coverage. `LANGUAGE.md`, `docs/advanced-features.md`, `docs/current-limitations.md`, `docs/feature-index.md`, `docs/examples.md`, and `examples/type_registry_demo/type_registry_demo.llx` updated. Full test suite (`go clean -testcache` then `.\test.ps1`) passes; hands-on verified against the real `llvmc.exe`.
+
+## 2026-07-27 - `stub func` + `std/stubs.llx` for IDE universe signatures
+
+**Decision:** add a distinct `stub func Name[T](params) RetType` declaration
+(body-less, full language types including multi-return and type params, no
+FFI checks) legal only in the designated file basename `stubs.llx` (shipped
+as `std/stubs.llx`; basename match is `EqualFold`, same as the loader skip,
+so case-insensitive filesystems stay consistent). Loader skips `stubs.llx`
+so it is never a package member. Stub funcs are never codegen'd and cannot
+be called. Generic stubs are catalogued for tooling (`isGenericDecl`) but
+never instantiated by llvmc - intentional, since stubs are not callable.
+Do **not** reuse `extern func` - FFI type restrictions reject the types
+builtin stubs need (`Any`, `string`, `[]T`, ...).
+
+**Why not only a plugin-private resource:** keeping the hand-edited
+signature list next to `std/` makes the compiler repo the source of truth
+the JetBrains plugin loads via `compilerRoot`. Hard forms (`make`, type
+names, `nil`, `AnyFields`, `result`) stay out of the stub file for tooling
+registries - `result` cannot be expressed as an ordinary signature because
+the language has no writable parameterized coroutine-handle type.
+
+**Status:** shipped (parser/ast/sema/loader + `std/stubs.llx` + LANGUAGE.md +
+`src/lsp/stub_test.go`). Plugin consumption is a separate round in the
+JetBrains plugin repo.

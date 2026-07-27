@@ -57,25 +57,26 @@ const (
 	NodeKindDeleteStmt        NodeKind = 41
 	NodeKindSliceExpr         NodeKind = 42
 	NodeKindExternFuncDecl    NodeKind = 43
-	NodeKindMultiReturnType   NodeKind = 44
-	NodeKindMultiValueExpr    NodeKind = 45
-	NodeKindMultiShortVarDecl NodeKind = 46
-	NodeKindMultiAssignStmt   NodeKind = 47
-	NodeKindMapType           NodeKind = 48
-	NodeKindEnumDecl          NodeKind = 49
-	NodeKindEnumVariant       NodeKind = 50
-	NodeKindMatchStmt         NodeKind = 51
-	NodeKindMatchArm          NodeKind = 52
-	NodeKindYieldStmt         NodeKind = 53
-	NodeKindRangeExpr         NodeKind = 54
-	NodeKindRangeForStmt      NodeKind = 55
-	NodeKindYieldReturnType   NodeKind = 56
-	NodeKindAwaitStmt         NodeKind = 57
-	NodeKindCFuncType         NodeKind = 58
-	NodeKindMoveExpr          NodeKind = 59
-	NodeKindTypeParamList     NodeKind = 60
-	NodeKindTypeArgList       NodeKind = 61
-	NodeKindTestBlockDecl     NodeKind = 62
+	NodeKindStubFuncDecl      NodeKind = 44
+	NodeKindMultiReturnType   NodeKind = 45
+	NodeKindMultiValueExpr    NodeKind = 46
+	NodeKindMultiShortVarDecl NodeKind = 47
+	NodeKindMultiAssignStmt   NodeKind = 48
+	NodeKindMapType           NodeKind = 49
+	NodeKindEnumDecl          NodeKind = 50
+	NodeKindEnumVariant       NodeKind = 51
+	NodeKindMatchStmt         NodeKind = 52
+	NodeKindMatchArm          NodeKind = 53
+	NodeKindYieldStmt         NodeKind = 54
+	NodeKindRangeExpr         NodeKind = 55
+	NodeKindRangeForStmt      NodeKind = 56
+	NodeKindYieldReturnType   NodeKind = 57
+	NodeKindAwaitStmt         NodeKind = 58
+	NodeKindCFuncType         NodeKind = 59
+	NodeKindMoveExpr          NodeKind = 60
+	NodeKindTypeParamList     NodeKind = 61
+	NodeKindTypeArgList       NodeKind = 62
+	NodeKindTestBlockDecl     NodeKind = 63
 )
 
 type NodeKindContainer struct {
@@ -123,6 +124,7 @@ type NodeKindContainer struct {
 	DeleteStmt        NodeKind
 	SliceExpr         NodeKind
 	ExternFuncDecl    NodeKind
+	StubFuncDecl      NodeKind
 	MultiReturnType   NodeKind
 	MultiValueExpr    NodeKind
 	MultiShortVarDecl NodeKind
@@ -190,6 +192,7 @@ var NodeKinds = NodeKindContainer{
 	DeleteStmt:        NodeKindDeleteStmt,
 	SliceExpr:         NodeKindSliceExpr,
 	ExternFuncDecl:    NodeKindExternFuncDecl,
+	StubFuncDecl:      NodeKindStubFuncDecl,
 	MultiReturnType:   NodeKindMultiReturnType,
 	MultiValueExpr:    NodeKindMultiValueExpr,
 	MultiShortVarDecl: NodeKindMultiShortVarDecl,
@@ -394,6 +397,10 @@ var nodeKindInfos = map[NodeKind]NodeKindInfo{
 		NodeKind: NodeKindExternFuncDecl,
 		Name:     "ExternFuncDecl",
 	},
+	NodeKindStubFuncDecl: {
+		NodeKind: NodeKindStubFuncDecl,
+		Name:     "StubFuncDecl",
+	},
 	NodeKindMultiReturnType: {
 		NodeKind: NodeKindMultiReturnType,
 		Name:     "MultiReturnType",
@@ -517,6 +524,7 @@ var nodeKindValues = []NodeKind{
 	NodeKindDeleteStmt,
 	NodeKindSliceExpr,
 	NodeKindExternFuncDecl,
+	NodeKindStubFuncDecl,
 	NodeKindMultiReturnType,
 	NodeKindMultiValueExpr,
 	NodeKindMultiShortVarDecl,
@@ -583,6 +591,7 @@ var nodeKindByName = map[string]NodeKind{
 	"deletestmt":        NodeKindDeleteStmt,
 	"sliceexpr":         NodeKindSliceExpr,
 	"externfuncdecl":    NodeKindExternFuncDecl,
+	"stubfuncdecl":      NodeKindStubFuncDecl,
 	"multireturntype":   NodeKindMultiReturnType,
 	"multivalueexpr":    NodeKindMultiValueExpr,
 	"multishortvardecl": NodeKindMultiShortVarDecl,

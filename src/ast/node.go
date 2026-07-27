@@ -262,6 +262,17 @@ type Span struct {
 //     return type, exactly like a type-less `var` already does for statement
 //     termination. Reuses the exact same ParamList grammar node FuncDecl's own
 //     paramList child does (parameters are still `name Type` pairs).
+//   - StubFuncDecl: [name, typeParamList, paramList, returnType] - fixed
+//     arity; typeParamList and returnType may each be InvalidNode. A
+//     deliberate, separate top-level declaration kind for `stub func
+//     Name[T](params) RetType` (see LANGUAGE.md's "Stub functions" section) -
+//     body-less like ExternFuncDecl, but describing ordinary language
+//     signatures for IDE/tooling rather than a C ABI binding: returnType uses
+//     the same FuncDecl return-type grammar (plain type or MultiReturnType;
+//     yield is rejected by sema), type params are allowed, and there are no
+//     FFI type restrictions. No receiver, no body, no async. Only legal in
+//     the designated language stub file (basename stubs.llx); never lowered
+//     by codegen and never callable.
 //   - SliceExpr: [object, low, high] - fixed arity; a Go-style slice
 //     expression (`s[a:b]`, `s[:b]`, `s[a:]`, `s[:]` - see LANGUAGE.md's
 //     "Slicing" section). low/high are each InvalidNode when omitted (the

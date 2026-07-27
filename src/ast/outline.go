@@ -90,6 +90,10 @@ func (t *Tree) declSymbol(decl NodeIndex) (sym DeclSymbol, ok bool) {
 		sym := t.namedSymbol(decl, t.ExternFuncName(decl), SymbolOutlineFunction, nil)
 		sym.Detail = t.FuncSignatureText(decl, t.SourceText)
 		return sym, true
+	case enums.NodeKinds.StubFuncDecl:
+		sym := t.namedSymbol(decl, t.StubFuncName(decl), SymbolOutlineFunction, nil)
+		sym.Detail = t.FuncSignatureText(decl, t.SourceText)
+		return sym, true
 	case enums.NodeKinds.StructDecl:
 		return t.structSymbol(decl), true
 	case enums.NodeKinds.EnumDecl:

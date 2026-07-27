@@ -289,6 +289,8 @@ func (r *resolver) resolvePackage(trees []*ast.Tree) {
 				r.declareFunc(r.pkg, decl)
 			case enums.NodeKinds.ExternFuncDecl:
 				r.declareExternFunc(r.pkg, decl)
+			case enums.NodeKinds.StubFuncDecl:
+				r.declareStubFunc(r.pkg, decl)
 			}
 		}
 	}
@@ -310,6 +312,8 @@ func (r *resolver) resolvePackage(trees []*ast.Tree) {
 				r.resolveFuncBody(fileScope, decl)
 			case enums.NodeKinds.ExternFuncDecl:
 				r.resolveExternFuncDecl(fileScope, decl)
+			case enums.NodeKinds.StubFuncDecl:
+				r.resolveStubFuncDecl(fileScope, decl)
 			case enums.NodeKinds.StructDecl:
 				r.resolveStructFieldTypes(fileScope, decl)
 				r.resolveStructConstructors(fileScope, decl)
@@ -912,6 +916,15 @@ func (r *resolver) declareExternFunc(pkg *Scope, decl ast.NodeIndex) {
 	r.declareLocal(pkg, decl, nameNode, SymFunc)
 }
 
+// declareStubFunc registers a `stub func` into package scope as SymFunc -
+// same symbol kind as an ordinary/extern func so CallInfo-style tooling can
+// treat it uniformly; codegen never lowers one (see checkStubFuncDecl).
+func (r *resolver) declareStubFunc(pkg *Scope, decl ast.NodeIndex) {
+	nameNode := r.tree.StubFuncName(decl)
+	sym := r.declareLocal(pkg, decl, nameNode, SymFunc)
+	r.declareGeneric(sym, decl, r.tree.StubFuncTypeParamList(decl))
+}
+
 // resolveExternFuncDecl resolves an ExternFuncDecl's own type positions - each
 // parameter's declared type and the return type (when present), as ordinary
 // type references - mirroring resolveFuncBody's identical param/return-type
@@ -925,6 +938,21 @@ func (r *resolver) declareExternFunc(pkg *Scope, decl ast.NodeIndex) {
 func (r *resolver) resolveExternFuncDecl(scope *Scope, decl ast.NodeIndex) {
 	paramList := r.tree.ExternFuncParamList(decl)
 	returnType := r.tree.ExternFuncReturnType(decl)
+
+	for _, param := range r.tree.Children(paramList) {
+		r.resolveType(scope, r.tree.Child(param, 1))
+	}
+	if returnType != ast.InvalidNode {
+		r.resolveType(scope, returnType)
+	}
+}
+
+// resolveStubFuncDecl resolves a StubFuncDecl's type positions - same shape
+// as resolveExternFuncDecl (resolveType already walks MultiReturnType).
+// Generic stubs are skipped by isGenericDecl before this runs.
+func (r *resolver) resolveStubFuncDecl(scope *Scope, decl ast.NodeIndex) {
+	paramList := r.tree.StubFuncParamList(decl)
+	returnType := r.tree.StubFuncReturnType(decl)
 
 	for _, param := range r.tree.Children(paramList) {
 		r.resolveType(scope, r.tree.Child(param, 1))

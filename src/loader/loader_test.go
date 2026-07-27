@@ -117,6 +117,53 @@ func TestLoad_IgnoresNonSourceFiles(t *testing.T) {
 	}
 }
 
+func TestLoad_SkipsStubsFile(t *testing.T) {
+	dir := filepath.Join(string(filepath.Separator), "std")
+	fs := afero.NewMemMapFs()
+	writeFiles(t, fs, map[string]string{
+		filepath.Join(dir, "stubs.llx"): "// language stubs - not a package member",
+	})
+
+	_, err := Load(fs, dir)
+	if err == nil {
+		t.Fatal("Load(std with only stubs.llx) succeeded, want no package members")
+	}
+}
+
+func TestLoad_SkipsStubsFileAlongsideRealSources(t *testing.T) {
+	dir := filepath.Join(string(filepath.Separator), "pkg")
+	fs := afero.NewMemMapFs()
+	writeFiles(t, fs, map[string]string{
+		filepath.Join(dir, "main.llx"):  "// main",
+		filepath.Join(dir, "stubs.llx"): "stub func args() []string",
+	})
+
+	files, err := Load(fs, dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(files) != 1 || filepath.Base(files[0].Name) != "main.llx" {
+		t.Fatalf("files = %+v, want only main.llx", files)
+	}
+}
+
+func TestLoad_SkipsStubsFileCaseInsensitiveBasename(t *testing.T) {
+	dir := filepath.Join(string(filepath.Separator), "pkg")
+	fs := afero.NewMemMapFs()
+	writeFiles(t, fs, map[string]string{
+		filepath.Join(dir, "main.llx"):   "// main",
+		filepath.Join(dir, "STUBS.LLX"): "stub func args() []string",
+	})
+
+	files, err := Load(fs, dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(files) != 1 || filepath.Base(files[0].Name) != "main.llx" {
+		t.Fatalf("files = %+v, want only main.llx (STUBS.LLX skipped via EqualFold)", files)
+	}
+}
+
 func TestLoad_EmptyDirectoryErrors(t *testing.T) {
 	dir := filepath.Join(string(filepath.Separator), "empty")
 	fs := afero.NewMemMapFs()

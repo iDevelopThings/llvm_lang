@@ -1,0 +1,27 @@
+// Language builtin stubs for IDE/tooling (JetBrains plugin, etc.).
+// Not a compilable package member - loader skips stubs.llx, and stub func
+// declarations are illegal outside this file. Signatures mirror universe
+// builtins where an ordinary func shape fits; see LANGUAGE.md's "Stub
+// functions" section. Approximate params (print/len) are documented inline.
+
+// Exact
+stub func args() []string
+stub func resume(h coroutine) bool
+stub func done(h coroutine) bool
+stub func remove[K, V](m map[K]V, k K)
+stub func append[T](s []T, elem T) []T
+stub func AnyKind(a Any) int
+stub func AnyName(a Any) string
+stub func AnyLen(a Any) int
+stub func AnyIndex(a Any, i int) (Any, bool)
+stub func AnyAs[T](a Any) (T, bool)
+
+// Approximate: real rule is "printable", not Any - see LANGUAGE.md "The print builtin".
+stub func print(x Any)
+
+// Approximate: also arrays and maps - see LANGUAGE.md collections / len.
+stub func len(x string) int
+
+// Not declared here (tooling registry / special forms only):
+// make, builtin type names, nil, AnyFields, result, T(x) conversions.
+// result(h) T cannot be a stub: no writable parameterized coroutine-handle type.

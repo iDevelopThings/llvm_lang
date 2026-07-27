@@ -4,6 +4,7 @@ package sema
 
 import (
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -428,6 +429,10 @@ func (c *checker) checkPackage(trees []*ast.Tree) {
 	for _, tree := range trees {
 		c.enter(tree)
 		for _, decl := range tree.Children(tree.Root) {
+			if tree.Nodes[decl].Kind == enums.NodeKinds.StubFuncDecl {
+				c.checkStubFuncDecl(decl)
+				continue
+			}
 			// A generic template is never checked as written - only its
 			// specializations are (see generics.go).
 			if isGenericDecl(tree, c.info.Generics, decl) {
@@ -877,9 +882,12 @@ func (c *checker) funcSigForDecl(decl ast.NodeIndex) funcSignature {
 		return sig
 	}
 	var sig funcSignature
-	if c.tree.Nodes[decl].Kind == enums.NodeKinds.ExternFuncDecl {
+	switch c.tree.Nodes[decl].Kind {
+	case enums.NodeKinds.ExternFuncDecl:
 		sig = c.computeExternFuncSig(decl)
-	} else {
+	case enums.NodeKinds.StubFuncDecl:
+		sig = c.computeStubFuncSig(decl)
+	default:
 		sig = c.computeFuncSig(decl)
 	}
 	c.funcSigs[key] = sig
@@ -905,6 +913,44 @@ func (c *checker) computeFuncSig(decl ast.NodeIndex) funcSignature {
 // reference it - or never, if no call site ever does.
 func (c *checker) checkExternFuncDecl(decl ast.NodeIndex) {
 	c.funcSigForDecl(decl)
+}
+
+// checkStubFuncDecl enforces the designated-file gate and type-checks a
+// non-generic stub signature (generic stubs still get the file gate here;
+// their templates are otherwise left unchecked like ordinary generics).
+func (c *checker) checkStubFuncDecl(decl ast.NodeIndex) {
+	if !isLanguageStubsFile(c.tree.File.Name) {
+		c.errorAt(decl, "stub func declarations are only allowed in stubs.llx")
+		return
+	}
+	ret := c.tree.StubFuncReturnType(decl)
+	if ret != ast.InvalidNode && c.tree.Nodes[ret].Kind == enums.NodeKinds.YieldReturnType {
+		c.errorAt(ret, "stub func cannot be a generator (yield return type)")
+		return
+	}
+	if isGenericDecl(c.tree, c.info.Generics, decl) {
+		return
+	}
+	c.funcSigForDecl(decl)
+}
+
+// computeStubFuncSig builds a StubFuncDecl's signature with ordinary language
+// types (no FFI checkExternType hook) - see LANGUAGE.md's "Stub functions".
+func (c *checker) computeStubFuncSig(decl ast.NodeIndex) funcSignature {
+	return c.buildSigFromParamListAndReturnType(
+		c.tree.StubFuncParamList(decl),
+		c.tree.StubFuncReturnType(decl),
+		nil,
+	)
+}
+
+// isLanguageStubsFile reports whether name is the designated language stub
+// file (basename stubs.llx) - the only place stub func decls are legal.
+// EqualFold matches loader's own stubs.llx skip (Windows case-insensitive
+// filesystems would otherwise allow STUBS.LLX as a package member while
+// rejecting stub decls in it, or the reverse).
+func isLanguageStubsFile(name string) bool {
+	return strings.EqualFold(filepath.Base(name), "stubs.llx")
 }
 
 // computeExternFuncSig builds decl's (an ExternFuncDecl's) signature from its
@@ -6320,6 +6366,10 @@ func (c *checker) funcSigForCall(callee ast.NodeIndex) (funcSignature, bool) {
 		// callee's own info.Types entry.
 	case enums.NodeKinds.Ident:
 		if sym, ok := c.info.Refs[callee]; ok && sym.Kind == SymFunc && sym.Decl != ast.InvalidNode {
+			if sym.Tree != nil && sym.Tree.Nodes[sym.Decl].Kind == enums.NodeKinds.StubFuncDecl {
+				c.errorAt(callee, "stub function %s cannot be called (stubs exist only for tooling)", sym.Name)
+				return funcSignature{}, false
+			}
 			// sym's FuncDecl may live in a different file than this call
 			// site (see LANGUAGE.md's "Multi-file packages" section).
 			restore := c.pushTree(sym.Tree)

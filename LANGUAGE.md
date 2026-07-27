@@ -2706,6 +2706,29 @@ for name, field := range AnyFields(a) {
 }
 ```
 
+## Stub functions
+
+`stub func Name[T](params) RetType` is a body-less top-level declaration used
+**only** in the designated language stub file `std/stubs.llx` (basename
+`stubs.llx`). It exists for IDE/tooling signatures that mirror predeclared
+universe builtins (`print`, `len`, `AnyAs[T]`, …) where an ordinary `func`
+shape fits - not for compilation or codegen.
+
+```llx
+stub func args() []string
+stub func AnyAs[T](a Any) (T, bool)
+stub func print(x Any)   // approximate - real rule is "printable"
+```
+
+Unlike `extern func`, stub signatures use the full language type system
+(including `string`, `Any`, `[]T`, `map[K]V`, type parameters, and
+multi-return) - there is no FFI type restriction. The loader never treats
+`stubs.llx` as a package member (so `std/` does not become an importable
+package just because the file is present). Declaring `stub func` outside
+`stubs.llx` is a compile error; calling a stub function is also rejected
+(stubs are not runnable). Builtins that cannot be expressed as ordinary
+signatures (`make`, type names, `nil`, `AnyFields`, `T(x)` conversions)
+are not declared here - tooling handles those separately.
 ## External functions (FFI)
 
 `extern func Name(params) RetType` declares a function this compiler doesn't

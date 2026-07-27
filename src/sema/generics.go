@@ -199,6 +199,8 @@ func isGenericDecl(tree *ast.Tree, generics map[string]*GenericInfo, decl ast.No
 		}
 		_, generic := generics[tree.Text(recv)]
 		return generic
+	case enums.NodeKinds.StubFuncDecl:
+		return tree.StubFuncTypeParamList(decl) != ast.InvalidNode
 	default:
 		return false
 	}

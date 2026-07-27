@@ -14,6 +14,10 @@ panic, not a diagnostic. The exceptions - real codegen-level restrictions
 sema has no opinion on - are documented below and still produce a proper
 `diag.Bag` entry.
 
+**Stub functions are never lowered.** `stub func` decls (LANGUAGE.md's
+"Stub functions", `std/stubs.llx`) exist only for tooling; the loader skips
+`stubs.llx`, sema rejects calls, and codegen has no `StubFuncDecl` path.
+
 ## `int` is 32-bit
 
 `int` lowers to `i32`, not `i64`: `main`'s real LLVM signature must return

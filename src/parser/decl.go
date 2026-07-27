@@ -25,11 +25,13 @@ func (p *Parser) parseTopLevelItem() ast.NodeIndex {
 		return p.parseStructDecl()
 	case p.atKeyword(enums.Keywords.Extern):
 		return p.parseExternFuncDecl()
+	case p.atKeyword(enums.Keywords.Stub):
+		return p.parseStubFuncDecl()
 	case p.atKeyword(enums.Keywords.Enum):
 		return p.parseEnumDecl()
 	default:
 		tok := p.tok
-		p.errorAtSpan(tok.Start, tok.End, "expected a top-level declaration (import, var, func, struct, enum, or extern), found %s", p.describe(tok))
+		p.errorAtSpan(tok.Start, tok.End, "expected a top-level declaration (import, var, func, struct, enum, extern, or stub), found %s", p.describe(tok))
 		p.sync(enums.Lexemes.Semicolon)
 		return p.badNode(tok)
 	}
@@ -205,12 +207,7 @@ func (p *Parser) parseFuncDecl() ast.NodeIndex {
 		nameTok = p.expectMemberName()
 	}
 	name := p.tree.NewNode(enums.NodeKinds.Ident, nameTok, tokenSpan(nameTok))
-
-	typeParams := ast.InvalidNode
-	if p.at(enums.Lexemes.LeftBracket) {
-		typeParams = p.parseTypeParamList(lexer.Token{})
-	}
-
+	typeParams := p.parseOptionalTypeParamList()
 	params := p.parseParamList()
 
 	returnType := ast.InvalidNode
@@ -225,6 +222,16 @@ func (p *Parser) parseFuncDecl() ast.NodeIndex {
 		End:   p.tree.SpanOf(body).End,
 	}
 	return p.tree.NewNode(enums.NodeKinds.FuncDecl, kwTok, span, receiver, name, typeParams, params, returnType, body)
+}
+
+// parseOptionalTypeParamList parses a leading `[T, ...]` type-parameter list
+// when present, otherwise InvalidNode - shared by FuncDecl and the body-less
+// stub/extern header path below.
+func (p *Parser) parseOptionalTypeParamList() ast.NodeIndex {
+	if !p.at(enums.Lexemes.LeftBracket) {
+		return ast.InvalidNode
+	}
+	return p.parseTypeParamList(lexer.Token{})
 }
 
 // parseReceiver parses a method's receiver clause contents - a bare type name
@@ -322,39 +329,92 @@ func (p *Parser) parseYieldReturnType() ast.NodeIndex {
 // parseExternFuncDecl parses `extern func Name(params) RetType` - a top-level
 // FFI declaration binding an external C symbol, with no body at all (see
 // ast.Node's own ExternFuncDecl doc comment and LANGUAGE.md's "External
-// functions (FFI)" section). Reuses parseFuncDecl's own param-list parsing
-// verbatim, but deliberately not its return-type parsing: the return type
-// here is a plain parseTypeExpr(), not parseFuncDeclReturnType(), so an
-// extern func can never declare a parenthesized multi-return list - matching
-// the FFI's own ABI restriction that an external function can't return
-// multiple values. Also skips the receiver-clause parsing (an extern func
-// can never be a method) and skips a `{ ... }` body entirely - the
-// declaration simply ends right after the optional return type, exactly like
-// a type-less `var` already does for statement termination (parseFile's own
-// semicolon-separator loop handles that, same as every other top-level item).
+// functions (FFI)" section). Return type is a plain parseTypeExpr (no
+// multi-return / type params) - matching the FFI ABI restriction. Shares
+// the body-less header walk with parseStubFuncDecl via parseBodylessFuncParts.
 func (p *Parser) parseExternFuncDecl() ast.NodeIndex {
-	kwTok := p.expectKeyword(enums.Keywords.Extern)
+	parts := p.parseBodylessFuncParts(enums.Keywords.Extern, false, p.parseTypeExpr)
+	return p.tree.NewNode(
+		enums.NodeKinds.ExternFuncDecl,
+		parts.kwTok,
+		parts.span,
+		parts.name,
+		parts.params,
+		parts.returnType,
+	)
+}
+
+// parseStubFuncDecl parses `stub func Name[T](params) RetType` - a body-less
+// top-level declaration for the language stub file (std/stubs.llx; see
+// LANGUAGE.md's "Stub functions" section). Unlike extern, type params and
+// parseFuncDeclReturnType (multi-return) are allowed - stubs describe
+// ordinary language signatures for tooling, not a C ABI.
+func (p *Parser) parseStubFuncDecl() ast.NodeIndex {
+	parts := p.parseBodylessFuncParts(enums.Keywords.Stub, true, p.parseFuncDeclReturnType)
+	return p.tree.NewNode(
+		enums.NodeKinds.StubFuncDecl,
+		parts.kwTok,
+		parts.span,
+		parts.name,
+		parts.typeParams,
+		parts.params,
+		parts.returnType,
+	)
+}
+
+// bodylessFuncParts is the shared `func Name[T?](params) Ret?` header that
+// both ExternFuncDecl and StubFuncDecl parse after their leading keyword -
+// no receiver, no body; the declaration ends at `;`/EOF like a type-less var.
+type bodylessFuncParts struct {
+	kwTok      lexer.Token
+	name       ast.NodeIndex
+	typeParams ast.NodeIndex
+	params     ast.NodeIndex
+	returnType ast.NodeIndex
+	span       ast.Span
+}
+
+// parseBodylessFuncParts parses `func Name[T?](params) Ret?` after matching
+// lead (`extern` / `stub`). allowTypeParams gates the optional `[T]` list
+// (stub yes, extern no); parseReturn runs only when a return type is present.
+func (p *Parser) parseBodylessFuncParts(
+	lead enums.Keyword,
+	allowTypeParams bool,
+	parseReturn func() ast.NodeIndex,
+) bodylessFuncParts {
+	kwTok := p.expectKeyword(lead)
 	p.expectKeyword(enums.Keywords.Func)
 
 	nameTok := p.expectIdent()
 	name := p.tree.NewNode(enums.NodeKinds.Ident, nameTok, tokenSpan(nameTok))
 
+	typeParams := ast.InvalidNode
+	if allowTypeParams {
+		typeParams = p.parseOptionalTypeParamList()
+	}
+
 	params := p.parseParamList()
 
 	returnType := ast.InvalidNode
 	if !p.at(enums.Lexemes.Semicolon) && !p.at(enums.Lexemes.EOF) {
-		returnType = p.parseTypeExpr()
+		returnType = parseReturn()
 	}
 
 	end := p.tree.SpanOf(params).End
 	if returnType != ast.InvalidNode {
 		end = p.tree.SpanOf(returnType).End
 	}
-	span := ast.Span{
-		Start: kwTok.Start,
-		End:   end,
+	return bodylessFuncParts{
+		kwTok:      kwTok,
+		name:       name,
+		typeParams: typeParams,
+		params:     params,
+		returnType: returnType,
+		span: ast.Span{
+			Start: kwTok.Start,
+			End:   end,
+		},
 	}
-	return p.tree.NewNode(enums.NodeKinds.ExternFuncDecl, kwTok, span, name, params, returnType)
 }
 
 // parseParamList parses a comma-separated `(name Type, ...)` list, wrapped

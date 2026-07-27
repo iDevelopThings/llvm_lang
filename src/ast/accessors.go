@@ -384,6 +384,32 @@ func (t *Tree) ExternFuncReturnType(decl NodeIndex) NodeIndex {
 	return t.Child(decl, 2)
 }
 
+// StubFuncName returns decl's (a StubFuncDecl's) name child - see Node's own
+// StubFuncDecl doc comment for the [name, typeParamList, paramList,
+// returnType] shape these four accessors index into. Separate from both
+// FuncName and ExternFuncName: StubFuncDecl's children start at the name
+// (no receiver) but insert a typeParamList slot ExternFuncDecl lacks.
+func (t *Tree) StubFuncName(decl NodeIndex) NodeIndex {
+	return t.Child(decl, 0)
+}
+
+// StubFuncTypeParamList returns decl's (a StubFuncDecl's) type-parameter
+// list child - InvalidNode when the declaration is not generic.
+func (t *Tree) StubFuncTypeParamList(decl NodeIndex) NodeIndex {
+	return t.Child(decl, 1)
+}
+
+// StubFuncParamList returns decl's (a StubFuncDecl's) ParamList child.
+func (t *Tree) StubFuncParamList(decl NodeIndex) NodeIndex {
+	return t.Child(decl, 2)
+}
+
+// StubFuncReturnType returns decl's (a StubFuncDecl's) return-type child -
+// InvalidNode when the declaration names no return type.
+func (t *Tree) StubFuncReturnType(decl NodeIndex) NodeIndex {
+	return t.Child(decl, 3)
+}
+
 // MultiShortVarDeclNames returns decl's (a MultiShortVarDecl's) leading Ident
 // name children - every child except the last (see Node's own
 // MultiShortVarDecl doc comment for the [name0, ..., nameN, call] shape these

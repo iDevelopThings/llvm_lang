@@ -46,6 +46,8 @@ values:
     string: "delete"
   - name: Extern
     string: "extern"
+  - name: Stub
+    string: "stub"
   - name: Map
     string: "map"
   - name: Enum

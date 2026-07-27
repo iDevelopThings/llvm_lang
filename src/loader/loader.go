@@ -76,6 +76,13 @@ func Load(fs afero.Fs, root string) ([]SourceFile, error) {
 		if !strings.EqualFold(filepath.Ext(e.Name()), sourceExt) {
 			continue
 		}
+		// stubs.llx is the IDE/language-stub surface (see LANGUAGE.md's
+		// "Stub functions" section) - never a package member. Skipping it
+		// here also keeps DiscoverPackages from treating a std/ directory
+		// that only contains stubs.llx as an importable "std" package.
+		if strings.EqualFold(e.Name(), "stubs"+sourceExt) {
+			continue
+		}
 		names = append(names, e.Name())
 	}
 	if len(names) == 0 {

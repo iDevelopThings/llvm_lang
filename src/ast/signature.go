@@ -14,13 +14,16 @@ import (
 // Tree.SourceText for "exactly as written", or sema.FuncSignatureText for
 // the Type-aware rendering.
 //
-// decl may be a FuncDecl or an ExternFuncDecl: the two have different child
-// layouts (see ExternFuncParamList), so which accessor set to use is decided
-// here rather than assumed.
+// decl may be a FuncDecl, ExternFuncDecl, or StubFuncDecl: the three have
+// different child layouts (see ExternFuncParamList / StubFuncParamList), so
+// which accessor set to use is decided here rather than assumed.
 func (t *Tree) FuncSignatureText(decl NodeIndex, renderType func(NodeIndex) string) string {
 	paramList, returnType := t.FuncParamList(decl), t.FuncReturnType(decl)
-	if t.Nodes[decl].Kind == enums.NodeKinds.ExternFuncDecl {
+	switch t.Nodes[decl].Kind {
+	case enums.NodeKinds.ExternFuncDecl:
 		paramList, returnType = t.ExternFuncParamList(decl), t.ExternFuncReturnType(decl)
+	case enums.NodeKinds.StubFuncDecl:
+		paramList, returnType = t.StubFuncParamList(decl), t.StubFuncReturnType(decl)
 	}
 	return t.paramListSignatureText(paramList, returnType, renderType)
 }

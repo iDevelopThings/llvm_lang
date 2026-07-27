@@ -463,6 +463,8 @@ func (s *Symbol) DeclaringNameNode(tree *ast.Tree) ast.NodeIndex {
 		return tree.FuncName(s.Decl)
 	case enums.NodeKinds.ExternFuncDecl:
 		return tree.ExternFuncName(s.Decl)
+	case enums.NodeKinds.StubFuncDecl:
+		return tree.StubFuncName(s.Decl)
 	default:
 		return tree.Child(s.Decl, 0)
 	}
