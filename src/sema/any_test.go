@@ -231,6 +231,17 @@ func TestVariadicAnyCollectRejectsNonCopyableType(t *testing.T) {
 		"func f() {\n\tr := Resource{1}\n\tLog(r)\n}\n", 1)
 }
 
+// TestVariadicGenericFuncInstantiatedAtAny covers a generic function's own
+// variadic parameter explicitly instantiated with T=Any - checkGenericCall
+// reaches checkCallArgs/checkVariadicCallArgs against the already-
+// monomorphized signature exactly like a non-generic call, so implicit
+// boxing composes with generics for free, with no special-casing needed in
+// generics.go.
+func TestVariadicGenericFuncInstantiatedAtAny(t *testing.T) {
+	checkSrc(t, "func Log[T](args ...T) int {\n\treturn len(args)\n}\n"+
+		"func f() int {\n\treturn Log[Any](5, \"x\", true)\n}\n")
+}
+
 // TestVariadicAnySpreadStillRequiresExactSliceType covers the boundary the
 // implicit boxing above deliberately doesn't cross - spread forwards an
 // existing slice value directly, not one argument at a time, so it keeps

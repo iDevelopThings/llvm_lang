@@ -238,13 +238,49 @@ func f() int {
 }
 
 // TestVariadicAnyCollectImplicitlyBoxesJIT is a real, JIT-executed proof
-// that collecting a raw int/string/bool into a ...Any parameter (no
-// explicit Any(x) at the call site - see sema's checkVariadicCallArgs)
-// produces correctly boxed, correctly discriminated values, not just that
-// it compiles.
+// that collecting a raw int/string/bool/untyped-float literal into a
+// ...Any parameter (no explicit Any(x) at the call site - see sema's
+// checkVariadicCallArgs) produces correctly boxed, correctly discriminated
+// values, not just that it compiles. The untyped float literal (3.5)
+// specifically exercises retypeUntyped's own codegen-visible effect - the
+// exact spot an earlier bug in this same feature (an untyped literal never
+// retyped, reaching genNumberLit still untyped) actually panicked in.
 func TestVariadicAnyCollectImplicitlyBoxesJIT(t *testing.T) {
 	jm := compileAndJIT(t, `
 func Log(args ...Any) int {
+	intSum := 0
+	floatSum := f64(0)
+	for _, a := range args {
+		iv, ok := AnyAs[int](a)
+		if ok {
+			intSum = intSum + iv
+		}
+		fv, fok := AnyAs[f64](a)
+		if fok {
+			floatSum = floatSum + fv
+		}
+	}
+	return len(args)*100 + intSum + int(floatSum)
+}
+
+func f() int {
+	return Log(5, 7, "bob", true, 3.5)
+}
+`)
+	// len(args)=5, intSum(5+7)=12, floatSum(3.5)->int(3.5)=3 -> 5*100+12+3=515.
+	if got := jm.runInt32(t, "f"); got != 515 {
+		t.Errorf("f() = %d, want 515", got)
+	}
+}
+
+// TestVariadicGenericFuncInstantiatedAtAnyJIT is a real, JIT-executed proof
+// that a generic function's own variadic parameter, explicitly instantiated
+// at T=Any, gets the same implicit boxing an ordinary (non-generic) ...Any
+// parameter does - the monomorphized signature genCallArgValues/
+// checkVariadicCallArgs see is indistinguishable from a hand-written one.
+func TestVariadicGenericFuncInstantiatedAtAnyJIT(t *testing.T) {
+	jm := compileAndJIT(t, `
+func Log[T](args ...T) int {
 	sum := 0
 	for _, a := range args {
 		iv, ok := AnyAs[int](a)
@@ -256,11 +292,11 @@ func Log(args ...Any) int {
 }
 
 func f() int {
-	return Log(5, 7, "bob", true)
+	return Log[Any](5, 7, "bob")
 }
 `)
-	// len(args)=4, sum of the two ints=12 -> 4*100+12=412.
-	if got := jm.runInt32(t, "f"); got != 412 {
-		t.Errorf("f() = %d, want 412", got)
+	// len(args)=3, sum(5+7)=12 -> 3*100+12=312.
+	if got := jm.runInt32(t, "f"); got != 312 {
+		t.Errorf("f() = %d, want 312", got)
 	}
 }
