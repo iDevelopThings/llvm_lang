@@ -251,6 +251,16 @@ capability, plus a broken/incomplete-source variant). Generics landed with
 zero `src/lsp` coverage and a real, user-visible bug went unnoticed for
 several rounds as a direct result.
 
+## Keeping the JetBrains plugin in sync
+
+A separate, sibling project (`F:\Go\llvm_lang_jb_plugin`) implements IDE
+support for this language - its own repo, its own history, not part of this
+one. After a language feature lands here (new syntax, a new builtin, a new
+diagnostic shape, anything the plugin's own lexer/parser/PSI/inspections
+would need to mirror), dispatch a separate agent against that other repo to
+keep it in sync, in parallel with whatever comes next here - never let
+plugin-sync work block or gate this repo's own compiler work. It is lower
+priority than the compiler itself, done opportunistically alongside it.
 
 ## Project Code Style Preferences **IMPORTANT**
 
