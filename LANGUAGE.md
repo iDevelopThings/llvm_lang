@@ -2510,19 +2510,21 @@ c := Any(b)         // Any(x) where x is already Any: a cheap no-op copy
 ```
 
 Every scalar/primitive type (`i8`/`i16`/`i32`/`i64`/`u8`/`u16`/`u32`/`u64`/
-`f32`/`f64`/`bool`/`string`/`cstring`/a pointer), any struct type, and a
-dynamic or fixed-size array can be boxed (collecting into a `...Any`
-variadic parameter boxes implicitly, no `Any(x)` needed - see "Variadic
-parameters" above). A struct or array is boxable only if every one of its
-own field/element types is, recursively - `Any` itself is one such
+`f32`/`f64`/`bool`/`string`/`cstring`/a pointer), any struct type, a
+dynamic or fixed-size array, and a map can be boxed (collecting into a
+`...Any` variadic parameter boxes implicitly, no `Any(x)` needed - see
+"Variadic parameters" above). A struct or array is boxable only if every one
+of its own field/element types is, recursively - `Any` itself is one such
 unboxable nested type (`[]Any` and a struct field typed `Any` are both
 rejected), boxable only as the top-level value passed to `Any(x)` directly.
-Boxing copies the value's own bytes
+A map is boxable regardless of its own key/value types - only *iterating* a
+boxed map's own entries (key/value pairs) remains unsupported, unlike
+`AnyFields` for a struct. Boxing copies the value's own bytes
 into a fresh, arena-allocated slot (see "Memory model" - the same allocator
 dynamic arrays and strings already use) - a boxed value stays valid
 regardless of whether it outlives the stack frame it was boxed in, at the
 cost of one allocation per `Any(x)` call, so this isn't meant for a hot
-path. **Not boxable this round**: an enum, a map, a function/cfunc value, or
+path. **Not boxable this round**: an enum, a function/cfunc value, or
 a non-copyable type (one that declares a `destructor()`) - each is a real,
 reported error, not a crash.
 
@@ -2543,7 +2545,10 @@ never reads the boxed bytes at all, so a smaller boxed value is never read
 out of bounds. `T` is never inferred (there is nothing left in `a`'s own
 static type to infer it from) - every call needs an explicit type argument,
 `AnyAs[i32](a)`, the same way an otherwise-uninferrable generic call
-(`NewSlotMap[int]()`) already does.
+(`NewSlotMap[int]()`) already does. For a map, only the boxed *kind* (map vs.
+not) is checked, not the key/value types - `AnyAs[map[int]bool]` can match a
+boxed `map[string]int`, unlike a struct or array, which are also checked by
+descriptor identity.
 
 A boxed struct's own fields - each itself recursively boxed as an `Any` -
 are walked with `AnyFields`, consumed with a two-binding range-for exactly

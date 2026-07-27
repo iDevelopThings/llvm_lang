@@ -73,12 +73,15 @@ b := Any(somePoint)
 ```
 
 Every scalar type (`i8`...`i64`, `u8`...`u64`, `f32`, `f64`, `bool`,
-`string`, `cstring`, a pointer), any struct, and any array (fixed or
-dynamic) can be boxed - a struct/array only if every one of its own
+`string`, `cstring`, a pointer), any struct, any array (fixed or dynamic),
+and any map can be boxed - a struct/array only if every one of its own
 field/element types is, recursively (`Any` itself can't be nested this way -
-see [Any](LANGUAGE.md#any) in the language spec). Boxing copies the value
-into a fresh allocation, so
-a boxed value stays valid even after the code that boxed it returns.
+see [Any](LANGUAGE.md#any) in the language spec). A map is boxable
+regardless of its own key/value types, but a boxed map's own entries aren't
+reflectable - `AnyFields` sees zero fields, and `AnyAs[T]` only checks that
+`T` is a map, not which key/value types. Boxing copies the value into a
+fresh allocation, so a boxed value stays valid even after the code that
+boxed it returns.
 Collecting into a `...Any` variadic parameter boxes each argument
 automatically, no `Any(x)` needed - see
 [Variadic parameters](functions-and-generics.md#variadic-parameters).
@@ -104,8 +107,8 @@ fields, each itself boxed as an `Any`. `AnyLen`/`AnyIndex` are permissive
 about the wrong kind: calling either on a non-array `Any` (or an
 out-of-range index) just returns `0`/`(zero Any, false)`, not an error.
 
-Not boxable this round: enums, maps, function values, and any non-copyable
-type. `Any` cannot be compared with `==`, printed with `print`, or cross an
+Not boxable this round: enums, function values, and any non-copyable type.
+`Any` cannot be compared with `==`, printed with `print`, or cross an
 `extern func` signature. See [Current limitations](current-limitations.md)
 and [the Any section](../LANGUAGE.md#any) of the language spec for the
 exact rules.

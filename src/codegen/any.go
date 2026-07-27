@@ -62,18 +62,25 @@ var anyPrimitiveKinds = []sema.TypeKind{
 	sema.TypeU8, sema.TypeU16, sema.TypeU32, sema.TypeU64,
 	sema.TypeF32, sema.TypeF64,
 	sema.TypeBool, sema.TypeString, sema.TypeCString, sema.TypePointer,
+	sema.TypeMap,
 }
 
 // anyPrimitiveDisplayName is the name baked into a primitive kind's own
 // descriptor (AnyName's result) - TypeKind.Display() directly for every kind
-// that declares one in type_kind.yml, except TypePointer (no display column,
-// since Type.String() renders it via its own recursive "*"+Elem case
-// instead - see sema/types.go).
+// that declares one in type_kind.yml, except TypePointer/TypeMap (neither
+// has a display column, since Type.String() renders each via its own
+// recursive case instead - see sema/types.go). A boxed map's own key/value
+// types aren't tracked in its descriptor (see isBoxableIntoAny), so "map" is
+// the most specific name available here, not a placeholder.
 func anyPrimitiveDisplayName(k sema.TypeKind) string {
-	if k == sema.TypePointer {
+	switch k {
+	case sema.TypePointer:
 		return "pointer"
+	case sema.TypeMap:
+		return "map"
+	default:
+		return k.Display()
 	}
-	return k.Display()
 }
 
 // setupAnyRuntime builds the descriptor LLVM types and every primitive
@@ -305,7 +312,12 @@ func (g *Generator) genAnyAsCall(n, argNode ast.NodeIndex) llvm.Value {
 	// Two different structs (or two different array shapes) both report the
 	// identical sema.TypeKind as their kind - descriptor pointer identity
 	// (structDescriptor/arrayDescriptor each intern one shared descriptor per
-	// distinct type) is what actually tells them apart.
+	// distinct type) is what actually tells them apart. A map gets no such
+	// check: every map, regardless of key/value type, shares the one interned
+	// TypeMap descriptor (anyPrimitiveDescs), so AnyAs[map[K]V] can only ever
+	// confirm "some map was boxed here", not which K/V - a known, accepted
+	// imprecision (see DECISIONS.md), not something this switch is missing by
+	// oversight.
 	switch target.Kind {
 	case sema.TypeStruct:
 		wantDesc := g.structDescriptor(target.Struct)

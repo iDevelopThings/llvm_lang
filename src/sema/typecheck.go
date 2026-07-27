@@ -5128,9 +5128,9 @@ func (c *checker) checkVariadicCallArgs(n ast.NodeIndex, args []ast.NodeIndex, a
 func (c *checker) checkBoxableIntoAny(a ast.NodeIndex, at Type) bool {
 	if !c.isBoxableIntoAny(at) {
 		if at.Kind == TypeStruct || at.Kind == TypeArray {
-			c.errorAt(a, "cannot box %s into Any - it has a field/element whose own type has no Any representation this round (an enum, map, function value, Any itself, or a multi-value/generator/coroutine result)", at)
+			c.errorAt(a, "cannot box %s into Any - it has a field/element whose own type has no Any representation this round (an enum, function value, Any itself, or a multi-value/generator/coroutine result)", at)
 		} else {
-			c.errorAt(a, "cannot box %s into Any - enums, maps, function values, and multi-value/generator/coroutine results have no Any representation this round", at)
+			c.errorAt(a, "cannot box %s into Any - enums, function values, and multi-value/generator/coroutine results have no Any representation this round", at)
 		}
 		return false
 	}
@@ -5861,29 +5861,34 @@ func (c *checker) checkConversionCall(n, callee ast.NodeIndex, args []ast.NodeIn
 
 // isBoxableIntoAny reports whether t has a defined Any-boxing representation
 // this round (see LANGUAGE.md's "Any" section): every scalar/primitive kind,
-// TypePointer, and TypeAny itself at the top level (a no-op re-box, handled
-// directly by genAnyBox's own short-circuit before ever touching a type
-// descriptor) - not an enum (variant-payload descriptor shape not designed
-// yet - which variant is active is a runtime, not compile-time, property) or
-// a map (no descriptor shape), a function/cfunc value, or any of the three
-// kinds that are never a real storable value at all (TypeMultiReturn/
-// TypeGenerator/TypeCoroutine). A TypeStruct is boxable only if every one of
-// its own fields is, and a TypeArray (fixed or dynamic) only if its own
-// element type is - codegen's structDescriptor/arrayDescriptor both recurse
-// into their field/element type descriptor(s) unconditionally (any.go), so
-// an otherwise-unboxable nested type (e.g. a `map[...]...` field, `[]SomeEnum`,
-// or `Any` itself) must be rejected here, at the one real compile-time
-// checkpoint, rather than surfacing as a runtime codegen panic the first
-// time that particular struct/array is ever boxed anywhere in the program -
-// both recursive cases go through isNestedBoxableIntoAny below, which is
-// what actually rejects a nested Any (typeDescriptorFor has no TypeAny case,
-// only genAnyBox's own top-level short-circuit does). A pointer
-// field/element doesn't recurse into its own pointee (TypePointer is
-// unconditionally boxable above) - the same cycle-safety a self-referential
-// struct already relies on for typeIsComparable/typeIsPrintable.
+// TypePointer, TypeMap, and TypeAny itself at the top level (a no-op re-box,
+// handled directly by genAnyBox's own short-circuit before ever touching a
+// type descriptor) - not an enum (variant-payload descriptor shape not
+// designed yet - which variant is active is a runtime, not compile-time,
+// property), a function/cfunc value, or any of the three kinds that are
+// never a real storable value at all (TypeMultiReturn/TypeGenerator/
+// TypeCoroutine). A map is boxable regardless of its own key/value types -
+// its runtime representation is a single opaque pointer (codegen/types.go's
+// TypeMap case), copied wholesale exactly like a raw pointer, so nothing
+// about boxing it depends on Key/Elem the way a struct/array's field-by-value
+// copy does; entry reflection (iterating a boxed map's own key/value pairs)
+// remains out of scope. A TypeStruct is boxable only if every one of its own
+// fields is, and a TypeArray (fixed or dynamic) only if its own element type
+// is - codegen's structDescriptor/arrayDescriptor both recurse into their
+// field/element type descriptor(s) unconditionally (any.go), so an
+// otherwise-unboxable nested type (`[]SomeEnum` or `Any` itself) must be
+// rejected here, at the one real compile-time checkpoint, rather than
+// surfacing as a runtime codegen panic the first time that particular
+// struct/array is ever boxed anywhere in the program - both recursive cases
+// go through isNestedBoxableIntoAny below, which is what actually rejects a
+// nested Any (typeDescriptorFor has no TypeAny case, only genAnyBox's own
+// top-level short-circuit does). A pointer field/element doesn't recurse
+// into its own pointee (TypePointer is unconditionally boxable above) - the
+// same cycle-safety a self-referential struct already relies on for
+// typeIsComparable/typeIsPrintable.
 func (c *checker) isBoxableIntoAny(t Type) bool {
 	switch t.Kind {
-	case TypeEnum, TypeMap, TypeFunc, TypeCFunc,
+	case TypeEnum, TypeFunc, TypeCFunc,
 		TypeMultiReturn, TypeGenerator, TypeCoroutine:
 		return false
 	case TypeArray:

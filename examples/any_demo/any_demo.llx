@@ -3,7 +3,7 @@
 //
 // Run with:
 //   .\llvmc.exe examples\any_demo\any_demo.llx
-//   echo $LASTEXITCODE   # (PowerShell) -> 6  (all six sanity checks passed)
+//   echo $LASTEXITCODE   # (PowerShell) -> 7  (all seven sanity checks passed)
 
 struct Point {
     X int
@@ -64,6 +64,17 @@ func main() int {
         ok = ok + 1
     }
 
-    print(ok)   // 6
+    // A map is boxable too - metadata-only, so AnyName is just "map" and
+    // AnyFields has nothing to walk (entry reflection isn't supported yet).
+    m := make(map[string]int)
+    m["x"] = 5
+    boxedMap := Any(m)
+    print(AnyName(boxedMap))   // "map"
+    mv, mok := AnyAs[map[string]int](boxedMap)
+    if mok && mv["x"] == 5 {
+        ok = ok + 1
+    }
+
+    print(ok)   // 7
     return ok
 }

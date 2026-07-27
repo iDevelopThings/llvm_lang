@@ -153,10 +153,11 @@ func TestAnyBoxFixedArrayAccepted(t *testing.T) {
 }
 
 // TestAnyBoxArrayWithUnboxableElementRejected proves an array is only
-// boxable if its own element type is - a map has no Any descriptor shape
-// this round, so an array of maps must still be rejected.
+// boxable if its own element type is - an enum has no Any descriptor shape
+// this round, so an array of enums must still be rejected.
 func TestAnyBoxArrayWithUnboxableElementRejected(t *testing.T) {
-	expectCheckErrors(t, "func f() {\n\ts := make([]map[string]int, 1)\n\ta := Any(s)\n}\n", 1)
+	expectCheckErrors(t, "enum Shape {\n\tPoint\n}\n"+
+		"func f() {\n\ts := []Shape{Shape.Point}\n\ta := Any(s)\n}\n", 1)
 }
 
 // An array of Any is rejected the same way a struct field of Any is
@@ -178,8 +179,12 @@ func TestAnyBoxStructWithArrayOfAnyFieldRejected(t *testing.T) {
 		"func f() {\n\tb := Bag{Items: []Any{Any(1)}}\n\ta := Any(b)\n}\n", 1)
 }
 
-func TestAnyBoxMapRejected(t *testing.T) {
-	expectCheckErrors(t, "func f() {\n\tm := make(map[string]int)\n\ta := Any(m)\n}\n", 1)
+// TestAnyBoxMapAccepted proves a map is now boxable (metadata-only - see
+// LANGUAGE.md's "Any" section): its runtime value is a single opaque
+// pointer, copied wholesale exactly like a raw pointer, regardless of its
+// own key/value types.
+func TestAnyBoxMapAccepted(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\tm := make(map[string]int)\n\ta := Any(m)\n}\n", 0)
 }
 
 func TestAnyBoxFuncValueRejected(t *testing.T) {
@@ -192,16 +197,18 @@ func TestAnyBoxNonCopyableStructRejected(t *testing.T) {
 		"func f() {\n\tr := Res{0}\n\ta := Any(move r)\n}\n", 1)
 }
 
-// A struct containing a field of an otherwise-unboxable kind (here a map -
-// arrays are boxable now, see TestAnyBoxDynamicArrayAccepted above) must be
-// rejected at this same compile-time checkpoint, not just when boxing that
-// field type directly - codegen's structDescriptor recurses into every
-// field's own type descriptor unconditionally, so letting this compile would
-// panic the first time Bag is ever boxed anywhere in the program, rather
-// than reporting a clean diagnostic here.
+// A struct containing a field of an otherwise-unboxable kind (here an enum -
+// arrays and maps are both boxable now, see TestAnyBoxDynamicArrayAccepted/
+// TestAnyBoxMapAccepted above) must be rejected at this same compile-time
+// checkpoint, not just when boxing that field type directly - codegen's
+// structDescriptor recurses into every field's own type descriptor
+// unconditionally, so letting this compile would panic the first time Bag
+// is ever boxed anywhere in the program, rather than reporting a clean
+// diagnostic here.
 func TestAnyBoxStructWithUnboxableFieldRejected(t *testing.T) {
-	expectCheckErrors(t, "struct Bag {\n\tItems map[string]int\n}\n"+
-		"func f() {\n\tb := Bag{Items: make(map[string]int)}\n\ta := Any(b)\n}\n", 1)
+	expectCheckErrors(t, "enum Shape {\n\tPoint\n}\n"+
+		"struct Bag {\n\tItems Shape\n}\n"+
+		"func f() {\n\tb := Bag{Items: Shape.Point}\n\ta := Any(b)\n}\n", 1)
 }
 
 // TestAnyBoxStructWithArrayFieldAccepted proves a struct field that's itself
@@ -210,6 +217,14 @@ func TestAnyBoxStructWithUnboxableFieldRejected(t *testing.T) {
 func TestAnyBoxStructWithArrayFieldAccepted(t *testing.T) {
 	expectCheckErrors(t, "struct Bag {\n\tItems []int\n}\n"+
 		"func f() {\n\tb := Bag{Items: []int{1, 2}}\n\ta := Any(b)\n}\n", 0)
+}
+
+// TestAnyBoxStructWithMapFieldAccepted mirrors the array-field case above for
+// a map field - now boxable (TestAnyBoxMapAccepted), so a struct holding one
+// must be too.
+func TestAnyBoxStructWithMapFieldAccepted(t *testing.T) {
+	expectCheckErrors(t, "struct Bag {\n\tItems map[string]int\n}\n"+
+		"func f() {\n\tb := Bag{Items: make(map[string]int)}\n\ta := Any(b)\n}\n", 0)
 }
 
 // An Any-typed field is legal at the top level (Any(x) where x is already

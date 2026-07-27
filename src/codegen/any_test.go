@@ -83,6 +83,103 @@ func f() int {
 	}
 }
 
+// --- map boxing (metadata-only - see LANGUAGE.md's "Any" section) ---
+
+// TestAnyBoxMapRoundTrip JIT-executes box -> AnyAs for a map, proving the
+// real map value (its own live table, not a copy) survives the round trip -
+// inserting through the round-tripped handle is visible through the
+// original variable, matching a map's own reference-type semantics.
+func TestAnyBoxMapRoundTrip(t *testing.T) {
+	jm := compileAndJIT(t, `
+func f() int {
+	m := make(map[string]int)
+	m["a"] = 1
+	a := Any(m)
+	v, ok := AnyAs[map[string]int](a)
+	if !ok {
+		return -1
+	}
+	v["b"] = 2
+	return m["a"] + m["b"]
+}
+`)
+	if got := jm.runInt32(t, "f"); got != 3 {
+		t.Errorf("f() = %d, want 3", got)
+	}
+}
+
+// TestAnyBoxMapKindOnlyMatchIsAKnownImprecision documents, rather than
+// merely asserting, that AnyAs[T] for T a map type only ever checks
+// sema.TypeKind - every map shares the one interned TypeMap descriptor
+// (unlike a struct/array, which also compares descriptor pointer identity -
+// see genAnyAsCall) - so a boxed map[string]int spuriously reports ok=true
+// against AnyAs[map[int]bool] too. Accepted, documented gap for this round
+// (see DECISIONS.md), not a regression to fix here.
+func TestAnyBoxMapKindOnlyMatchIsAKnownImprecision(t *testing.T) {
+	jm := compileAndJIT(t, `
+func f() bool {
+	m := make(map[string]int)
+	a := Any(m)
+	_, ok := AnyAs[map[int]bool](a)
+	return ok
+}
+`)
+	if got := jm.runBool(t, "f"); !got {
+		t.Errorf("f() = %v, want true (documented kind-only imprecision for maps)", got)
+	}
+}
+
+// TestAnyFieldsOnBoxedMapYieldsZeroIterations proves AnyFields' existing
+// non-struct precedent (a boxed int already yields zero fields) also holds
+// for a boxed map - its descriptor has fieldCount 0/fieldsPtr null exactly
+// like every other non-struct kind.
+func TestAnyFieldsOnBoxedMapYieldsZeroIterations(t *testing.T) {
+	jm := compileAndJIT(t, `
+func f() int {
+	m := make(map[string]int)
+	m["a"] = 1
+	a := Any(m)
+	count := 0
+	for name, v := range AnyFields(a) {
+		count = count + 1
+	}
+	return count
+}
+`)
+	if got := jm.runInt32(t, "f"); got != 0 {
+		t.Errorf("f() = %d, want 0", got)
+	}
+}
+
+// TestAnyBoxStructWithMapFieldRoundTrip mirrors
+// TestAnyFieldsStructWithArrayFieldReflectable for a map field - walked via
+// AnyFields, then round-tripped back to a real map through AnyAs.
+func TestAnyBoxStructWithMapFieldRoundTrip(t *testing.T) {
+	jm := compileAndJIT(t, `
+struct Bag {
+	Items map[string]int
+}
+func f() int {
+	b := Bag{Items: make(map[string]int)}
+	b.Items["x"] = 5
+	a := Any(b)
+	sum := 0
+	for name, v := range AnyFields(a) {
+		if name == "Items" {
+			mv, ok := AnyAs[map[string]int](v)
+			if ok {
+				sum = sum + mv["x"]
+			}
+		}
+	}
+	return sum
+}
+`)
+	if got := jm.runInt32(t, "f"); got != 5 {
+		t.Errorf("f() = %d, want 5", got)
+	}
+}
+
 // --- AnyKind/AnyName ---
 
 // TestAnyKindConsistentAcrossSameKind proves AnyKind is a stable, kind-
@@ -102,6 +199,38 @@ func differentKind() bool {
 	}
 	if got := jm.runBool(t, "differentKind"); got {
 		t.Errorf("AnyKind(Any(5)) == AnyKind(Any(true)) = %v, want false", got)
+	}
+}
+
+// TestAnyKindAndNameForMap proves a boxed map doesn't crash AnyKind/AnyName
+// and reports a stable kind distinct from a non-map, plus a non-empty
+// AnyName - "map" (anyPrimitiveDisplayName's fallback, since TypeMap has no
+// Display() column), not asserted verbatim here since the exact string isn't
+// this round's contract.
+func TestAnyKindAndNameForMap(t *testing.T) {
+	jm := compileAndJIT(t, `
+func sameKind() bool {
+	a := make(map[string]int)
+	b := make(map[int]bool)
+	return AnyKind(Any(a)) == AnyKind(Any(b))
+}
+func differentFromInt() bool {
+	m := make(map[string]int)
+	return AnyKind(Any(m)) != AnyKind(Any(5))
+}
+func nameNonEmpty() bool {
+	m := make(map[string]int)
+	return len(AnyName(Any(m))) > 0
+}
+`)
+	if got := jm.runBool(t, "sameKind"); !got {
+		t.Errorf("AnyKind matches across two different map shapes = %v, want true", got)
+	}
+	if got := jm.runBool(t, "differentFromInt"); !got {
+		t.Errorf("AnyKind(map) != AnyKind(int) = %v, want true", got)
+	}
+	if got := jm.runBool(t, "nameNonEmpty"); !got {
+		t.Errorf("AnyName(boxed map) non-empty = %v, want true", got)
 	}
 }
 
