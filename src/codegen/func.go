@@ -117,6 +117,7 @@ func (g *Generator) declareFuncSignature(decl ast.NodeIndex) {
 		fnType:   fnType,
 		retType:  retType,
 		isMethod: receiver != ast.InvalidNode,
+		isAsync:  isAsync,
 	}
 }
 
@@ -245,6 +246,7 @@ func (g *Generator) beginSyntheticFunc(fn llvm.Value) (restore func()) {
 	savedCtxPtr, savedCaptureIndex, savedCaptureTy := g.curCtxPtr, g.curCaptureIndex, g.curCaptureTy
 	savedIsGenerator, savedGeneratorCallback, savedGeneratorElem := g.curIsGenerator, g.curGeneratorCallback, g.curGeneratorElem
 	savedIsAsync, savedCoroId, savedCoroHandle, savedCoroTeardownBB := g.curIsAsync, g.curCoroId, g.curCoroHandle, g.curCoroTeardownBB
+	savedCoroPromise := g.curCoroPromise
 
 	g.curFn = fn
 	g.entryBlock = g.ctx.AddBasicBlock(fn, "entry")
@@ -264,6 +266,7 @@ func (g *Generator) beginSyntheticFunc(fn llvm.Value) (restore func()) {
 	g.curCoroId = llvm.Value{}
 	g.curCoroHandle = llvm.Value{}
 	g.curCoroTeardownBB = llvm.BasicBlock{}
+	g.curCoroPromise = llvm.Value{}
 
 	return func() {
 		g.curFn, g.entryBlock, g.locals = savedFn, savedEntry, savedLocals
@@ -273,6 +276,7 @@ func (g *Generator) beginSyntheticFunc(fn llvm.Value) (restore func()) {
 		g.curCtxPtr, g.curCaptureIndex, g.curCaptureTy = savedCtxPtr, savedCaptureIndex, savedCaptureTy
 		g.curIsGenerator, g.curGeneratorCallback, g.curGeneratorElem = savedIsGenerator, savedGeneratorCallback, savedGeneratorElem
 		g.curIsAsync, g.curCoroId, g.curCoroHandle, g.curCoroTeardownBB = savedIsAsync, savedCoroId, savedCoroHandle, savedCoroTeardownBB
+		g.curCoroPromise = savedCoroPromise
 	}
 }
 
@@ -301,7 +305,7 @@ func (g *Generator) genFuncBody(decl ast.NodeIndex) {
 
 	if isAsync {
 		g.curIsAsync = true
-		g.genCoroPrologue()
+		g.genCoroPrologue(declaredRetType)
 	}
 
 	offset := 0

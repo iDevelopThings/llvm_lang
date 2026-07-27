@@ -86,8 +86,8 @@ This is a quick list of deliberate limits, not a roadmap.
 - An enum-match arm can contain only one variant pattern.
 - Generators produce one value at a time and can only be consumed directly
   by a range loop.
-- Async functions have no result value and cannot be methods, lambdas, or
-  directly await another coroutine.
+- Async functions cannot be methods, lambdas, or directly await another
+  coroutine; a coroutine-to-coroutine call/await is still out of scope.
 - Coroutines require optimization and cannot be compiled with `-no-opt`.
 
 ## Packages, interop, and tools

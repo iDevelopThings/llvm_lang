@@ -112,6 +112,31 @@ func TestAsyncOnFuncLitIsParseError(t *testing.T) {
 	}
 }
 
+// TestAsyncFuncDeclWithReturnTypeParsesFine proves an async func's return
+// type parses exactly like an ordinary func's - the same grammar, no new
+// syntax (see LANGUAGE.md's "Coroutines" section) - the return-type slot
+// (Dump's 4th child) is a real Ident node, not <missing>.
+func TestAsyncFuncDeclWithReturnTypeParsesFine(t *testing.T) {
+	src := "async func Coro() int { }"
+	p := New(lexer.NewFile("t.ll", src))
+	n := p.parseTopLevelItem()
+	if p.diags.HasErrors() {
+		t.Fatalf("unexpected parse errors for %q: %v", src, p.diags.All())
+	}
+	want := "" +
+		"FuncDecl \"async\"\n" +
+		"  <missing>\n" +
+		"  Ident \"Coro\"\n" +
+		"  <missing>\n" +
+		"  ParamList\n" +
+		"  Ident \"int\"\n" +
+		"  Block\n"
+	got := p.tree.Dump(n)
+	if got != want {
+		t.Errorf("Dump(%q):\n got:\n%s\nwant:\n%s", src, got, want)
+	}
+}
+
 func TestAwaitStmtShape(t *testing.T) {
 	src := "async func Coro() { await }"
 	p := New(lexer.NewFile("t.ll", src))

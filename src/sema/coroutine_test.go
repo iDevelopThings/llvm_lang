@@ -26,11 +26,35 @@ func TestAsyncFuncMethodReceiverIsError(t *testing.T) {
 	expectCheckErrors(t, src, 1)
 }
 
-func TestAsyncFuncDeclaredReturnTypeIsError(t *testing.T) {
-	// Async functions are void-only this round (see LANGUAGE.md's
-	// "Coroutines" section for why) - a declared return type is a clean
-	// diagnostic, not a silent miscompile.
+// TestAsyncFuncDeclaredReturnTypeIsFine proves an async function can now
+// declare a real result type (see LANGUAGE.md's "Coroutines" section) -
+// read back later via result(h).
+func TestAsyncFuncDeclaredReturnTypeIsFine(t *testing.T) {
 	src := "async func Coro() int {\n\tawait\n\treturn 1\n}\n"
+	checkSrc(t, src)
+}
+
+// TestAsyncFuncMissingReturnIsError mirrors an ordinary function's own
+// "missing return" check (isTerminatingStmt) - await is a plain statement,
+// not a branch, so a body ending in one still needs a return on every path.
+func TestAsyncFuncMissingReturnIsError(t *testing.T) {
+	src := "async func Coro() int {\n\tawait\n}\n"
+	expectCheckErrors(t, src, 1)
+}
+
+// TestAsyncFuncReturnWrongTypeIsError proves a non-void async function's
+// `return expr` is checked against its declared return type via the exact
+// same machinery an ordinary function's return already uses.
+func TestAsyncFuncReturnWrongTypeIsError(t *testing.T) {
+	src := "async func Coro() int {\n\tawait\n\treturn \"nope\"\n}\n"
+	expectCheckErrors(t, src, 1)
+}
+
+// TestAsyncFuncAndGeneratorReturnTypeIsError proves async combined with a
+// `yield T` return type - a wholly different construct - is still rejected,
+// now that a declared return type alone no longer is.
+func TestAsyncFuncAndGeneratorReturnTypeIsError(t *testing.T) {
+	src := "async func Coro() yield int {\n\tawait\n\tyield 1\n}\n"
 	expectCheckErrors(t, src, 1)
 }
 
@@ -125,6 +149,33 @@ func TestResumeCallOnNonCoroutineIsError(t *testing.T) {
 
 func TestDoneCallOnNonCoroutineIsError(t *testing.T) {
 	src := "func use() bool {\n\tx := 5\n\treturn done(x)\n}\n"
+	expectCheckErrors(t, src, 1)
+}
+
+// --- result builtin ---
+
+// TestResultCallOnNonVoidCoroutineIsFine proves result(h)'s own return type
+// is h's resolved TypeCoroutine.Elem - int here - with no type argument.
+func TestResultCallOnNonVoidCoroutineIsFine(t *testing.T) {
+	src := "async func Coro() int {\n\tawait\n\treturn 1\n}\n\nfunc use() int {\n\th := Coro()\n\tresume(h)\n\tv := result(h)\n\tdelete h\n\treturn v\n}\n"
+	checkSrc(t, src)
+}
+
+// TestResultCallOnVoidCoroutineIsError proves result(h) against an ordinary
+// (still void, no declared return type) coroutine is a clean diagnostic, not
+// a silently-void result.
+func TestResultCallOnVoidCoroutineIsError(t *testing.T) {
+	src := "async func Coro() {\n\tawait\n}\n\nfunc use() {\n\th := Coro()\n\tresult(h)\n\tdelete h\n}\n"
+	expectCheckErrors(t, src, 1)
+}
+
+func TestResultCallOnNonCoroutineIsError(t *testing.T) {
+	src := "func use() int {\n\tx := 5\n\treturn result(x)\n}\n"
+	expectCheckErrors(t, src, 1)
+}
+
+func TestResultCallWrongArgCountIsError(t *testing.T) {
+	src := "async func Coro() int {\n\tawait\n\treturn 1\n}\n\nfunc use() {\n\th := Coro()\n\tresult(h, h)\n\tdelete h\n}\n"
 	expectCheckErrors(t, src, 1)
 }
 

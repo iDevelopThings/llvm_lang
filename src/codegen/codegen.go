@@ -177,6 +177,12 @@ type funcEntry struct {
 	// hidden return slot and thread it through as the call's real first
 	// argument.
 	sretReturn bool
+
+	// isAsync marks an `async func` (see LANGUAGE.md's "Coroutines"
+	// section) - its real LLVM return is always the coro.begin handle (a
+	// ptr), regardless of retType, which genFuncCall's own struct-return
+	// coercion must never apply to a coroutine handle.
+	isAsync bool
 }
 
 // structLayout is one struct type's LLVM shape: its (named) LLVM struct
@@ -453,22 +459,26 @@ type Generator struct {
 	curGeneratorCallback llvm.Value
 	curGeneratorElem     sema.Type
 
-	// curIsAsync/curCoroId/curCoroHandle/curCoroTeardownBB describe the
-	// function currently being generated only when it's itself an `async
-	// func`'s own real body (see LANGUAGE.md's "Coroutines" section and
-	// CODEGEN.md's "Coroutines" section) - zero/nil for every other
-	// function kind. curCoroId/curCoroHandle are the token/ptr values
+	// curIsAsync/curCoroId/curCoroHandle/curCoroTeardownBB/curCoroPromise
+	// describe the function currently being generated only when it's itself
+	// an `async func`'s own real body (see LANGUAGE.md's "Coroutines"
+	// section and CODEGEN.md's "Coroutines" section) - zero/nil for every
+	// other function kind. curCoroId/curCoroHandle are the token/ptr values
 	// llvm.coro.id/llvm.coro.begin produce in the function's own entry
 	// block (genCoroPrologue) - safe to keep as plain SSA values rather than
 	// re-loading from a slot, since the entry block dominates every later
 	// use, including every per-await cleanup block. curCoroTeardownBB is
 	// the function's own shared final-teardown block (coroEndBlock),
 	// lazily created on first use since a coroutine with zero awaits still
-	// needs exactly one.
+	// needs exactly one. curCoroPromise is the entry-block alloca backing a
+	// non-void async function's own declared result (genCoroPrologue) -
+	// genReturnStmt stores into it; a still-void async function leaves this
+	// as the zero Value, matching its own coro.id call passing null instead.
 	curIsAsync        bool
 	curCoroId         llvm.Value
 	curCoroHandle     llvm.Value
 	curCoroTeardownBB llvm.BasicBlock
+	curCoroPromise    llvm.Value
 
 	// rangeGenCounter synthesizes each generator-consuming range-for's own
 	// unique, collision-free callback function name (genRangeGeneratorCallbackFunc) -
@@ -622,6 +632,8 @@ type Generator struct {
 	coroDestroyType llvm.Type
 	coroDoneFn      llvm.Value
 	coroDoneType    llvm.Type
+	coroPromiseFn   llvm.Value
+	coroPromiseType llvm.Type
 
 	// presplitCoroutineAttrKind is the "presplitcoroutine" enum attribute
 	// kind ID (see CODEGEN.md's "Coroutines" section) - every async

@@ -54,6 +54,7 @@ func (g *Generator) setupCoroutines() {
 	g.coroResumeFn, g.coroResumeType = g.coroIntrinsic("llvm.coro.resume", nil)
 	g.coroDestroyFn, g.coroDestroyType = g.coroIntrinsic("llvm.coro.destroy", nil)
 	g.coroDoneFn, g.coroDoneType = g.coroIntrinsic("llvm.coro.done", nil)
+	g.coroPromiseFn, g.coroPromiseType = g.coroIntrinsic("llvm.coro.promise", nil)
 
 	g.presplitCoroutineAttrKind = llvm.AttributeKindID("presplitcoroutine")
 	g.coroTokenTy = g.ctx.TokenType()
@@ -109,6 +110,19 @@ func (g *Generator) buildCoroDestroyLocalFn() {
 	g.builder.CreateRetVoid()
 }
 
+// coroPromiseAlign is the fixed alignment (bytes) used for both a non-void
+// async function's own promise alloca (genCoroPrologue) and every
+// llvm.coro.promise call reading it back (genResultCall) - LLVM requires
+// these to match exactly (see llvm.org/docs/Coroutines.html's coro.promise
+// entry). A literal constant used on both sides, rather than querying the
+// module's own TargetData, sidesteps that query returning an incomplete
+// answer: src/compiler's own finishPipeline only pins the module's real
+// DataLayout right before RunPasses, after codegen has already finished. 8
+// bytes is a safe upper bound for every declared return type this language
+// has (nothing here is ever more than pointer/i64/f64-aligned), and
+// over-aligning an alloca beyond its natural requirement is always legal.
+const coroPromiseAlign = 8
+
 // genCoroPrologue emits an async function's own ramp prologue - the fixed
 // coro.id/coro.size/malloc/coro.begin sequence CODEGEN.md's "Coroutines"
 // section documents - into the current (entry) block, storing the resulting
@@ -116,10 +130,26 @@ func (g *Generator) buildCoroDestroyLocalFn() {
 // bare-return case to read. No llvm.coro.alloc allocation-elision check is
 // emitted (see CODEGEN.md) - every coroutine call always heap-allocates its
 // own frame, matching the verified minimal shape this is grounded in.
-func (g *Generator) genCoroPrologue() {
+//
+// retType is the async function's own declared result type (void for the
+// still-supported no-result case). When non-void, an entry-block alloca of
+// that type becomes coro.id's own "promise" operand (its second argument) -
+// the fixed frame slot LLVM's coroutine-splitting passes place at a known
+// offset, later read back via llvm.coro.promise (genResultCall) - stored
+// onto Generator.curCoroPromise. A void async function keeps passing null,
+// identical to before this existed.
+func (g *Generator) genCoroPrologue(retType sema.Type) {
+	promiseArg := llvm.ConstNull(g.ptrTy)
+	if retType.Kind != sema.TypeVoid {
+		promise := g.createEntryAlloca(g.llvmType(retType), "coro.promise")
+		promise.SetAlignment(coroPromiseAlign)
+		g.curCoroPromise = promise
+		promiseArg = promise
+	}
+
 	id := g.builder.CreateCall(g.coroIdType, g.coroIdFn, []llvm.Value{
 		llvm.ConstInt(g.i32Ty, 0, false),
-		llvm.ConstNull(g.ptrTy),
+		promiseArg,
 		llvm.ConstNull(g.ptrTy),
 		llvm.ConstNull(g.ptrTy),
 	}, "")
@@ -293,6 +323,46 @@ func (g *Generator) genDoneCall(handle llvm.Value) llvm.Value {
 		[]llvm.Value{llvm.ConstInt(g.boolTy, 1, false), doneVal},
 		[]llvm.BasicBlock{entryBB, liveBB},
 	)
+	return phi
+}
+
+// genResultCall implements the `result(h) T` builtin (see LANGUAGE.md's
+// "Coroutines" section) - reads h's own promise slot (genCoroPrologue's
+// entry-block alloca in h's owning function, recovered here via
+// llvm.coro.promise(handle, align, from=false), per LLVM's own documented
+// coro.promise semantics) - guarded by a real done(h) branch, never a blind
+// load (mirroring genAnyAsCall's own identical convention): result(h) before
+// the coroutine is actually done returns T's zero value instead of reading a
+// possibly-uninitialized slot.
+func (g *Generator) genResultCall(argNode ast.NodeIndex) llvm.Value {
+	target := *g.info.Types[argNode].Elem
+	targetLLType := g.llvmType(target)
+
+	handle := g.genExpr(argNode)
+	isDone := g.genDoneCall(handle)
+
+	doneBB := g.ctx.AddBasicBlock(g.curFn, "result.done")
+	notDoneBB := g.ctx.AddBasicBlock(g.curFn, "result.notdone")
+	contBB := g.ctx.AddBasicBlock(g.curFn, "result.cont")
+	g.builder.CreateCondBr(isDone, doneBB, notDoneBB)
+
+	g.builder.SetInsertPointAtEnd(doneBB)
+	promisePtr := g.builder.CreateCall(g.coroPromiseType, g.coroPromiseFn, []llvm.Value{
+		handle,
+		llvm.ConstInt(g.i32Ty, coroPromiseAlign, false),
+		llvm.ConstInt(g.boolTy, 0, false),
+	}, "")
+	doneVal := g.builder.CreateLoad(targetLLType, promisePtr, "")
+	g.builder.CreateBr(contBB)
+	doneEndBB := g.builder.GetInsertBlock()
+
+	g.builder.SetInsertPointAtEnd(notDoneBB)
+	zeroVal := llvm.ConstNull(targetLLType)
+	g.builder.CreateBr(contBB)
+
+	g.builder.SetInsertPointAtEnd(contBB)
+	phi := g.builder.CreatePHI(targetLLType, "")
+	phi.AddIncoming([]llvm.Value{doneVal, zeroVal}, []llvm.BasicBlock{doneEndBB, notDoneBB})
 	return phi
 }
 

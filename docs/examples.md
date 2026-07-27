@@ -53,7 +53,7 @@ Run a multi-file example by passing its directory:
 | [`closures`](../examples/closures/closures.llx) | Lambdas with captured state |
 | [`generics`](../examples/generics/generics.llx) | Generic functions, structs, and methods |
 | [`generators`](../examples/generators/generators.llx) | Yielding values into range loops |
-| [`coroutines`](../examples/coroutines/coroutines.llx) | Suspend, resume, completion, and cleanup |
+| [`coroutines`](../examples/coroutines/coroutines.llx) | Suspend, resume, completion, cleanup, and a declared result value |
 | [`any_demo`](../examples/any_demo/any_demo.llx) | Boxing values into `Any`, `AnyKind`/`AnyName`/`AnyAs`/`AnyFields`/`AnyLen`/`AnyIndex` |
 
 ## Packages and standard library

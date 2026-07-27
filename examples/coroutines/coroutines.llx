@@ -69,12 +69,31 @@ func destroyEarly() {
     delete h
 }
 
+// ComputeAnswer demonstrates a non-void async function's own real result
+// (see LANGUAGE.md's "Coroutines" section) - read back via result(h) once
+// resume(h) has driven it to completion.
+async func ComputeAnswer() int {
+    await
+    return 42
+}
+
+func driveAnswerToCompletion() int {
+    h := ComputeAnswer()
+    resume(h)
+    answer := result(h)
+    delete h
+    return answer
+}
+
 func main() int {
     driveToCompletion()
     // prints so far: 100, 200, 300, 3, 2, 1
 
     destroyEarly()
     // prints: 100, 200, 2, 1
+
+    print(driveAnswerToCompletion())
+    // prints: 42
 
     return 0
 }

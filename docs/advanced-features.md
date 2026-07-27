@@ -54,8 +54,27 @@ coroutine early; otherwise it cleans itself up at scope exit. Repeated
 `coroutine` is the handle's type and may be used for parameters and struct
 fields. A struct containing one is also non-copyable.
 
-Async functions currently have no result value and cannot be methods,
-lambdas, closures, or directly await other coroutines.
+An async function may declare a real return type, checked like an ordinary
+function's:
+
+```go
+async func ComputeAnswer() int {
+    await
+    return 42
+}
+
+h := ComputeAnswer()
+resume(h)
+answer := result(h)
+delete h
+```
+
+`result(h)` reads `h`'s own declared result once it's `done`; called earlier
+it returns the result type's zero value instead. `result` on a coroutine
+declaring no return type is a compile error.
+
+Async functions still cannot be methods, lambdas, closures, or directly
+await other coroutines.
 
 Coroutines require the normal optimization pipeline. Do not compile them
 with `-no-opt`.

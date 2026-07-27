@@ -74,10 +74,10 @@ type enclosingFunc struct {
 	yieldElem   Type
 
 	// isAsync marks an `async func`'s own body (see LANGUAGE.md's
-	// "Coroutines" section) - checkAwaitStmt's only reader. Async and
-	// generator are mutually exclusive in practice (checkFuncDecl already
-	// rejects an async func declaring any return type, which a `yield T`
-	// return-type marker is one), but nothing here assumes that itself.
+	// "Coroutines" section) - checkAwaitStmt's only reader. hasReturn/ret
+	// above already carry an async function's own declared result type (if
+	// any) with no async-specific handling of their own - checkFuncDecl
+	// separately rejects isAsync combined with a `yield T` return type.
 	isAsync bool
 }
 
@@ -782,20 +782,20 @@ func (c *checker) checkFuncDecl(decl ast.NodeIndex) {
 	if isAsync && c.tree.FuncReceiver(decl) != ast.InvalidNode {
 		c.errorAt(decl, "a method cannot be an async function")
 	}
-	if isAsync && c.tree.FuncReturnType(decl) != ast.InvalidNode {
-		// Reading an async function's own final result (once done(h) is
-		// true) needs llvm.coro.promise-based storage this round explicitly
-		// doesn't build - see LANGUAGE.md's "Coroutines" section for the
-		// full reasoning. An async func is void-only for now.
-		c.errorAt(decl, "async functions cannot declare a return type yet - see LANGUAGE.md's Coroutines section")
+	if isAsync && isGenerator {
+		// A `yield T` return type marks a wholly different construct (a
+		// generator function - see LANGUAGE.md's "Generator functions"
+		// section) - the two return-type spellings are mutually exclusive.
+		c.errorAt(decl, "an async function cannot also be a generator function (yield return type)")
 	}
 
 	prevFunc := c.curFunc
 	c.curFunc = &enclosingFunc{
 		// A generator's hasReturn stays false, exactly like a void function -
 		// see enclosingFunc's own doc comment and checkReturnStmt. An async
-		// func is void-only this round (see above), so hasReturn is simply
-		// whatever the ordinary rule already computes for a void function.
+		// function's declared return type (see LANGUAGE.md's "Coroutines"
+		// section) is checked by this exact same ordinary rule - void when
+		// absent, real otherwise - with no async-specific case needed here.
 		hasReturn:   c.tree.FuncReturnType(decl) != ast.InvalidNode && !isGenerator,
 		ret:         sig.Return,
 		isGenerator: isGenerator,
@@ -2086,10 +2086,11 @@ func (c *checker) typeFromSymbol(sym *Symbol) Type {
 		case "bool":
 			return boolType
 		case "coroutine":
-			// Elem always points at voidType here - async funcs declare no
-			// return type this round (see LANGUAGE.md's "Coroutines"
-			// section), and Equal/String both assume a non-nil Elem for
-			// TypeCoroutine (see the call-expr construction site below).
+			// The bare `coroutine` keyword names no particular async func, so
+			// Elem always points at voidType here - only calling a real async
+			// func (the call-expr construction site below) can produce a
+			// TypeCoroutine with a real result type. Equal/String both assume
+			// a non-nil Elem for TypeCoroutine either way.
 			ret := voidType
 			return Type{Kind: TypeCoroutine, Elem: &ret}
 		case "Any":
@@ -4960,6 +4961,9 @@ func (c *checker) checkCallExpr(n ast.NodeIndex) Type {
 	if c.isBuiltinCall(callee, "done") {
 		return c.checkDoneCall(n, args)
 	}
+	if c.isBuiltinCall(callee, "result") {
+		return c.checkResultCall(n, args)
+	}
 	if c.isBuiltinCall(callee, "AnyKind") {
 		return c.checkAnyKindCall(n, args)
 	}
@@ -5160,16 +5164,16 @@ func (c *checker) checkBoxableIntoAny(a ast.NodeIndex, at Type) bool {
 
 // calleeNeverVariadic reports whether callee names a callable form that can
 // never be variadic - a builtin (print/make/append/len/args/remove/resume/
-// done), an explicit conversion, a struct constructor, or an enum variant
-// construction - none of which ever reach checkCallArgs' own Variadic check
-// (see checkCallExpr's own spread guard, above). A callee that isn't one of
-// these (an ordinary or generic function/method, still unresolved, or
-// invalid) reports false, deferring to checkCallArgs.
+// done/result), an explicit conversion, a struct constructor, or an enum
+// variant construction - none of which ever reach checkCallArgs' own
+// Variadic check (see checkCallExpr's own spread guard, above). A callee
+// that isn't one of these (an ordinary or generic function/method, still
+// unresolved, or invalid) reports false, deferring to checkCallArgs.
 func (c *checker) calleeNeverVariadic(callee ast.NodeIndex) bool {
 	if c.isPrintCall(callee) {
 		return true
 	}
-	for _, name := range [...]string{"make", "append", "len", "args", "remove", "resume", "done"} {
+	for _, name := range [...]string{"make", "append", "len", "args", "remove", "resume", "done", "result"} {
 		if c.isBuiltinCall(callee, name) {
 			return true
 		}
@@ -5405,22 +5409,50 @@ func (c *checker) checkDoneCall(n ast.NodeIndex, args []ast.NodeIndex) Type {
 // way. Shared since the two builtins differ only in name and codegen, not
 // in how their one argument is checked.
 func (c *checker) checkCoroHandleArgCall(n ast.NodeIndex, args []ast.NodeIndex, name string) Type {
+	if _, ok := c.checkSingleCoroHandleArg(n, args, name); !ok {
+		return invalidType
+	}
+	return boolType
+}
+
+// checkSingleCoroHandleArg validates the "exactly one coroutine handle
+// argument" shape resume/done/result all share, returning that handle's own
+// TypeCoroutine type (whose Elem is its declared result type, void for an
+// ordinary coroutine) and whether validation passed.
+func (c *checker) checkSingleCoroHandleArg(n ast.NodeIndex, args []ast.NodeIndex, name string) (Type, bool) {
 	if len(args) != 1 {
 		c.errorAtNodes(args, n, "%s takes exactly 1 argument, got %d", name, len(args))
 		for _, a := range args {
 			c.checkValueExpr(a)
 		}
-		return invalidType
+		return invalidType, false
 	}
 	t := c.checkValueExpr(args[0])
 	if t.IsInvalid() {
-		return invalidType
+		return invalidType, false
 	}
 	if t.Kind != TypeCoroutine {
 		c.errorAt(args[0], "%s requires a coroutine handle, got %s", name, t)
+		return invalidType, false
+	}
+	return t, true
+}
+
+// checkResultCall type-checks the predeclared `result(h) T` builtin (see
+// LANGUAGE.md's "Coroutines" section) - reads a finished coroutine's own
+// declared result value. Unlike AnyAs[T], there's no explicit type argument:
+// h's own resolved TypeCoroutine.Elem already carries its real result type,
+// computed directly at the call site.
+func (c *checker) checkResultCall(n ast.NodeIndex, args []ast.NodeIndex) Type {
+	t, ok := c.checkSingleCoroHandleArg(n, args, "result")
+	if !ok {
 		return invalidType
 	}
-	return boolType
+	if t.Elem.Kind == TypeVoid {
+		c.errorAt(args[0], "result(h) requires a coroutine with a declared result type")
+		return invalidType
+	}
+	return *t.Elem
 }
 
 // checkRemoveCall type-checks the predeclared `remove(m, k)` builtin (see

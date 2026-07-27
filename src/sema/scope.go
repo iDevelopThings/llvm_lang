@@ -742,11 +742,12 @@ func universeScope() *Scope {
 	// builtin for map key removal (`remove(m, k)`), not an extension of the
 	// existing `delete p` statement (a wholly unrelated real pointer/heap
 	// deallocation operation).
-	// resume/done are predeclared exactly like make/append/len/args/remove -
-	// see LANGUAGE.md's "Coroutines" section: `resume(h) bool`/`done(h) bool`
-	// drive/query a coroutine handle by hand, the same free-function-not-
-	// dot-method shape every other builtin here already uses.
-	for _, name := range []string{"make", "append", "len", "args", "remove", "resume", "done"} {
+	// resume/done/result are predeclared exactly like make/append/len/args/
+	// remove - see LANGUAGE.md's "Coroutines" section: `resume(h) bool`/
+	// `done(h) bool`/`result(h) T` drive/query a coroutine handle by hand,
+	// the same free-function-not-dot-method shape every other builtin here
+	// already uses.
+	for _, name := range []string{"make", "append", "len", "args", "remove", "resume", "done", "result"} {
 		u.Define(&Symbol{
 			Name:  name,
 			Kind:  SymFunc,

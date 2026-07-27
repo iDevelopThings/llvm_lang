@@ -509,7 +509,7 @@ func TestBinary_MainExitCode(t *testing.T) {
 // coroutinesExampleWant is examples/coroutines/coroutines.llx's own expected
 // stdout (see that file's inline comments) - shared by the JIT and AOT
 // variants below.
-const coroutinesExampleWant = "100\n200\n300\n3\n2\n1\n100\n200\n2\n1"
+const coroutinesExampleWant = "100\n200\n300\n3\n2\n1\n100\n200\n2\n1\n42"
 
 // TestBinary_CoroutinesExample runs examples/coroutines/coroutines.llx
 // through the real llvmc binary (JIT) - true suspend/resume coroutines (see

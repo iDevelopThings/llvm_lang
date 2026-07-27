@@ -2098,14 +2098,29 @@ func main() {
 }
 ```
 
-- **`async func Name(params) { body }`** - a new top-level declaration form,
-  modeled on a plain `func` (same params, receiver, and body grammar) with
-  one addition: `await` is legal anywhere inside its own body, at any
-  nesting depth (exactly like `return` is legal anywhere inside an ordinary
+- **`async func Name(params) ReturnType { body }`** - a new top-level
+  declaration form, modeled on a plain `func` (same params, receiver, and
+  body grammar, including an optional declared return type) with one
+  addition: `await` is legal anywhere inside its own body, at any nesting
+  depth (exactly like `return` is legal anywhere inside an ordinary
   function). Never a method (a receiver clause combined with `async` is a
   clean diagnostic) and never a `FuncLit` - `async` is a top-level-only
   marker this round, with no closures/captures for a coroutine's own frame
-  at all.
+  at all. A declared return type is checked exactly like an ordinary
+  function's - a missing `return` on some path is a clean diagnostic, and
+  its value is read back via `result(h)` below:
+
+  ```
+  async func ComputeAnswer() int {
+      await
+      return 42
+  }
+
+  h := ComputeAnswer()
+  resume(h)
+  answer := result(h)   // 42, once h is done
+  delete h
+  ```
 - **`await`** - a bare statement, no operand, no result. Suspends the
   enclosing coroutine at exactly that point; the next `resume(h)` against
   its own handle continues execution immediately after it.
@@ -2122,6 +2137,11 @@ func main() {
   returning `false` - never undefined behavior.
 - **`done(h) bool`** - reports whether the coroutine has already finished
   (normally, or via `delete`/scope exit). Safe to call at any time.
+- **`result(h) T`** - reads `h`'s own declared result (`T`, its function's
+  declared return type). Legal only against a coroutine that actually
+  declares one - `result(h)` on an ordinary void coroutine is a clean
+  diagnostic. Calling it before `h` is `done` is safe and defined: it
+  returns `T`'s zero value rather than an unfinished or garbage result.
 - **`delete h`** - reuses this language's existing `new`/`delete` vocabulary
   (see the "Pointers" section) to explicitly destroy a not-yet-finished
   coroutine early: every local still live at its current suspend point gets
@@ -2148,11 +2168,6 @@ Deliberately the smallest useful core primitive - "one handle, driven by
 hand, no scheduler, no timers" - matching how `range` shipped before
 generator functions built on top of it:
 
-- **No return value.** An async function declares no return type at all -
-  `async func f() int { ... }` is a clean diagnostic. Reading a coroutine's
-  own final result (once `done(h)` is true) needs `llvm.coro.promise`-based
-  storage this round doesn't build - see `CODEGEN.md`'s "Coroutines" section
-  for the full reasoning behind deferring this rather than half-building it.
 - **No built-in timers/scheduler.** The core primitive itself is still a
   bare `await`, resumed purely by an explicit `resume(h)` call - `std/scheduler`
   now provides a Unity-`StartCoroutine`-style `Schedule`/`Tick` API on top of

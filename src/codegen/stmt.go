@@ -686,10 +686,11 @@ func (g *Generator) genIncDecStmt(n ast.NodeIndex) {
 // function declaring no return type - main included - produces `ret void`,
 // except main itself always needs a real i32 exit code (see
 // declareFuncSignature): a bare `return` in main is `ret i32 0`. An async
-// function's own bare return (the only shape it can have - see
-// sema.checkFuncDecl's void-only rule) is genuinely different again: it must
+// function's own return is genuinely different again either way - it must
 // reach the coroutine's own final suspend (finishCoroBody), never a plain
-// `ret`.
+// `ret`; a value additionally gets stored into the promise slot
+// genCoroPrologue built first, for result(h) (genResultCall, coroutine.go)
+// to read back once done.
 func (g *Generator) genReturnStmt(n ast.NodeIndex) bool {
 	valueNode := g.tree.Child(n, 0)
 	if valueNode == ast.InvalidNode {
@@ -715,6 +716,13 @@ func (g *Generator) genReturnStmt(n ast.NodeIndex) bool {
 		v = g.genMultiValueExpr(valueNode)
 	} else {
 		v = g.genExpr(valueNode)
+	}
+	if g.curIsAsync {
+		// finishCoroBody unwinds Generator.destructors itself - mirroring
+		// the bare-return case above, this must not unwind twice.
+		g.builder.CreateStore(v, g.curCoroPromise)
+		g.finishCoroBody()
+		return true
 	}
 	g.unwindDestructorsTo(0)
 	g.builder.CreateRet(v)

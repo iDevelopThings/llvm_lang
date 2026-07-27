@@ -36,6 +36,11 @@ async func Sequence() {
 	print(200)
 }
 
+async func Answer() int {
+	await
+	return 42
+}
+
 func Range(a int, b int) yield int {
 	for i := a; i < b; i++ {
 		yield i
@@ -50,9 +55,17 @@ func driveToCompletion() {
 	delete h
 }
 
+func driveAnswerToCompletion() int {
+	h := Answer()
+	resume(h)
+	v := result(h)
+	delete h
+	return v
+}
+
 func main() int {
 	driveToCompletion()
-	total := 0
+	total := driveAnswerToCompletion()
 	for v := range Range(0, 5) {
 		total = total + v
 	}
@@ -106,7 +119,7 @@ func TestCoroutines_SemanticTokens_KeywordsAndBuiltins(t *testing.T) {
 			t.Errorf("keyword %q: got 0 tokens, want at least 1", want)
 		}
 	}
-	for _, want := range []string{"resume", "done"} {
+	for _, want := range []string{"resume", "done", "result"} {
 		if functionCount[want] == 0 {
 			t.Errorf("%q: got 0 Function tokens, want at least 1 (a predeclared func, not a keyword)", want)
 		}
@@ -117,7 +130,7 @@ func TestCoroutines_Hover_AsyncFuncAndGenerator(t *testing.T) {
 	w, path := singleFileWorkspace(t, coroutinesFixture)
 	fa, _ := w.Analysis(path)
 
-	for _, name := range []string{"Sequence", "Range"} {
+	for _, name := range []string{"Sequence", "Answer", "Range"} {
 		offset := strings.Index(fa.Tree.File.Src, name)
 		pos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(offset))
 		if hover := w.Hover(path, pos); hover == nil {
@@ -134,7 +147,7 @@ func TestCoroutines_DocumentSymbols_ShowsAsyncAndGeneratorFuncs(t *testing.T) {
 	for _, s := range syms {
 		names = append(names, s.Name)
 	}
-	for _, want := range []string{"Sequence", "Range", "driveToCompletion", "main"} {
+	for _, want := range []string{"Sequence", "Answer", "Range", "driveToCompletion", "main"} {
 		if !slices.Contains(names, want) {
 			t.Errorf("DocumentSymbols names %v missing %q", names, want)
 		}

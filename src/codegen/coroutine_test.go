@@ -465,3 +465,166 @@ func run() int {
 		t.Errorf("run() = %d, want 1", got)
 	}
 }
+
+// --- result(h): a non-void async function's own declared result value ---
+//
+// See LANGUAGE.md's "Coroutines" section and CODEGEN.md's own "Coroutines"
+// section for the coro.promise-based mechanism: genCoroPrologue allocates a
+// promise slot for a non-void async function, every `return expr` inside its
+// body stores into it, and genResultCall reads it back through
+// llvm.coro.promise, guarded by a real done(h) branch.
+
+// TestCoroResult_IntReturnValue: the simplest case - one await, then a real
+// int return, read back via result(h) once the handle is done.
+func TestCoroResult_IntReturnValue(t *testing.T) {
+	jm := compileAndJITOptimized(t, `
+async func ComputeAnswer() int {
+	await
+	return 42
+}
+
+func run() int {
+	h := ComputeAnswer()
+	resume(h)
+	v := result(h)
+	delete h
+	return v
+}
+`)
+	if got := jm.runInt32(t, "run"); got != 42 {
+		t.Errorf("run() = %d, want 42", got)
+	}
+}
+
+// TestCoroResult_BeforeDoneIsZeroValue proves result(h) called before the
+// coroutine is actually done returns int's zero value, not garbage - then,
+// against the SAME handle, driving it to completion and calling result(h)
+// again returns the real value (see genResultCall's own done(h)-guarded
+// branch, never a blind load).
+func TestCoroResult_BeforeDoneIsZeroValue(t *testing.T) {
+	jm := compileAndJITOptimized(t, `
+async func ComputeAnswer() int {
+	await
+	return 42
+}
+
+func run() int {
+	h := ComputeAnswer()
+	before := result(h)
+	resume(h)
+	after := result(h)
+	delete h
+	return before*10000 + after
+}
+`)
+	got := jm.runInt32(t, "run")
+	before, after := got/10000, got%10000
+	if before != 0 {
+		t.Errorf("result(h) before done = %d, want 0", before)
+	}
+	if after != 42 {
+		t.Errorf("result(h) after done = %d, want 42", after)
+	}
+}
+
+// TestCoroResult_MultiAwaitReadsAfterLastSuspend proves the returned value is
+// read correctly after the LAST of several suspend/resume cycles, not just a
+// coroutine that returns immediately with no await at all.
+func TestCoroResult_MultiAwaitReadsAfterLastSuspend(t *testing.T) {
+	jm := compileAndJITOptimized(t, `
+async func Multi() int {
+	await
+	await
+	await
+	return 7
+}
+
+func run() int {
+	h := Multi()
+	resume(h)
+	resume(h)
+	resume(h)
+	v := result(h)
+	delete h
+	return v
+}
+`)
+	if got := jm.runInt32(t, "run"); got != 7 {
+		t.Errorf("run() = %d, want 7", got)
+	}
+}
+
+// TestCoroResult_StringReturnValue proves a non-scalar (fat-pointer) result
+// type round-trips through the promise slot correctly.
+func TestCoroResult_StringReturnValue(t *testing.T) {
+	jm := compileAndJITOptimized(t, `
+async func Greeting() string {
+	await
+	return "hello coroutine"
+}
+
+func run() bool {
+	h := Greeting()
+	resume(h)
+	v := result(h)
+	delete h
+	return v == "hello coroutine"
+}
+`)
+	if got := jm.runBool(t, "run"); !got {
+		t.Errorf("run() = false, want true")
+	}
+}
+
+// TestCoroResult_StructReturnValue proves a struct-typed result works too -
+// exercising genFuncCall's own isAsync guard against its unrelated
+// extern-struct-return coercion path (see genFuncCall's own doc comment).
+func TestCoroResult_StructReturnValue(t *testing.T) {
+	jm := compileAndJITOptimized(t, `
+struct Point {
+	x int
+	y int
+}
+
+async func MakePoint() Point {
+	await
+	return Point{x: 3, y: 4}
+}
+
+func run() bool {
+	h := MakePoint()
+	resume(h)
+	p := result(h)
+	delete h
+	return p.x == 3 && p.y == 4
+}
+`)
+	if got := jm.runBool(t, "run"); !got {
+		t.Errorf("run() = false, want true")
+	}
+}
+
+// TestCoroResult_HandleCallItselfStillWorksForNonVoidAsync proves calling a
+// non-void async function still produces a usable coroutine handle through
+// the ordinary direct-call path (genFuncCall) - not just result(h) itself -
+// since entry.retType is no longer forced void for async at codegen time.
+func TestCoroResult_HandleCallItselfStillWorksForNonVoidAsync(t *testing.T) {
+	jm := compileAndJITOptimized(t, `
+async func ComputeAnswer() int {
+	await
+	return 42
+}
+
+func run() bool {
+	h := ComputeAnswer()
+	ok := !done(h)
+	resume(h)
+	stillOk := done(h)
+	delete h
+	return ok && stillOk
+}
+`)
+	if got := jm.runBool(t, "run"); !got {
+		t.Errorf("run() = false, want true")
+	}
+}

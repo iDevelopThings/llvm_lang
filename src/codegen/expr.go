@@ -1189,6 +1189,9 @@ func (g *Generator) genCallExpr(n ast.NodeIndex) llvm.Value {
 	if g.isBuiltinCall(calleeNode, "done") {
 		return g.genDoneCall(g.genExpr(argNodes[0]))
 	}
+	if g.isBuiltinCall(calleeNode, "result") {
+		return g.genResultCall(argNodes[0])
+	}
 	if g.isBuiltinCall(calleeNode, "AnyKind") {
 		return g.genAnyKindCall(argNodes[0])
 	}
@@ -1632,10 +1635,11 @@ func (g *Generator) genFuncCall(n, calleeNode ast.NodeIndex, argNodes []ast.Node
 	// natural LLVM shape (see ffi.go's externReturnType) - deliberately
 	// scoped to TypeStruct rather than a blanket type-mismatch check: an
 	// async function's real LLVM return (the llvm.coro.begin handle, a ptr)
-	// and its declared retType (void this round) intentionally diverge for
-	// a completely unrelated reason (see declareFuncSignature) and must
-	// never hit this path.
-	if entry.retType.Kind == sema.TypeStruct {
+	// and its declared retType (which may itself be a struct - see
+	// LANGUAGE.md's "Coroutines" section) intentionally diverge for a
+	// completely unrelated reason (see declareFuncSignature), so entry.isAsync
+	// is excluded here regardless of retType.Kind.
+	if !entry.isAsync && entry.retType.Kind == sema.TypeStruct {
 		if natural := g.llvmType(entry.retType); result.Type() != natural {
 			return g.bitcastThroughMemory(result, natural)
 		}

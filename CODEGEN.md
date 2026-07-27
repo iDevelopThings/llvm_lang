@@ -1031,20 +1031,48 @@ configuration.
 
 `declareFuncSignature`/`genFuncBody` (`func.go`) recognize an async
 `FuncDecl` via `Tree.FuncIsAsync` - unlike a generator, there's no implicit
-trailing parameter and no forced-void declared type: an async function's
-REAL LLVM return type is instead the coroutine handle `llvm.coro.begin`
-produces (a plain `ptr`), regardless of its declared (void-only this round)
-result type. The generated function is tagged with the `presplitcoroutine`
-enum attribute right after `AddFunction` - required or LLVM's
-coroutine-splitting passes silently never look at the function at all.
+trailing parameter: an async function's REAL LLVM return type is instead the
+coroutine handle `llvm.coro.begin` produces (a plain `ptr`), regardless of
+its declared result type (`funcEntry.retType` still carries that real
+declared type - void, or a real one, see below - genFuncCall's own struct-
+return coercion excludes `isAsync` for exactly this reason). The generated
+function is tagged with the `presplitcoroutine` enum attribute right after
+`AddFunction` - required or LLVM's coroutine-splitting passes silently never
+look at the function at all.
 
 `genCoroPrologue` (`coroutine.go`) emits the fixed ramp prologue into the
-function's own entry block: `coro.id(0, null, null, null)` ->
+function's own entry block: `coro.id(0, promise, null, null)` ->
 `coro.size.i64()` -> `malloc` -> `coro.begin(id, mem)`, caching the
 resulting id/handle onto `Generator.curCoroId`/`curCoroHandle` - safe as
 plain SSA values since the entry block dominates every later use, including
 every per-`await` cleanup block below. No `llvm.coro.alloc` allocation-
 elision check is emitted - every call always heap-allocates a real frame.
+
+`promise` is `coro.id`'s second argument - null for a void async function
+(unchanged from before this existed), or, for one declaring a real result
+type (see LANGUAGE.md's "Coroutines" section), an entry-block alloca of that
+type, explicitly aligned to `coroPromiseAlign` (a fixed 8-byte constant, not
+a `TargetData` query - `src/compiler`'s own `finishPipeline` only pins the
+module's real DataLayout right before `RunPasses`, after codegen has already
+finished, so a query here would see an incomplete one; 8 bytes safely covers
+every declared return type this language has). LLVM's coroutine-splitting
+passes place this alloca at a fixed offset within the heap frame, which is
+what makes reading it back after the frame's own local variables have gone
+out of scope (`genResultCall`, below) well-defined. Every `return expr`
+inside the body (`genReturnStmt`, `stmt.go`) stores into this same alloca
+(`Generator.curCoroPromise`) immediately before its own `finishCoroBody` call
+- mirroring the existing bare-return case, `finishCoroBody` unwinds
+destructors itself, so this must not unwind a second time first.
+
+`genResultCall` (`coroutine.go`) implements `result(h) T` - recovers the
+promise address via `llvm.coro.promise(handle, coroPromiseAlign, false)`
+(confirmed directly against both LLVM's own documented signature and a raw,
+pre-optimization IR dump: `coro.id`'s promise operand and `coro.promise`'s
+own align argument must be the literal same constant, which is exactly what
+`coroPromiseAlign` being one shared source guarantees), guarded by a real
+`done(h)` branch - mirroring `genAnyAsCall`'s own "never a blind load"
+convention: not yet done returns `T`'s zero value instead of reading a
+possibly-uninitialized slot.
 
 ### The coro.suspend switch: three arms, not two - the one bug this took real empirical verification to catch
 
