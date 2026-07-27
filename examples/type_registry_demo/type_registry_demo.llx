@@ -1,0 +1,108 @@
+// type_registry_demo.llx - exercises the global type registry builtins:
+// TypeId, TypeIdOf, TypeByName, AnyNew, AnySet. Builds directly on top of
+// Any/reflection (see examples/any_demo/any_demo.llx).
+//
+// Run with:
+//   .\llvmc.exe examples\type_registry_demo\type_registry_demo.llx
+//   echo $LASTEXITCODE   # (PowerShell) -> 9  (all nine sanity checks passed)
+
+struct Point {
+    X int
+    Y int
+}
+
+struct Other {
+    Z int
+}
+
+enum Shape {
+    Circle(f64),
+    Square,
+}
+
+func idOfStruct() int {
+    return TypeId[Point]()
+}
+
+func main() int {
+    ok := 0
+
+    // TypeId[T]/TypeIdOf agree on the same concrete type - a primitive, a
+    // struct, and an array all round-trip to the identical id either way.
+    x := 5
+    if TypeId[int]() == TypeIdOf(x) {
+        ok = ok + 1
+    }
+    p := Point{X: 1, Y: 2}
+    if TypeId[Point]() == TypeIdOf(p) {
+        ok = ok + 1
+    }
+    s := []int{1, 2, 3}
+    if TypeId[[]int]() == TypeIdOf(s) {
+        ok = ok + 1
+    }
+
+    // Two different struct types get different ids; the same struct
+    // referenced from a different function gets the SAME id (interned).
+    if TypeId[Point]() != TypeId[Other]() && TypeId[Point]() == idOfStruct() {
+        ok = ok + 1
+    }
+
+    // An enum-typed value's own id is the ENUM TYPE's id, not the active
+    // variant's - two different boxed variants agree with each other and
+    // with TypeId[Shape]() itself.
+    a := Any(Shape.Circle(2.0))
+    b := Any(Shape.Square)
+    va, aok := AnyAs[Shape](a)
+    vb, bok := AnyAs[Shape](b)
+    if aok && bok && TypeIdOf(va) == TypeIdOf(vb) && TypeIdOf(va) == TypeId[Shape]() {
+        ok = ok + 1
+    }
+
+    // TypeByName finds a declared struct by name, returning every id whose
+    // name matches - here exactly one, matching Point's own TypeId.
+    ids := TypeByName("Point")
+    if len(ids) == 1 && ids[0] == TypeId[Point]() {
+        ok = ok + 1
+    }
+    // No match is an empty []int, never a crash.
+    none := TypeByName("NoSuchType")
+    if len(none) == 0 {
+        ok = ok + 1
+    }
+
+    // AnyNew constructs a fresh, genuinely zero-valued instance from a
+    // registry id - every field reads back zero. An out-of-range id, or an
+    // enum's own id, is rejected outright (ok=false), never a crash.
+    freshAny, freshOk := AnyNew(TypeId[Point]())
+    fresh, fok := AnyAs[Point](freshAny)
+    badAny, badId := AnyNew(999999)
+    enumAny, enumId := AnyNew(TypeId[Shape]())
+    if freshOk && fok && fresh.X == 0 && fresh.Y == 0 && !badId && !enumId {
+        ok = ok + 1
+    }
+
+    // AnySet[T] is AnyAs[T]'s write-side mirror: a matching write through a
+    // field obtained via AnyFields is visible when the box is read back;
+    // a mismatched T changes nothing and reports false.
+    boxed := Any(Point{X: 10, Y: 20})
+    for name, field := range AnyFields(boxed) {
+        if name == "X" {
+            AnySet[int](field, 99)
+        }
+    }
+    after, aok2 := AnyAs[Point](boxed)
+    mismatchOk := true
+    for name, field := range AnyFields(boxed) {
+        if name == "Y" {
+            mismatchOk = AnySet[f64](field, 1.0)
+        }
+    }
+    afterMismatch, aok3 := AnyAs[Point](boxed)
+    if aok2 && after.X == 99 && !mismatchOk && aok3 && afterMismatch.Y == 20 {
+        ok = ok + 1
+    }
+
+    print(ok)   // 9
+    return ok
+}

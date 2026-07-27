@@ -461,3 +461,141 @@ func TestVariadicAnySpreadStillRequiresExactSliceType(t *testing.T) {
 	expectCheckErrors(t, "func Log(args ...Any) int {\n\treturn len(args)\n}\n"+
 		"func f() {\n\tnums := []int{1, 2, 3}\n\tLog(nums...)\n}\n", 1)
 }
+
+// --- valid: type registry (TypeId/TypeIdOf/TypeByName/AnyNew/AnySet) ---
+
+func TestTypeIdReturnsInt(t *testing.T) {
+	tree, info := checkSrc(t, "func f() {\n\tid := TypeId[int]()\n}\n")
+	decl := tree.Children(tree.Root)[0]
+	body := tree.FuncBody(decl)
+	init := tree.Child(tree.Children(body)[0], 1)
+	if got := info.Types[init]; got.Kind != TypeI32 {
+		t.Fatalf("Types[TypeId call] = %v, want i32", got)
+	}
+}
+
+func TestTypeIdOfReturnsInt(t *testing.T) {
+	tree, info := checkSrc(t, "func f() {\n\tid := TypeIdOf(5)\n}\n")
+	decl := tree.Children(tree.Root)[0]
+	body := tree.FuncBody(decl)
+	init := tree.Child(tree.Children(body)[0], 1)
+	if got := info.Types[init]; got.Kind != TypeI32 {
+		t.Fatalf("Types[TypeIdOf call] = %v, want i32", got)
+	}
+}
+
+func TestTypeIdOfStructAccepted(t *testing.T) {
+	checkSrc(t, "struct Point {\n\tX int\n}\n"+
+		"func f() {\n\tp := Point{X: 1}\n\tid := TypeIdOf(p)\n}\n")
+}
+
+func TestTypeIdOfEnumAccepted(t *testing.T) {
+	checkSrc(t, "enum Shape {\n\tCircle(f64),\n\tPoint\n}\n"+
+		"func f() {\n\ts := Shape.Circle(1.0)\n\tid := TypeIdOf(s)\n}\n")
+}
+
+func TestTypeByNameReturnsDynamicIntArray(t *testing.T) {
+	tree, info := checkSrc(t, "struct Point {\n\tX int\n}\n"+
+		"func f() {\n\tids := TypeByName(\"Point\")\n}\n")
+	decl := tree.Children(tree.Root)[1]
+	body := tree.FuncBody(decl)
+	init := tree.Child(tree.Children(body)[0], 1)
+	got := info.Types[init]
+	if got.Kind != TypeArray || !got.Dynamic || got.Elem.Kind != TypeI32 {
+		t.Fatalf("Types[TypeByName call] = %v, want []int", got)
+	}
+}
+
+func TestAnyNewReturnsAnyBoolPair(t *testing.T) {
+	tree, info := checkSrc(t, "struct Point {\n\tX int\n}\n"+
+		"func f() {\n\tid := TypeId[Point]()\n\ta, ok := AnyNew(id)\n}\n")
+	decl := tree.Children(tree.Root)[1]
+	body := tree.FuncBody(decl)
+	stmts := tree.Children(body)
+	names := tree.MultiShortVarDeclNames(stmts[1])
+	if got := info.Types[names[0]]; got.Kind != TypeAny {
+		t.Errorf("a's Type = %v, want Any", got)
+	}
+	if got := info.Types[names[1]]; got.Kind != TypeBool {
+		t.Errorf("ok's Type = %v, want bool", got)
+	}
+}
+
+func TestAnyNewAcceptsUntypedIntLiteral(t *testing.T) {
+	checkSrc(t, "func f() {\n\ta, ok := AnyNew(0)\n}\n")
+}
+
+func TestAnySetReturnsBool(t *testing.T) {
+	tree, info := checkSrc(t, "struct Point {\n\tX int\n}\n"+
+		"func f() {\n\tp := Point{X: 1}\n\ta := Any(p)\n"+
+		"\tfor name, v := range AnyFields(a) {\n\t\tok := AnySet[int](v, 2)\n\t}\n}\n")
+	decl := tree.Children(tree.Root)[1]
+	body := tree.FuncBody(decl)
+	stmts := tree.Children(body)
+	rangeFor := stmts[2]
+	rangeBody := tree.RangeForBody(rangeFor)
+	init := tree.Child(tree.Children(rangeBody)[0], 1)
+	if got := info.Types[init]; got.Kind != TypeBool {
+		t.Fatalf("Types[AnySet call] = %v, want bool", got)
+	}
+}
+
+// --- invalid: type registry ---
+
+func TestTypeIdMissingTypeArgRejected(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\tid := TypeId()\n}\n", 1)
+}
+
+func TestTypeIdWithArgumentsRejected(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\tid := TypeId[int](5)\n}\n", 1)
+}
+
+func TestTypeIdUnboxableTypeArgRejected(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\tid := TypeId[func()]()\n}\n", 1)
+}
+
+func TestTypeIdOfUnboxableArgRejected(t *testing.T) {
+	expectCheckErrors(t, "func g() {}\n"+
+		"func f() {\n\tid := TypeIdOf(g)\n}\n", 1)
+}
+
+func TestTypeIdOfWrongArgCountRejected(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\tid := TypeIdOf(5, 6)\n}\n", 1)
+}
+
+func TestTypeByNameNonStringArgRejected(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\tids := TypeByName(5)\n}\n", 1)
+}
+
+func TestTypeByNameWrongArgCountRejected(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\tids := TypeByName()\n}\n", 1)
+}
+
+func TestAnyNewNonIntArgRejected(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\ta, ok := AnyNew(\"x\")\n}\n", 1)
+}
+
+func TestAnyNewWrongArgCountRejected(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\ta, ok := AnyNew(0, 1)\n}\n", 1)
+}
+
+func TestAnySetMissingTypeArgRejected(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\ta := Any(5)\n\tok := AnySet(a, 6)\n}\n", 1)
+}
+
+func TestAnySetWrongArgCountRejected(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\ta := Any(5)\n\tok := AnySet[int](a)\n}\n", 1)
+}
+
+func TestAnySetNonAnyFieldArgRejected(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\tok := AnySet[int](5, 6)\n}\n", 1)
+}
+
+func TestAnySetUnboxableTypeArgRejected(t *testing.T) {
+	expectCheckErrors(t, "func g() {}\n"+
+		"func f() {\n\ta := Any(5)\n\tok := AnySet[func()](a, g)\n}\n", 1)
+}
+
+func TestAnySetValueTypeMismatchRejected(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\ta := Any(5)\n\tok := AnySet[int](a, \"x\")\n}\n", 1)
+}

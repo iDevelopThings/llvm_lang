@@ -55,6 +55,7 @@ Run a multi-file example by passing its directory:
 | [`generators`](../examples/generators/generators.llx) | Yielding values into range loops |
 | [`coroutines`](../examples/coroutines/coroutines.llx) | Suspend, resume, completion, cleanup, and a declared result value |
 | [`any_demo`](../examples/any_demo/any_demo.llx) | Boxing values into `Any`, `AnyKind`/`AnyName`/`AnyAs`/`AnyFields`/`AnyLen`/`AnyIndex` |
+| [`type_registry_demo`](../examples/type_registry_demo/type_registry_demo.llx) | `TypeId`/`TypeIdOf`/`TypeByName`/`AnyNew`/`AnySet` |
 
 ## Packages and standard library
 

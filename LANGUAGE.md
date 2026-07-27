@@ -2640,6 +2640,70 @@ and cannot cross an `extern func` signature (no defined C ABI shape) - each
 a clean diagnostic. See `docs/current-limitations.md` for the full list of
 what boxing doesn't support yet.
 
+## Type registry
+
+Every declared struct/enum, plus every primitive type, has a stable small
+integer id assigned at compile time. Five builtins expose it - deliberately
+minimal, compiler-side primitives; anything higher-level (JSON encoding, an
+IoC container, ...) is meant to be built on top of these in ordinary `.llx`
+code, not provided directly:
+
+```go
+TypeId[T]() int              // T's own id - T must be explicit, like AnyAs[T]
+TypeIdOf(x T) int             // the same id, from x's own static type
+TypeByName(name string) []int // every registered type's id whose name matches
+AnyNew(id int) (Any, bool)    // a fresh, zero-valued Any of id's own type
+AnySet[T](field Any, value T) bool // write value into field's own boxed storage
+```
+
+`T` (or `x`'s own static type) must be boxable into `Any` by the same rule
+`Any(x)`/`AnyAs[T]` already use (see "Any" above) - an unboxable type
+argument is rejected the same way. `TypeIdOf(x)` never evaluates `x` at
+runtime - only its static type matters, so there's nothing to compute or
+box. For an enum-typed `T`/`x`, the id is always the *enum type's own* id,
+never a specific variant's - unlike `AnyName`'s "active variant" behavior,
+this is a compile-time-only construct with no runtime discriminant to read.
+
+```go
+struct Point { X int, Y int }
+
+TypeId[Point]()       // some id, say 12
+p := Point{X: 1, Y: 2}
+TypeIdOf(p)            // == 12 - same type, same id
+```
+
+`TypeByName` is a runtime string lookup against every declared struct/enum's
+own name (not a primitive's - there's no real declared name to search a
+primitive by). It returns every match, not just one: this language has no
+package-qualified naming yet, so two different packages can legally declare
+a same-named type, and both are real, distinct ids. No match is an empty
+`[]int`, never a crash.
+
+`AnyNew(id)` constructs a fresh instance of `id`'s own type, zero-initialized
+exactly like an ordinary `var` declaration of that type would be, boxed as an
+`Any`. Works for a scalar, pointer, struct, dynamic or fixed array, and map;
+`ok` is `false` - no crash - for an out-of-range `id`, an enum's own id (a
+zero-initialized enum can hold a broken payload for a non-unit first variant
+- see `docs/current-limitations.md`), or a non-copyable struct/array's own
+id (constructing one is sound on its own, but reading it back out via
+`AnyAs`/`AnySet` would then perform the implicit copy this language
+otherwise never allows for a non-copyable type).
+
+`AnySet[T]` is `AnyAs[T]`'s write-side mirror: if `field`'s own boxed kind
+matches `T` (the identical check `AnyAs[T]` uses), `value` is written into
+`field`'s own storage and `AnySet` returns `true`; otherwise nothing is
+written and it returns `false`. This is what makes a struct field obtained
+via `AnyFields` actually mutable:
+
+```go
+a := Any(p)
+for name, field := range AnyFields(a) {
+    if name == "X" {
+        AnySet[int](field, 99)   // p's own field, read back through a, is now 99
+    }
+}
+```
+
 ## External functions (FFI)
 
 `extern func Name(params) RetType` declares a function this compiler doesn't

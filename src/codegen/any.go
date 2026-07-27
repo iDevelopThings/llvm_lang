@@ -28,7 +28,7 @@ import (
 // comment for why an array type needs its own interning key instead of
 // structDescriptor's pointer-identity one).
 //
-//	typeDescriptorTy  = { i32 kind, string name, i32 fieldCount, ptr fieldsPtr, ptr elemDescPtr, i32 arrayLen, i64 elemSize }
+//	typeDescriptorTy  = { i32 kind, string name, i32 fieldCount, ptr fieldsPtr, ptr elemDescPtr, i32 arrayLen, i64 elemSize, i64 size }
 //	fieldDescriptorTy = { string name, ptr fieldDescriptorPtr, i64 offset }
 //
 // kind is the boxed type's own sema.TypeKind wire value (AnyKind reads it
@@ -66,18 +66,32 @@ import (
 // field/array element's entry in a struct/array descriptor's own
 // compile-time-constant field table. See DECISIONS.md for why AnyAs[T] still
 // round-trips correctly through either flavor.
+//
+// size is the type's own total byte width (llvm.SizeOf of its own LLVM
+// type, computed once at descriptor-build time) - the same value genAnyBox
+// already computes ad hoc from the static type at every box call site,
+// cached here so it's also available given only a runtime id (AnyNew - see
+// typeregistry.go). 0/unused for a descriptor AnyNew never constructs one of
+// (an enum's own two flavors), populated correctly there too anyway to avoid
+// a second special case.
 
 // anyPrimitiveKinds is every non-struct kind this round gives Any a
 // descriptor for (see LANGUAGE.md's "Any" section and sema's
 // isBoxableIntoAny) - built eagerly since there are few enough of them for
 // this to cost nothing at program startup, unlike a struct descriptor, which
 // is built lazily per distinct struct type.
+// TypeAny itself is included so TypeId[Any]()/TypeIdOf(anyValue) (see
+// typeregistry.go) has a real descriptor to look up instead of hitting
+// typeDescriptorFor's panic path - genAnyBox never actually needs it (Any-
+// into-Any short-circuits before ever calling typeDescriptorFor), but the
+// registry's own "every isBoxableIntoAny type has a descriptor" invariant
+// otherwise has exactly one silent hole.
 var anyPrimitiveKinds = []sema.TypeKind{
 	sema.TypeI8, sema.TypeI16, sema.TypeI32, sema.TypeI64,
 	sema.TypeU8, sema.TypeU16, sema.TypeU32, sema.TypeU64,
 	sema.TypeF32, sema.TypeF64,
 	sema.TypeBool, sema.TypeString, sema.TypeCString, sema.TypePointer,
-	sema.TypeMap,
+	sema.TypeMap, sema.TypeAny,
 }
 
 // anyPrimitiveDisplayName is the name baked into a primitive kind's own
@@ -103,7 +117,7 @@ func anyPrimitiveDisplayName(k sema.TypeKind) string {
 // top-of-file doc comment for the exact shape. Must run after setupTypes
 // (needs g.stringTy/g.ptrTy/g.i32Ty/g.i64Ty already built).
 func (g *Generator) setupAnyRuntime() {
-	g.typeDescriptorTy = g.ctx.StructType([]llvm.Type{g.i32Ty, g.stringTy, g.i32Ty, g.ptrTy, g.ptrTy, g.i32Ty, g.i64Ty}, false)
+	g.typeDescriptorTy = g.ctx.StructType([]llvm.Type{g.i32Ty, g.stringTy, g.i32Ty, g.ptrTy, g.ptrTy, g.i32Ty, g.i64Ty, g.i64Ty}, false)
 	g.fieldDescriptorTy = g.ctx.StructType([]llvm.Type{g.stringTy, g.ptrTy, g.i64Ty}, false)
 
 	g.anyPrimitiveDescs = make(map[sema.TypeKind]llvm.Value, len(anyPrimitiveKinds))
@@ -111,10 +125,15 @@ func (g *Generator) setupAnyRuntime() {
 	g.arrayAnyDescs = make(map[arrayAnyDescKey]llvm.Value)
 	g.variantAnyDescs = make(map[*sema.EnumVariant]llvm.Value)
 	g.enumAnyDescs = make(map[*sema.EnumInfo]llvm.Value)
+	g.descRegistryIndex = make(map[llvm.Value]int)
+
 	noElemDesc, noArrayLen, noElemSize := llvm.ConstNull(g.ptrTy), llvm.ConstInt(g.i32Ty, 0, false), llvm.ConstInt(g.i64Ty, 0, false)
 	for _, k := range anyPrimitiveKinds {
 		name := anyPrimitiveDisplayName(k)
-		g.anyPrimitiveDescs[k] = g.buildTypeDescriptorGlobal(k, name, 0, llvm.ConstNull(g.ptrTy), noElemDesc, noArrayLen, noElemSize, ".any.desc."+name)
+		size := llvm.SizeOf(g.llvmType(sema.Type{Kind: k}))
+		desc := g.buildTypeDescriptorGlobal(k, name, 0, llvm.ConstNull(g.ptrTy), noElemDesc, noArrayLen, noElemSize, size, ".any.desc."+name)
+		g.anyPrimitiveDescs[k] = desc
+		g.internDescriptor(desc, true)
 	}
 }
 
@@ -124,7 +143,7 @@ func (g *Generator) setupAnyRuntime() {
 // elemDescPtr/arrayLen/elemSize are meaningful only for a TypeArray kind -
 // every other caller passes null/0/0 (see this file's top-of-file doc
 // comment).
-func (g *Generator) buildTypeDescriptorGlobal(kind sema.TypeKind, name string, fieldCount int, fieldsPtr, elemDescPtr, arrayLen, elemSize llvm.Value, globalName string) llvm.Value {
+func (g *Generator) buildTypeDescriptorGlobal(kind sema.TypeKind, name string, fieldCount int, fieldsPtr, elemDescPtr, arrayLen, elemSize, size llvm.Value, globalName string) llvm.Value {
 	descConst := g.ctx.ConstStruct([]llvm.Value{
 		llvm.ConstInt(g.i32Ty, uint64(kind), false),
 		g.constStringValue(name),
@@ -133,6 +152,7 @@ func (g *Generator) buildTypeDescriptorGlobal(kind sema.TypeKind, name string, f
 		elemDescPtr,
 		arrayLen,
 		elemSize,
+		size,
 	}, false)
 	glob := llvm.AddGlobal(g.mod, g.typeDescriptorTy, globalName)
 	glob.SetInitializer(descConst)
@@ -199,7 +219,8 @@ func (g *Generator) structDescriptor(info *sema.StructInfo) llvm.Value {
 	})
 
 	noElemDesc, noArrayLen, noElemSize := llvm.ConstNull(g.ptrTy), llvm.ConstInt(g.i32Ty, 0, false), llvm.ConstInt(g.i64Ty, 0, false)
-	desc := g.buildTypeDescriptorGlobal(sema.TypeStruct, info.Symbol.Name, fieldCount, fieldsPtr, noElemDesc, noArrayLen, noElemSize, ".any.desc."+info.Symbol.Name)
+	size := llvm.SizeOf(layout.llvmType)
+	desc := g.buildTypeDescriptorGlobal(sema.TypeStruct, info.Symbol.Name, fieldCount, fieldsPtr, noElemDesc, noArrayLen, noElemSize, size, ".any.desc."+info.Symbol.Name)
 	g.structAnyDescs[info] = desc
 	return desc
 }
@@ -263,9 +284,10 @@ func (g *Generator) arrayDescriptor(t sema.Type) llvm.Value {
 		arrayLen = llvm.ConstInt(g.i32Ty, 0xFFFFFFFF, false)
 	}
 	elemSize := llvm.SizeOf(g.llvmType(*t.Elem))
+	size := llvm.SizeOf(g.llvmType(t))
 
 	globalName := fmt.Sprintf(".any.desc.array.%d", len(g.arrayAnyDescs))
-	desc := g.buildTypeDescriptorGlobal(sema.TypeArray, t.String(), 0, llvm.ConstNull(g.ptrTy), elemDesc, arrayLen, elemSize, globalName)
+	desc := g.buildTypeDescriptorGlobal(sema.TypeArray, t.String(), 0, llvm.ConstNull(g.ptrTy), elemDesc, arrayLen, elemSize, size, globalName)
 	g.arrayAnyDescs[key] = desc
 	return desc
 }
@@ -290,7 +312,8 @@ func (g *Generator) enumNestedDescriptor(info *sema.EnumInfo) llvm.Value {
 		return desc
 	}
 	noElemDesc, noArrayLen, noElemSize := llvm.ConstNull(g.ptrTy), llvm.ConstInt(g.i32Ty, 0, false), llvm.ConstInt(g.i64Ty, 0, false)
-	desc := g.buildTypeDescriptorGlobal(sema.TypeEnum, info.Symbol.Name, 0, llvm.ConstNull(g.ptrTy), noElemDesc, noArrayLen, noElemSize, ".any.desc."+info.Symbol.Name)
+	size := llvm.SizeOf(g.enumValTy)
+	desc := g.buildTypeDescriptorGlobal(sema.TypeEnum, info.Symbol.Name, 0, llvm.ConstNull(g.ptrTy), noElemDesc, noArrayLen, noElemSize, size, ".any.desc."+info.Symbol.Name)
 	g.enumAnyDescs[info] = desc
 	return desc
 }
@@ -319,9 +342,14 @@ func (g *Generator) variantDescriptor(variant *sema.EnumVariant) llvm.Value {
 		return variantFieldName(variant, i), fieldTypes[i], g.constFieldOffset(payloadTy, i)
 	})
 
+	// size is the WHOLE boxed enum value's own width (sizeof(enumValTy)),
+	// not just this one variant's payload - genAnyBox copies the outer
+	// {tag, payload} pair regardless of variant (see its own doc comment),
+	// so that's the byte count any consumer of this size field would need.
 	noElemDesc, noArrayLen, noElemSize := llvm.ConstNull(g.ptrTy), llvm.ConstInt(g.i32Ty, 0, false), llvm.ConstInt(g.i64Ty, 0, false)
+	size := llvm.SizeOf(g.enumValTy)
 	globalName := ".any.desc." + variant.Enum.Symbol.Name + "." + variant.Name
-	desc := g.buildTypeDescriptorGlobal(sema.TypeEnum, variant.Name, fieldCount, fieldsPtr, noElemDesc, noArrayLen, noElemSize, globalName)
+	desc := g.buildTypeDescriptorGlobal(sema.TypeEnum, variant.Name, fieldCount, fieldsPtr, noElemDesc, noArrayLen, noElemSize, size, globalName)
 	g.variantAnyDescs[variant] = desc
 	return desc
 }
@@ -441,34 +469,21 @@ func (g *Generator) isAnyAsCall(calleeNode ast.NodeIndex) bool {
 	return g.isBuiltinCall(g.tree.Child(calleeNode, 0), "AnyAs")
 }
 
-// genAnyAsCall lowers `AnyAs[T](a Any) (T, bool)` (see checkAnyAsCall's own
-// doc comment) - Go's own type-assertion shape. matches compares the boxed
-// descriptor against T's own descriptor; T's value is only ever loaded on
-// the matching branch (real control flow, not an eagerly-computed load
-// gated by CreateSelect afterward) - the mismatched case's boxed data may be
-// smaller than sizeof(T), so loading it unconditionally would be an
-// out-of-bounds read.
-func (g *Generator) genAnyAsCall(n, argNode ast.NodeIndex) llvm.Value {
-	result := g.info.Types[n]
-	target := result.Params[0]
-	targetLLType := g.llvmType(target)
-
-	a := g.genExpr(argNode)
-	dataPtr := g.builder.CreateExtractValue(a, 0, "")
-	descPtr := g.builder.CreateExtractValue(a, 1, "")
-
+// anyDescMatches computes whether descPtr (an already-boxed Any's own
+// descriptor) matches target - the shared kind/descriptor-identity check
+// AnyAs[T] (genAnyAsCall) and AnySet[T] (genAnySetCall) both need. Two
+// different structs (or two different array shapes) both report the
+// identical sema.TypeKind as their kind - descriptor pointer identity
+// (structDescriptor/arrayDescriptor each intern one shared descriptor per
+// distinct type) is what actually tells them apart. A map gets no such
+// check: every map, regardless of key/value type, shares the one interned
+// TypeMap descriptor (anyPrimitiveDescs), so a mismatched map's K/V is a
+// known, accepted imprecision (see DECISIONS.md), not something this switch
+// is missing by oversight.
+func (g *Generator) anyDescMatches(descPtr llvm.Value, target sema.Type) llvm.Value {
 	actualKind := g.builder.CreateLoad(g.i32Ty, descPtr, "")
 	wantKind := llvm.ConstInt(g.i32Ty, uint64(target.Kind), false)
 	matches := g.builder.CreateICmp(llvm.IntEQ, actualKind, wantKind, "")
-	// Two different structs (or two different array shapes) both report the
-	// identical sema.TypeKind as their kind - descriptor pointer identity
-	// (structDescriptor/arrayDescriptor each intern one shared descriptor per
-	// distinct type) is what actually tells them apart. A map gets no such
-	// check: every map, regardless of key/value type, shares the one interned
-	// TypeMap descriptor (anyPrimitiveDescs), so AnyAs[map[K]V] can only ever
-	// confirm "some map was boxed here", not which K/V - a known, accepted
-	// imprecision (see DECISIONS.md), not something this switch is missing by
-	// oversight.
 	switch target.Kind {
 	case sema.TypeStruct:
 		wantDesc := g.structDescriptor(target.Struct)
@@ -492,6 +507,25 @@ func (g *Generator) genAnyAsCall(n, argNode ast.NodeIndex) llvm.Value {
 		}
 		matches = g.builder.CreateAnd(matches, anyVariant, "")
 	}
+	return matches
+}
+
+// genAnyAsCall lowers `AnyAs[T](a Any) (T, bool)` (see checkAnyAsCall's own
+// doc comment) - Go's own type-assertion shape. anyDescMatches compares the
+// boxed descriptor against T's own descriptor; T's value is only ever loaded
+// on the matching branch (real control flow, not an eagerly-computed load
+// gated by CreateSelect afterward) - the mismatched case's boxed data may be
+// smaller than sizeof(T), so loading it unconditionally would be an
+// out-of-bounds read.
+func (g *Generator) genAnyAsCall(n, argNode ast.NodeIndex) llvm.Value {
+	result := g.info.Types[n]
+	target := result.Params[0]
+	targetLLType := g.llvmType(target)
+
+	a := g.genExpr(argNode)
+	dataPtr := g.builder.CreateExtractValue(a, 0, "")
+	descPtr := g.builder.CreateExtractValue(a, 1, "")
+	matches := g.anyDescMatches(descPtr, target)
 
 	matchBB := g.ctx.AddBasicBlock(g.curFn, "anyas.match")
 	noMatchBB := g.ctx.AddBasicBlock(g.curFn, "anyas.nomatch")
@@ -514,6 +548,54 @@ func (g *Generator) genAnyAsCall(n, argNode ast.NodeIndex) llvm.Value {
 	agg = g.builder.CreateInsertValue(agg, valPhi, 0, "")
 	agg = g.builder.CreateInsertValue(agg, matches, 1, "")
 	return agg
+}
+
+// isAnySetCall reports whether calleeNode is `AnySet[T]` - mirrors
+// isAnyAsCall exactly, since AnySet is registered in universeScope the same
+// no-Decl-Generic way (see checkAnySetCall).
+func (g *Generator) isAnySetCall(calleeNode ast.NodeIndex) bool {
+	if g.tree.Nodes[calleeNode].Kind != enums.NodeKinds.IndexExpr {
+		return false
+	}
+	return g.isBuiltinCall(g.tree.Child(calleeNode, 0), "AnySet")
+}
+
+// genAnySetCall lowers `AnySet[T](field Any, value T) bool` (see
+// checkAnySetCall's own doc comment) - AnyAs[T]'s write-side mirror: the
+// exact same anyDescMatches check, storing value's own bytes at field's
+// dataPtr on a match instead of loading, real control flow either way (see
+// genAnyAsCall's own doc comment for why this can never be a blind,
+// unconditional store).
+func (g *Generator) genAnySetCall(calleeNode ast.NodeIndex, args []ast.NodeIndex) llvm.Value {
+	target := g.info.Types[calleeNode]
+
+	field := g.genExpr(args[0])
+	dataPtr := g.builder.CreateExtractValue(field, 0, "")
+	descPtr := g.builder.CreateExtractValue(field, 1, "")
+	matches := g.anyDescMatches(descPtr, target)
+
+	matchBB := g.ctx.AddBasicBlock(g.curFn, "anyset.match")
+	noMatchBB := g.ctx.AddBasicBlock(g.curFn, "anyset.nomatch")
+	contBB := g.ctx.AddBasicBlock(g.curFn, "anyset.cont")
+	g.builder.CreateCondBr(matches, matchBB, noMatchBB)
+
+	g.builder.SetInsertPointAtEnd(matchBB)
+	value := g.genExpr(args[1])
+	g.builder.CreateStore(value, dataPtr)
+	matchEndBB := g.builder.GetInsertBlock()
+	g.builder.CreateBr(contBB)
+
+	g.builder.SetInsertPointAtEnd(noMatchBB)
+	noMatchEndBB := g.builder.GetInsertBlock()
+	g.builder.CreateBr(contBB)
+
+	g.builder.SetInsertPointAtEnd(contBB)
+	okPhi := g.builder.CreatePHI(g.boolTy, "")
+	okPhi.AddIncoming(
+		[]llvm.Value{llvm.ConstInt(g.boolTy, 1, false), llvm.ConstInt(g.boolTy, 0, false)},
+		[]llvm.BasicBlock{matchEndBB, noMatchEndBB},
+	)
+	return okPhi
 }
 
 // isAnyFieldsRangeSubject reports whether subjectNode is a direct

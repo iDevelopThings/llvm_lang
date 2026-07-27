@@ -44,6 +44,13 @@ type enumLayout struct {
 	variantPayloadTypes map[*sema.EnumVariant][]sema.Type
 }
 
+// enumInfoOf returns decl's (an EnumDecl's) catalog - the enum-kind
+// counterpart to codegen.go's own structInfoOf.
+func (g *Generator) enumInfoOf(decl ast.NodeIndex) *sema.EnumInfo {
+	nameNode := g.tree.Child(decl, 0)
+	return g.info.Enums[g.tree.Text(nameNode)]
+}
+
 // declareEnumLayout builds decl's (an EnumDecl's) own enumLayout - one pass,
 // not a declare-then-define split the way structs need (see genPackage's own
 // doc comment on this pass for why no enum ever has a forward-reference
@@ -51,8 +58,7 @@ type enumLayout struct {
 // from its own already-resolved associated-data Types (EnumVariant.Tuple/
 // Fields, populated by sema.checkEnumDecl).
 func (g *Generator) declareEnumLayout(decl ast.NodeIndex) {
-	nameNode := g.tree.Child(decl, 0)
-	info := g.info.Enums[g.tree.Text(nameNode)]
+	info := g.enumInfoOf(decl)
 
 	layout := &enumLayout{
 		variantPayloadType:  make(map[*sema.EnumVariant]llvm.Type, len(info.Order)),

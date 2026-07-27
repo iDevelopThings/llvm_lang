@@ -48,6 +48,17 @@ This is a quick list of deliberate limits, not a roadmap.
   `(zero Any, false)` rather than a compile-time error - only the argument's
   static type (`Any`) is checked at compile time, not the boxed kind itself.
 
+## Type registry
+
+- `TypeByName` only searches declared struct/enum names - a primitive type
+  has no real declared name to search by.
+- `AnyNew` never constructs an enum (a zero-initialized enum can hold a
+  broken payload for a non-unit first variant, a separate, still-open gap)
+  or a non-copyable struct/array (constructing one is sound, but reading it
+  back out via `AnyAs`/`AnySet` would perform an implicit copy this language
+  otherwise never allows for a non-copyable type). Both report
+  `(zero Any, false)`, never a crash.
+
 ## Collections
 
 - `append` adds one element per call.

@@ -64,6 +64,7 @@ short; this index makes the less-common features easy to find.
 | `extern func` | [Calling C](advanced-features.md#calling-c) | [`scope_timer`](../examples/scope_timer/scope_timer.llx) |
 | `cstring` conversions and `cfunc` callbacks | [Calling C](advanced-features.md#calling-c) | — |
 | `Any` boxing and `AnyKind`/`AnyName`/`AnyAs`/`AnyFields`/`AnyLen`/`AnyIndex` | [Any](advanced-features.md#any) | [`any_demo`](../examples/any_demo/any_demo.llx) |
+| `TypeId`/`TypeIdOf`/`TypeByName`/`AnyNew`/`AnySet` | [Type registry](advanced-features.md#type-registry) | [`type_registry_demo`](../examples/type_registry_demo/type_registry_demo.llx) |
 
 ## Compiler
 

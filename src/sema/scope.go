@@ -765,6 +765,16 @@ func universeScope() *Scope {
 			Scope: u,
 		})
 	}
+	// TypeIdOf/TypeByName/AnyNew are the global type-registry builtins (see
+	// LANGUAGE.md's "Type registry" section) - predeclared the same way as
+	// the Any builtins just above, dispatched by name with no real signature.
+	for _, name := range []string{"TypeIdOf", "TypeByName", "AnyNew"} {
+		u.Define(&Symbol{
+			Name:  name,
+			Kind:  SymFunc,
+			Scope: u,
+		})
+	}
 	// AnyAs[T](a Any) (T, bool) needs an explicit type argument at every call
 	// site (T can never be inferred from a's own erased static type), so it
 	// wears the same `Name[T](...)` call shape a real generic function does.
@@ -784,6 +794,31 @@ func universeScope() *Scope {
 		Params: []string{"T"},
 	}
 	u.Define(anyAsSym)
+	// TypeId[T]()/AnySet[T](field, value) wear the same explicit-type-argument
+	// shape as AnyAs[T], for the same reason - see checkTypeIdCall/
+	// checkAnySetCall in typecheck.go.
+	typeIdSym := &Symbol{
+		Name:  "TypeId",
+		Kind:  SymFunc,
+		Scope: u,
+	}
+	typeIdSym.Generic = &GenericInfo{
+		Symbol: typeIdSym,
+		Decl:   ast.InvalidNode,
+		Params: []string{"T"},
+	}
+	u.Define(typeIdSym)
+	anySetSym := &Symbol{
+		Name:  "AnySet",
+		Kind:  SymFunc,
+		Scope: u,
+	}
+	anySetSym.Generic = &GenericInfo{
+		Symbol: anySetSym,
+		Decl:   ast.InvalidNode,
+		Params: []string{"T"},
+	}
+	u.Define(anySetSym)
 	// nil is a predeclared value (see LANGUAGE.md's "Pointers" section) -
 	// deliberately scoped to pointer types only this round, not a general
 	// zero-value concept: it starts life as the untyped TypeUntypedNil (same

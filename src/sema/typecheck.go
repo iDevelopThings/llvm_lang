@@ -5008,6 +5008,15 @@ func (c *checker) checkCallExpr(n ast.NodeIndex) Type {
 	if c.isBuiltinCall(callee, "AnyIndex") {
 		return c.checkAnyIndexCall(n, args)
 	}
+	if c.isBuiltinCall(callee, "TypeIdOf") {
+		return c.checkTypeIdOfCall(n, args)
+	}
+	if c.isBuiltinCall(callee, "TypeByName") {
+		return c.checkTypeByNameCall(n, args)
+	}
+	if c.isBuiltinCall(callee, "AnyNew") {
+		return c.checkAnyNewCall(n, args)
+	}
 	if t, ok := c.checkConstructorCall(n, callee, args); ok {
 		return t
 	}
@@ -5018,6 +5027,12 @@ func (c *checker) checkCallExpr(n ast.NodeIndex) Type {
 		return t
 	}
 	if t, ok := c.checkAnyAsCall(n, callee, args); ok {
+		return t
+	}
+	if t, ok := c.checkTypeIdCall(n, callee, args); ok {
+		return t
+	}
+	if t, ok := c.checkAnySetCall(n, callee, args); ok {
 		return t
 	}
 	if t, ok := c.checkGenericCall(n, callee, args); ok {
@@ -5642,6 +5657,93 @@ func (c *checker) checkAnyIndexCall(n ast.NodeIndex, args []ast.NodeIndex) Type 
 	return Type{Kind: TypeMultiReturn, Params: []Type{anyElem, boolType}}
 }
 
+// checkTypeIdOfCall type-checks the predeclared `TypeIdOf(x T) int` builtin
+// (see LANGUAGE.md's "Type registry" section) - x's own STATIC type's
+// registry id, computed purely at compile time (see codegen's
+// genTypeIdOfCall: x is never evaluated at runtime, the same "only the
+// static type matters" precedent genLenCall's fixed-array case already
+// sets). T must be boxable into Any (isBoxableIntoAny, reused directly - not
+// checkBoxableIntoAny, so a non-copyable T is still a legal argument here:
+// no value is ever copied out of it).
+func (c *checker) checkTypeIdOfCall(n ast.NodeIndex, args []ast.NodeIndex) Type {
+	if len(args) != 1 {
+		c.errorAtNodes(args, n, "TypeIdOf takes exactly 1 argument, got %d", len(args))
+		for _, a := range args {
+			c.checkValueExpr(a)
+		}
+		return invalidType
+	}
+	at := c.checkValueExpr(args[0])
+	if at.IsInvalid() {
+		return invalidType
+	}
+	if !c.isBoxableIntoAny(at) {
+		c.errorAt(args[0], "TypeIdOf: %s can never have been boxed into Any", at)
+		return invalidType
+	}
+	if at.IsUntyped() {
+		c.retypeUntyped(args[0], c.defaultUntyped(at))
+	}
+	return i32Type
+}
+
+// checkTypeByNameCall type-checks the predeclared `TypeByName(name string)
+// []int` builtin (see LANGUAGE.md's "Type registry" section) - every
+// registered struct/enum's own id whose declared name matches name exactly,
+// as a real dynamic array (deliberately every match, not one: two distinct
+// types can legally share a declared name with no package-qualified naming
+// to disambiguate them - see BLOCKERS.md's now-removed "Global type lookup
+// by name" entry).
+func (c *checker) checkTypeByNameCall(n ast.NodeIndex, args []ast.NodeIndex) Type {
+	if len(args) != 1 {
+		c.errorAtNodes(args, n, "TypeByName takes exactly 1 argument, got %d", len(args))
+		for _, a := range args {
+			c.checkValueExpr(a)
+		}
+		return invalidType
+	}
+	t := c.checkValueExpr(args[0])
+	if t.IsInvalid() {
+		return invalidType
+	}
+	if t.Kind != TypeString {
+		c.errorAt(args[0], "TypeByName requires a string argument, got %s", t)
+		return invalidType
+	}
+	return Type{Kind: TypeArray, Dynamic: true, Elem: &i32Type}
+}
+
+// checkAnyNewCall type-checks the predeclared `AnyNew(id int) (Any, bool)`
+// builtin (see LANGUAGE.md's "Type registry" section) - id is checked here
+// only for being an int; whether it's actually in range, and whether the
+// type it names is even constructible this way (an enum's id never is - see
+// BLOCKERS.md's "An enum's zero value..." entry) are both runtime-only
+// questions (codegen's genAnyNewCall), the same "erased, so nothing more to
+// check at compile time" reasoning AnyIndex's own index argument already
+// follows.
+func (c *checker) checkAnyNewCall(n ast.NodeIndex, args []ast.NodeIndex) Type {
+	if len(args) != 1 {
+		c.errorAtNodes(args, n, "AnyNew takes exactly 1 argument, got %d", len(args))
+		for _, a := range args {
+			c.checkValueExpr(a)
+		}
+		return invalidType
+	}
+	it := c.checkValueExpr(args[0])
+	if it.IsInvalid() {
+		return invalidType
+	}
+	switch {
+	case it.Kind == TypeUntypedInt:
+		c.retypeUntyped(args[0], i32Type)
+	case it.Kind != TypeI32:
+		c.errorAt(args[0], "AnyNew requires an int id, got %s", it)
+		return invalidType
+	}
+	anyElem := Type{Kind: TypeAny}
+	return Type{Kind: TypeMultiReturn, Params: []Type{anyElem, boolType}}
+}
+
 // checkAnyAsCall type-checks the predeclared `AnyAs[T](a Any) (T, bool)`
 // builtin (see LANGUAGE.md's "Any" section) - Go's own type-assertion shape
 // (`v, ok := x.(int)`), reusing this language's existing generics/multi-
@@ -5693,6 +5795,108 @@ func (c *checker) checkAnyAsCall(n, callee ast.NodeIndex, args []ast.NodeIndex) 
 	}
 
 	return Type{Kind: TypeMultiReturn, Params: []Type{target, boolType}}, true
+}
+
+// checkTypeIdCall type-checks the predeclared `TypeId[T]() int` builtin (see
+// LANGUAGE.md's "Type registry" section) - T's own compile-time-constant
+// registry id, mirroring AnyAs[T]'s own no-Decl generic-interception shape
+// (checkAnyAsCall's own doc comment) exactly, since TypeId has the same
+// "predeclared with a Generic but no real Decl/Tree" registration. Takes no
+// value arguments at all - T alone is what's being asked about.
+func (c *checker) checkTypeIdCall(n, callee ast.NodeIndex, args []ast.NodeIndex) (Type, bool) {
+	gi, explicit, ok := c.genericCallee(callee)
+	if !ok || gi.Symbol.Name != "TypeId" {
+		return invalidType, false
+	}
+
+	if len(args) != 0 {
+		c.errorAtNodes(args, n, "TypeId takes no arguments, got %d", len(args))
+		for _, a := range args {
+			c.checkValueExpr(a)
+		}
+		return invalidType, true
+	}
+	if explicit == ast.InvalidNode {
+		c.errorAt(n, "TypeId requires an explicit type argument, e.g. TypeId[int]()")
+		return invalidType, true
+	}
+	typeArgs, ok := c.typeArgsFromNode(explicit, gi)
+	if !ok {
+		return invalidType, true
+	}
+	target := typeArgs[0]
+	if target.IsInvalid() {
+		return invalidType, true
+	}
+	if !c.isBoxableIntoAny(target) {
+		c.errorAt(explicit, "TypeId[%s]: %s can never have been boxed into Any", target, target)
+		return invalidType, true
+	}
+
+	// Stashed on the explicit [T] node itself (an IndexExpr with no other use
+	// for its own Types entry - see checkAnyAsCall, which never sets one)
+	// since TypeId's return type is plain int, unlike AnyAs[T]'s (T, bool),
+	// which carries T in the return type itself. genTypeIdCall reads it back
+	// off this same node.
+	c.info.Types[explicit] = target
+	return i32Type, true
+}
+
+// checkAnySetCall type-checks the predeclared `AnySet[T](field Any, value T)
+// bool` builtin (see LANGUAGE.md's "Type registry" section) - the write-side
+// mirror of AnyAs[T], reusing its identical no-Decl generic-interception
+// shape. Unlike AnyAs[T], T is never inferred here either, even though
+// value's own static type would make inference possible - explicit-only
+// keeps this exactly mirroring AnyAs[T]'s own call shape and identity-check
+// reuse, with no separate inference path to maintain.
+func (c *checker) checkAnySetCall(n, callee ast.NodeIndex, args []ast.NodeIndex) (Type, bool) {
+	gi, explicit, ok := c.genericCallee(callee)
+	if !ok || gi.Symbol.Name != "AnySet" {
+		return invalidType, false
+	}
+
+	if len(args) != 2 {
+		c.errorAtNodes(args, n, "AnySet takes exactly 2 arguments, got %d", len(args))
+		for _, a := range args {
+			c.checkValueExpr(a)
+		}
+		return invalidType, true
+	}
+	if explicit == ast.InvalidNode {
+		c.errorAt(n, "AnySet requires an explicit type argument, e.g. AnySet[int](field, value)")
+		for _, a := range args {
+			c.checkValueExpr(a)
+		}
+		return invalidType, true
+	}
+	typeArgs, ok := c.typeArgsFromNode(explicit, gi)
+	if !ok {
+		for _, a := range args {
+			c.checkValueExpr(a)
+		}
+		return invalidType, true
+	}
+	target := typeArgs[0]
+
+	fieldType := c.checkValueExpr(args[0])
+	valueType := c.checkValueExpr(args[1])
+	if fieldType.IsInvalid() || valueType.IsInvalid() || target.IsInvalid() {
+		return invalidType, true
+	}
+	if fieldType.Kind != TypeAny {
+		c.errorAt(args[0], "AnySet requires an Any argument, got %s", fieldType)
+		return invalidType, true
+	}
+	if !c.isBoxableIntoAny(target) {
+		c.errorAt(explicit, "AnySet[%s]: %s can never have been boxed into Any", target, target)
+		return invalidType, true
+	}
+	if c.checkAssignable(args[1], target, valueType, "argument 2") {
+		c.checkNoIllegalCopy(args[1], target, true, "argument 2")
+	}
+
+	c.info.Types[explicit] = target
+	return boolType, true
 }
 
 // checkConstructorCall recognizes and type-checks `Name(args)` where Name

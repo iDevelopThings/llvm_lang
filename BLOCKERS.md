@@ -104,34 +104,6 @@ on a method call - m's type parameters are inferred from its arguments" - see
 sema's `rejectMethodTypeArgs`). Revisit if a real program hits a method type
 parameter that inference genuinely can't reach.
 
-## Global type lookup by name
-
-Requested alongside `Any`'s reflection builtins ("it'd also be nice to be
-able to globally find types too") but with no concrete spec - unlike every
-other `Any` extension this effort has shipped (arrays, maps), this is a new
-cross-cutting concept, not a new boxable kind, and the ask itself named no
-exact semantics to build toward (return a zero-valued boxed instance by
-name? a read-only type-shape descriptor? something else?).
-
-**The specific open question:** today's struct/enum catalog
-(`resolver.structs map[string]*StructInfo`, `src/sema/resolve.go`) is
-scoped per compiled program's own resolve pass, not verified to already
-merge cleanly across every imported package with zero name collisions - a
-real cross-package registry needs a decision on what happens when two
-different packages both declare a type of the same name (qualify by
-package path? first-match-wins? a compile-time error only if the ambiguous
-name is actually looked up by string?). None of this is inferable from
-AGENTS.md or the existing `Any` design, which never had to reason about
-cross-package name uniqueness at all.
-
-**Current default:** not built. Enum reflection (part of the same original
-ask, but with a concrete, bounded technical shape - a variant-payload
-descriptor selected by the active runtime discriminant) is being built
-first instead, since it doesn't carry this same unresolved scope question.
-Revisit this entry once there's a concrete answer - either from the user
-directly, or once a specific `Any`-lookup use case (e.g. JSON decode-by-type-name)
-makes one of the above answers obviously correct.
-
 ## An enum's zero value can hold a null payload for a non-unit first variant
 
 `var s SomeEnum` (no initializer) zero-inits to discriminant 0 - the first

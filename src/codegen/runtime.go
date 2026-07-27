@@ -713,7 +713,14 @@ func (g *Generator) genAppendCall(args []ast.NodeIndex) llvm.Value {
 
 	sliceVal := g.genExpr(args[0])
 	elemVal := g.genExpr(args[1])
+	return g.genAppendValue(sliceVal, elemVal, elemLLType)
+}
 
+// genAppendValue is genAppendCall's own core, factored out so any other
+// codegen site that needs to grow a dynamic array by one already-evaluated
+// element (e.g. genTypeByNameCall's own result-building loop, typeregistry.go)
+// can reuse the identical growth/aliasing logic instead of a second copy.
+func (g *Generator) genAppendValue(sliceVal, elemVal llvm.Value, elemLLType llvm.Type) llvm.Value {
 	ptr := g.builder.CreateExtractValue(sliceVal, 0, "")
 	length := g.builder.CreateExtractValue(sliceVal, 1, "")
 	capacity := g.builder.CreateExtractValue(sliceVal, 2, "")

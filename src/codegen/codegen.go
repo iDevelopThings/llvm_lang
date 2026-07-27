@@ -300,6 +300,35 @@ type Generator struct {
 	variantAnyDescs map[*sema.EnumVariant]llvm.Value
 	enumAnyDescs    map[*sema.EnumInfo]llvm.Value
 
+	// The global type registry (TypeId/TypeIdOf/TypeByName/AnyNew - see
+	// typeregistry.go's own doc comment). descRegistryIndex is the shared
+	// "next free slot" allocator every descriptor-interning site goes through
+	// (primitives/structs/enums eagerly, an array/map/pointer shape lazily on
+	// first TypeId/TypeIdOf/AnySet reference) - descRegistry/
+	// descRegistryConstructible mirror it 1:1 in Go, materialized into the
+	// real flat LLVM constant arrays only once every id has been handed out
+	// (finalizeTypeRegistry, called after every function body is generated).
+	// typeRegistryDescsGlobal/typeRegistryConstructibleGlobal are small
+	// fixed-type globals holding that later-built array's own address, so
+	// AnyNew's own codegen (generated before the final array exists) can
+	// already reference them through one level of indirection.
+	descRegistryIndex               map[llvm.Value]int
+	descRegistry                    []llvm.Value
+	descRegistryConstructible       []bool
+	typeRegistryDescsGlobal         llvm.Value
+	typeRegistryConstructibleGlobal llvm.Value
+	typeRegistryCountGlobal         llvm.Value
+
+	// typeByNameEntryTy/typeByNameTable back TypeByName - a plain linear
+	// {name, id} table, fully known (and finalized) as soon as every struct/
+	// enum is registered, since only a nominal type has a real declared name
+	// to search by (see setupTypeRegistry). typeByNameCount is a Go-side int,
+	// not a global - baked into genTypeByNameCall's own loop bound as a
+	// compile-time constant.
+	typeByNameEntryTy llvm.Type
+	typeByNameTable   llvm.Value
+	typeByNameCount   int
+
 	// fmtMapNilTrap is the cached format-string global for the "assignment
 	// to entry in nil map" runtime trap (genMapTrapIfNil, maps.go) - built
 	// once, in setupMapTypes, exactly like every other cached trap-message
@@ -720,6 +749,7 @@ func GeneratePackage(trees []*ast.Tree, infos map[*ast.Tree]*sema.Info, moduleNa
 	g.setupMapTypes()
 	g.setupRuntime()
 	g.setupAnyRuntime()
+	g.setupTypeRegistryGlobals()
 	if programUsesCoroutines(trees, infos) {
 		// Lazy, like g.argsGlobal/argsUsed just below - not merely for
 		// cleanliness here: coroDestroyLocalFn's own body calls
@@ -733,6 +763,11 @@ func GeneratePackage(trees []*ast.Tree, infos map[*ast.Tree]*sema.Info, moduleNa
 	}
 	g.setupArgsGlobal()
 	g.genPackage(trees)
+	// Only after every function body has been generated can the registry's
+	// own backing array be finalized (see typeregistry.go's own doc comment)
+	// - a lazily-interned array/map shape may not get its id until partway
+	// through generating some function's body.
+	g.finalizeTypeRegistry()
 
 	builder.Dispose()
 
@@ -796,6 +831,13 @@ func (g *Generator) genPackage(trees []*ast.Tree) {
 			g.declareEnumLayout(d)
 		}
 	}
+	// setupTypeRegistry needs every struct/enum's own layout already built
+	// (structDescriptor/enumNestedDescriptor both read it) and must itself
+	// finish before any function body runs, so every struct/enum's own
+	// registry id is assigned in the same deterministic order regardless of
+	// which function asks for one first via TypeId/TypeIdOf - see
+	// typeregistry.go's own doc comment.
+	g.setupTypeRegistry(trees)
 	for _, tree := range trees {
 		g.enter(tree)
 		for d := range g.declsOfKind(enums.NodeKinds.VarDecl) {

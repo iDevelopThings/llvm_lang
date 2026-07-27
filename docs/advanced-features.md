@@ -139,6 +139,29 @@ cannot be compared with `==`, printed with `print`, or cross an
 and [the Any section](../LANGUAGE.md#any) of the language spec for the
 exact rules.
 
+## Type registry
+
+Every declared struct/enum and every primitive type has a stable id, usable
+from ordinary code:
+
+```go
+TypeId[Point]()         // Point's own id, an explicit type argument
+TypeIdOf(somePoint)     // the same id, from a value's own static type
+
+ids := TypeByName("Point")  // every registered type's id named "Point"
+
+a, ok := AnyNew(id)         // a fresh, zero-valued Any of id's own type
+ok2 := AnySet[int](field, 99) // write into a field obtained via AnyFields
+```
+
+An enum's id is always the enum type's own id, never a specific variant's.
+`AnyNew` rejects an out-of-range id, an enum's own id, and a non-copyable
+struct/array's own id (`ok = false`, never a crash). `AnySet[T]` is
+`AnyAs[T]`'s write-side mirror - it's what makes a struct field from
+`AnyFields` actually mutable. See
+[Type registry](../LANGUAGE.md#type-registry) in the language spec for the
+exact rules.
+
 ## Calling C
 
 Declare a C symbol with `extern func`:
