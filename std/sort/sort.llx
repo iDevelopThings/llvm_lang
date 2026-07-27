@@ -1,5 +1,7 @@
 // sort.llx - std/sort: in-place heapsort over dynamic arrays.
 
+import "std:log"
+
 func siftDown[T](s []T, start int, end int, less func(T, T) bool) {
     root := start
     for {
@@ -42,8 +44,8 @@ func Sort[T](s []T, less func(T, T) bool) {
     }
 }
 
-func SortInts(s []int) {
-    Sort(s, func(a int, b int) bool {
+func SortNumeric[T](s []T) {
+    Sort(s, func(a T, b T) bool {
         return a < b
     })
 }
@@ -53,14 +55,27 @@ tests {
 
     func TestSortEmpty(t *test.Runner) {
         s := make([]int, 0)
-        SortInts(s)
+        SortNumeric(s)
         t.AssertEqual(len(s), 0, "empty")
+    }
+
+    func TestSortInts(t *test.Runner) {
+        ii := make([]int, 0)
+        ii = append(ii, 7)
+        SortNumeric(ii)
+        // Mainly to ensure generic compat
+    }
+    func TestSortInt64s(t *test.Runner) {
+        ii := make([]i64, 0)
+        ii = append(ii, 7)
+        SortNumeric(ii)
+        // Mainly to ensure generic compat
     }
 
     func TestSortSingleton(t *test.Runner) {
         s := make([]int, 0)
         s = append(s, 7)
-        SortInts(s)
+        SortNumeric(s)
         t.AssertEqual(s[0], 7, "one")
     }
 
@@ -71,7 +86,7 @@ tests {
         s = append(s, 4)
         s = append(s, 1)
         s = append(s, 5)
-        SortInts(s)
+        SortNumeric(s)
         t.AssertEqual(s[0], 1, "0")
         t.AssertEqual(s[1], 1, "1")
         t.AssertEqual(s[2], 3, "2")
@@ -84,7 +99,7 @@ tests {
         s = append(s, 1)
         s = append(s, 2)
         s = append(s, 3)
-        SortInts(s)
+        SortNumeric(s)
         t.AssertEqual(s[0], 1, "sorted0")
         t.AssertEqual(s[2], 3, "sorted2")
     }

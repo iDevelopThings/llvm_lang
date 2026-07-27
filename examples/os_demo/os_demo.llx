@@ -1,0 +1,58 @@
+// os_demo.llx - std/os file + env with match on Result enums.
+//
+// Run with:
+//   .\llvmc.exe examples\os_demo\os_demo.llx
+//   echo $LASTEXITCODE   # -> 2
+
+import "std:os"
+
+func main() int {
+    path := "_os_demo_tmp.txt"
+    err := os.WriteFileString(path, "hi")
+    if !err.IsOk() {
+        print(err.String())
+        return 1
+    }
+
+    okCount := 0
+    match os.ReadFileString(path) {
+        os.StringResult.Ok(s) => {
+            print(s)
+            okCount = okCount + 1
+        }
+        os.StringResult.Err(e) => {
+            print(e.String())
+        }
+    }
+
+    match os.Open("_os_demo_missing.txt") {
+        os.FileResult.Ok(f) => {
+            f.Close()
+            print("unexpected open")
+        }
+        os.FileResult.Err(e) => {
+            if e.IsNotFound() {
+                print("missing")
+                okCount = okCount + 1
+            } else {
+                print(e.String())
+            }
+        }
+    }
+
+    os.Remove(path)
+
+    setErr := os.Setenv("LLX_OS_DEMO", "1")
+    if setErr.IsOk() {
+        match os.Getenv("LLX_OS_DEMO") {
+            os.StringResult.Ok(v) => {
+                print(v)
+            }
+            os.StringResult.Err(e) => {
+                print(e.String())
+            }
+        }
+    }
+
+    return okCount
+}

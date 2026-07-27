@@ -1,9 +1,22 @@
-// maps.llx - std/maps: small helpers over built-in map values.
-// Keys/Values each allocate one result slice.
+// maps.llx - std/maps: helpers over built-in map values.
+// IterKeys/IterValues are zero-alloc generators; Keys/Values collect into a
+// fresh slice when a materialised result is needed.
 
 func Has[K, V](m map[K]V, k K) bool {
     _, ok := m[k]
     return ok
+}
+
+func IterKeys[K, V](m map[K]V) yield K {
+    for k := range m {
+        yield k
+    }
+}
+
+func IterValues[K, V](m map[K]V) yield V {
+    for _, v := range m {
+        yield v
+    }
 }
 
 func Keys[K, V](m map[K]V) []K {
@@ -49,5 +62,23 @@ tests {
             i++
         }
         t.AssertEqual(sum, 30, "value sum")
+    }
+
+    func TestIterKeysValues(t *test.Runner) {
+        m := make(map[string]int)
+        m["x"] = 10
+        m["y"] = 20
+        keyCount := 0
+        for k := range IterKeys(m) {
+            t.Assert(Has(m, k), "iter key")
+            keyCount = keyCount + 1
+        }
+        t.AssertEqual(keyCount, 2, "IterKeys count")
+
+        sum := 0
+        for v := range IterValues(m) {
+            sum = sum + v
+        }
+        t.AssertEqual(sum, 30, "IterValues sum")
     }
 }

@@ -1,4 +1,4 @@
-// maps_demo.llx - std/maps Has/Keys/Values.
+// maps_demo.llx - std/maps Has, allocating Keys/Values, and Iter* generators.
 //
 // Run with:
 //   .\llvmc.exe examples\maps_demo\maps_demo.llx
@@ -13,6 +13,11 @@ func main() int {
     print(maps.Has(m, "a"))
     print(maps.Has(m, "z"))
     print(len(maps.Keys(m)))
-    print(len(maps.Values(m)))
+
+    sum := 0
+    for v := range maps.IterValues(m) {
+        sum = sum + v
+    }
+    print(sum)
     return 2
 }

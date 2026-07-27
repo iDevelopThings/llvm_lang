@@ -1,11 +1,9 @@
-// os.llx - std/os: OS-facing helpers. Error/Result enums are the shared
-// failure convention (match on variants; no string payloads on hot paths).
-// File I/O and env wait on cstring nil / *u8→cstring conversions.
+// os.llx - std/os: Error/Result enums, libc/CRT file + env helpers.
+// Public API is portable; externs use the mingw/Windows CRT spellings
+// (_getcwd, _mkdir, _putenv_s, ...) until a second OS target exists.
 
 import "std:strings"
 
-// Error is the shared OS/status enum. Ok is the success sentinel for
-// void-ish ops (Remove, Mkdir, Setenv, Sleep). Unknown carries a raw errno.
 enum Error {
     Ok,
     NotFound,
@@ -54,33 +52,36 @@ func (Error) String() string {
     }
 }
 
-// errno values match the portable CRT codes mingw/Unix share for these cases.
 func FromErrno(code i32) Error {
-    if code == 0 {
-        return Error.Ok
+    match code {
+        0 => {
+            return Error.Ok
+        }
+        2 => {
+            return Error.NotFound
+        }
+        13 => {
+            return Error.PermissionDenied
+        }
+        17 => {
+            return Error.AlreadyExists
+        }
+        22 => {
+            return Error.InvalidArgument
+        }
+        21 => {
+            return Error.IsDirectory
+        }
+        20 => {
+            return Error.NotDirectory
+        }
+        16 => {
+            return Error.Busy
+        }
+        _ => {
+            return Error.Unknown(code)
+        }
     }
-    if code == 2 {
-        return Error.NotFound
-    }
-    if code == 13 {
-        return Error.PermissionDenied
-    }
-    if code == 17 {
-        return Error.AlreadyExists
-    }
-    if code == 22 {
-        return Error.InvalidArgument
-    }
-    if code == 21 {
-        return Error.IsDirectory
-    }
-    if code == 20 {
-        return Error.NotDirectory
-    }
-    if code == 16 {
-        return Error.Busy
-    }
-    return Error.Unknown(code)
 }
 
 extern func _errno() *i32
@@ -90,9 +91,6 @@ func LastErrno() Error {
     return FromErrno(*p)
 }
 
-
-// Constructors — cross-package `os.Error.Ok` is not valid syntax yet (type
-// vs value), so callers use these instead.
 func Ok() Error {
     return Error.Ok
 }
@@ -122,6 +120,7 @@ func (Error) IsNotFound() bool {
         }
     }
 }
+
 enum BytesResult {
     Ok([]u8),
     Err(Error),
@@ -130,6 +129,252 @@ enum BytesResult {
 enum StringResult {
     Ok(string),
     Err(Error),
+}
+
+// Opaque FILE* stand-in (layout unused; only the pointer matters).
+struct CFile {
+    _pad i8
+}
+
+extern func fopen(name cstring, mode cstring) *CFile
+extern func fclose(f *CFile) i32
+extern func fread(ptr *u8, size i64, count i64, f *CFile) i64
+extern func fwrite(ptr *u8, size i64, count i64, f *CFile) i64
+extern func fseek(f *CFile, offset i64, whence i32) i32
+extern func ftell(f *CFile) i64
+extern func remove(path cstring) i32
+extern func _mkdir(path cstring) i32
+extern func _rmdir(path cstring) i32
+extern func _access(path cstring, mode i32) i32
+extern func _getcwd(buf *u8, size i32) *u8
+extern func _chdir(path cstring) i32
+extern func getenv(name cstring) cstring
+extern func _putenv_s(name cstring, value cstring) i32
+extern func exit(code i32)
+
+struct File {
+    handle *CFile
+
+    constructor(h *CFile) {
+        this.handle = h
+    }
+
+    destructor() {
+        if this.handle != nil {
+            fclose(this.handle)
+            this.handle = nil
+        }
+    }
+}
+
+enum FileResult {
+    Ok(File),
+    Err(Error),
+}
+
+func (File) Close() {
+    if this.handle != nil {
+        fclose(this.handle)
+        this.handle = nil
+    }
+}
+
+func (File) Read(buf []u8) BytesResult {
+    if this.handle == nil {
+        return BytesResult.Err(Error.InvalidArgument)
+    }
+    if len(buf) == 0 {
+        empty := make([]u8, 0)
+        return BytesResult.Ok(empty)
+    }
+    n := fread(&buf[0], 1, i64(len(buf)), this.handle)
+    if n < 0 {
+        return BytesResult.Err(LastErrno())
+    }
+    out := make([]u8, int(n))
+    i := 0
+    for i < int(n) {
+        out[i] = buf[i]
+        i = i + 1
+    }
+    return BytesResult.Ok(out)
+}
+
+func (File) Write(data []u8) Error {
+    if this.handle == nil {
+        return Error.InvalidArgument
+    }
+    if len(data) == 0 {
+        return Error.Ok
+    }
+    n := fwrite(&data[0], 1, i64(len(data)), this.handle)
+    if n != i64(len(data)) {
+        return LastErrno()
+    }
+    return Error.Ok
+}
+
+func (File) ReadAll() BytesResult {
+    if this.handle == nil {
+        return BytesResult.Err(Error.InvalidArgument)
+    }
+    if fseek(this.handle, 0, 2) != 0 {
+        return BytesResult.Err(LastErrno())
+    }
+    sz := ftell(this.handle)
+    if sz < 0 {
+        return BytesResult.Err(LastErrno())
+    }
+    if fseek(this.handle, 0, 0) != 0 {
+        return BytesResult.Err(LastErrno())
+    }
+    if sz == 0 {
+        empty := make([]u8, 0)
+        return BytesResult.Ok(empty)
+    }
+    buf := make([]u8, int(sz))
+    n := fread(&buf[0], 1, sz, this.handle)
+    if n != sz {
+        if n < 0 {
+            return BytesResult.Err(LastErrno())
+        }
+        return BytesResult.Err(Error.UnexpectedEOF)
+    }
+    return BytesResult.Ok(buf)
+}
+
+func Open(path string) FileResult {
+    f := fopen(cstring(path), cstring("rb"))
+    if f == nil {
+        return FileResult.Err(LastErrno())
+    }
+    return FileResult.Ok(File(f))
+}
+
+func Create(path string) FileResult {
+    f := fopen(cstring(path), cstring("wb"))
+    if f == nil {
+        return FileResult.Err(LastErrno())
+    }
+    return FileResult.Ok(File(f))
+}
+
+func ReadFile(path string) BytesResult {
+    match Open(path) {
+        FileResult.Ok(f) => {
+            return f.ReadAll()
+        }
+        FileResult.Err(e) => {
+            return BytesResult.Err(e)
+        }
+    }
+}
+
+// ReadFileString reads the file and builds a string via a trailing NUL.
+// Embedded NUL bytes truncate the result (cstring/strlen).
+func ReadFileString(path string) StringResult {
+    match ReadFile(path) {
+        BytesResult.Ok(data) => {
+            n := len(data)
+            buf := make([]u8, n + 1)
+            i := 0
+            for i < n {
+                buf[i] = data[i]
+                i = i + 1
+            }
+            buf[n] = 0
+            return StringResult.Ok(string(cstring(&buf[0])))
+        }
+        BytesResult.Err(e) => {
+            return StringResult.Err(e)
+        }
+    }
+}
+
+func WriteFile(path string, data []u8) Error {
+    match Create(path) {
+        FileResult.Ok(f) => {
+            return f.Write(data)
+        }
+        FileResult.Err(e) => {
+            return e
+        }
+    }
+}
+
+func WriteFileString(path string, s string) Error {
+    n := len(s)
+    if n == 0 {
+        empty := make([]u8, 0)
+        return WriteFile(path, empty)
+    }
+    buf := make([]u8, n)
+    i := 0
+    for i < n {
+        buf[i] = s[i]
+        i = i + 1
+    }
+    return WriteFile(path, buf)
+}
+
+func Remove(path string) Error {
+    if remove(cstring(path)) != 0 {
+        return LastErrno()
+    }
+    return Error.Ok
+}
+
+func Mkdir(path string) Error {
+    if _mkdir(cstring(path)) != 0 {
+        return LastErrno()
+    }
+    return Error.Ok
+}
+
+func Rmdir(path string) Error {
+    if _rmdir(cstring(path)) != 0 {
+        return LastErrno()
+    }
+    return Error.Ok
+}
+
+func Exists(path string) bool {
+    return _access(cstring(path), 0) == 0
+}
+
+func Getwd() StringResult {
+    buf := make([]u8, 512)
+    p := _getcwd(&buf[0], 512)
+    if p == nil {
+        return StringResult.Err(LastErrno())
+    }
+    return StringResult.Ok(string(cstring(p)))
+}
+
+func Chdir(path string) Error {
+    if _chdir(cstring(path)) != 0 {
+        return LastErrno()
+    }
+    return Error.Ok
+}
+
+func Exit(code int) {
+    exit(i32(code))
+}
+
+func Getenv(key string) StringResult {
+    p := getenv(cstring(key))
+    if p == nil {
+        return StringResult.Err(Error.NotFound)
+    }
+    return StringResult.Ok(string(p))
+}
+
+func Setenv(key string, value string) Error {
+    if _putenv_s(cstring(key), cstring(value)) != 0 {
+        return LastErrno()
+    }
+    return Error.Ok
 }
 
 tests {
@@ -165,7 +410,7 @@ tests {
         }
     }
 
-        func TestOkConstructor(t *test.Runner) {
+    func TestOkConstructor(t *test.Runner) {
         t.AssertEqual(Ok(), Error.Ok, "Ok()")
         t.Assert(Ok().IsOk(), "IsOk")
         t.Assert(NotFound().IsNotFound(), "IsNotFound")
@@ -188,6 +433,90 @@ tests {
             }
             StringResult.Err(e) => {
                 t.AssertEqual(e, Error.NotFound, "Err payload")
+            }
+        }
+    }
+
+    func TestWriteReadRemove(t *test.Runner) {
+        path := "_std_os_test_roundtrip.txt"
+        err := WriteFileString(path, "hello")
+        t.Assert(err.IsOk(), "WriteFileString")
+        t.Assert(Exists(path), "Exists after write")
+
+        match ReadFileString(path) {
+            StringResult.Ok(s) => {
+                t.AssertEqual(s, "hello", "ReadFileString")
+            }
+            StringResult.Err(e) => {
+                t.Assert(false, "read: " + e.String())
+            }
+        }
+
+        match ReadFile(path) {
+            BytesResult.Ok(b) => {
+                t.AssertEqual(len(b), 5, "ReadFile len")
+                t.AssertEqual(b[0], u8(104), "h")
+            }
+            BytesResult.Err(e) => {
+                t.Assert(false, "bytes: " + e.String())
+            }
+        }
+
+        rem := Remove(path)
+        t.Assert(rem.IsOk(), "Remove")
+        t.Assert(!Exists(path), "gone")
+    }
+
+    func TestOpenMissing(t *test.Runner) {
+        match Open("_std_os_test_missing_zzz.txt") {
+            FileResult.Ok(f) => {
+                f.Close()
+                t.Assert(false, "expected missing")
+            }
+            FileResult.Err(e) => {
+                t.Assert(e.IsNotFound(), "NotFound: " + e.String())
+            }
+        }
+    }
+
+    func TestGetenvSetenv(t *test.Runner) {
+        key := "LLX_STD_OS_TEST_KEY"
+        match Getenv(key) {
+            StringResult.Ok(s) => {
+                // may already exist from a prior run; overwrite below
+                t.Assert(true, "preexisting " + s)
+            }
+            StringResult.Err(e) => {
+                t.Assert(e.IsNotFound(), "missing before set")
+            }
+        }
+        err := Setenv(key, "roundtrip")
+        t.Assert(err.IsOk(), "Setenv")
+        match Getenv(key) {
+            StringResult.Ok(s) => {
+                t.AssertEqual(s, "roundtrip", "Getenv")
+            }
+            StringResult.Err(e) => {
+                t.Assert(false, "getenv: " + e.String())
+            }
+        }
+        match Getenv("LLX_STD_OS_TEST_MISSING_KEY_ZZZ") {
+            StringResult.Ok(s) => {
+                t.Assert(false, "unexpected: " + s)
+            }
+            StringResult.Err(e) => {
+                t.Assert(e.IsNotFound(), "missing key")
+            }
+        }
+    }
+
+    func TestGetwd(t *test.Runner) {
+        match Getwd() {
+            StringResult.Ok(s) => {
+                t.Assert(len(s) > 0, "cwd nonempty")
+            }
+            StringResult.Err(e) => {
+                t.Assert(false, "Getwd: " + e.String())
             }
         }
     }

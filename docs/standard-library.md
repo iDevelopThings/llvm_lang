@@ -18,9 +18,9 @@ func main() {
 | `std:strings` | Search, trim, split, case, number format/parse |
 | `std:slices` | Generic `Contains`, `IndexOf`, `Reverse`, `Map`, `Filter`, `Reduce` |
 | `std:sort` | In-place `Sort` / `SortInts` |
-| `std:maps` | `Has`, `Keys`, `Values` |
+| `std:maps` | `Has`, `IterKeys`/`IterValues`, `Keys`/`Values` |
 | `std:path` | `Join`, `Clean`, `Base`, `Dir`, `Ext`, `IsAbs`, `Separator` |
-| `std:os` | `Error` / Result enums (file I/O and env coming next) |
+| `std:os` | `Error`/Results, file I/O, env, `Getwd`/`Mkdir`/`Exit` |
 | `std:collections` | Generational `SlotMap[T]` handles |
 | `std:vectors` | `Vector2` and `Vector3` arithmetic |
 | `std:rect` | Rectangle queries and set operations |
@@ -30,28 +30,32 @@ func main() {
 | `std:log` | Formatted logging with `{}` placeholders |
 | `std:test` | Assertions used by `llvmc -test` |
 
-## Errors (`std:os`)
+## `std:os`
 
-OS-facing helpers share an `Error` enum. Void-ish ops return `Error` and
-use `Error.Ok` (via `os.Ok()` from other packages) as success. Value-returning
-ops use small result enums such as `StringResult` / `BytesResult` with
-`Ok(...)` / `Err(Error)` arms for `match`.
+Shared `Error` enum for fallible ops. Void-ish ops return `Error` (`Ok` on
+success). Value-returning ops use `FileResult`, `BytesResult`, or
+`StringResult` with `Ok(...)` / `Err(Error)` for `match`.
 
 ```go
 import "std:os"
 
-err := os.Ok()
-if err.IsOk() {
-    print("ok")
+match os.ReadFileString("notes.txt") {
+    os.StringResult.Ok(s) => {
+        print(s)
+    }
+    os.StringResult.Err(e) => {
+        print(e.String())
+    }
 }
 ```
 
 Hot paths keep unit variants (plus `Unknown(i32)` for raw errno). Use
-`Error.String()` only when formatting for humans. Cross-package
-`os.Error.NotFound` construction is not valid yet — call `os.Ok()`,
-`os.NotFound()`, or helpers like `IsOk` / `IsNotFound` instead.
+`Error.String()` when formatting for humans.
 
-File and environment APIs are not shipped in this round.
+Files: `Open` / `Create` → `FileResult` (destructor closes), `Read` /
+`Write` / `ReadAll`, `ReadFile` / `WriteFile` / `ReadFileString` /
+`WriteFileString`, `Remove`, `Mkdir`, `Rmdir`, `Exists`, `Getwd`, `Chdir`,
+`Exit`. Env: `Getenv` / `Setenv`.
 
 ## `std:path`
 
@@ -109,7 +113,8 @@ Call `Seed` for repeatable output. `IntRange(min, max)` includes both bounds;
 - `std:slices` provides `Contains`, `IndexOf`, in-place `Reverse`, `Map`,
   `Filter`, and `Reduce`.
 - `std:sort` provides generic in-place `Sort` and `SortInts`.
-- `std:maps` provides `Has`, `Keys`, and `Values` (`Keys`/`Values` allocate).
+- `std:maps` provides `Has`, zero-alloc `IterKeys`/`IterValues` generators,
+  and allocating `Keys`/`Values` collectors.
 - `std:time` provides QPC-based `Now` / `ElapsedSeconds`, `Duration`
   constructors (`Nanoseconds`, `Milliseconds`, …), `Sleep`, and
   `FormattedDuration`.

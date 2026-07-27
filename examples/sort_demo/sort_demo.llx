@@ -11,7 +11,7 @@ func main() int {
     s = append(s, 3)
     s = append(s, 1)
     s = append(s, 2)
-    sort.SortInts(s)
+    sort.SortNumeric(s)
     print(s[0])
     print(s[1])
     print(s[2])

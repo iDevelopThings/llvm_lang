@@ -3086,10 +3086,12 @@ error if it can't be found.
   `IsAbs`. Accepts `/` and `\` on input; `Join`/`Clean` emit `Separator()`
   (`\` on the current Windows target).
 - **`std/os`** - shared `Error` enum (`Ok`, classified unit variants,
-  `Unknown(i32)`), `FromErrno`, `Ok()`/`NotFound()` constructors (see
-  cross-package enum gap in `docs/current-limitations.md`), `IsOk` /
-  `IsNotFound`, and `StringResult` / `BytesResult`. File I/O and env are
-  not shipped yet.
+  `Unknown(i32)`), `FromErrno`, `Ok()`/`NotFound()` / `IsOk` /
+  `IsNotFound`, result enums `FileResult` / `BytesResult` /
+  `StringResult`, and libc/CRT-backed file + env helpers: `Open` /
+  `Create`, `File` (destructor closes), `ReadFile` / `WriteFile` /
+  `ReadFileString` / `WriteFileString`, `Remove`, `Mkdir`, `Rmdir`,
+  `Exists`, `Getwd`, `Chdir`, `Exit`, `Getenv`, `Setenv`.
 - **`std/time`** - QPC-based `Now() i64` / `ElapsedSeconds` (same externs
   as `examples/scope_timer`, left untouched), `Duration` (nanosecond
   count with `+`/`-`), constructors (`Nanoseconds`/`Milliseconds`/…),
@@ -3097,8 +3099,9 @@ error if it can't be found.
   `FormattedDuration`. Monotonic stays on QPC deliberately; Sleep is the
   portable libc path.
 - **`std/sort`** - in-place heapsort `Sort[T](s, less)` and `SortInts`.
-- **`std/maps`** - `Has`, `Keys`, `Values` (`Keys`/`Values` allocate one
-  slice each).
+- **`std/maps`** - `Has`, zero-alloc generators `IterKeys`/`IterValues`, and
+  allocating collectors `Keys`/`Values` (each builds one slice by ranging
+  the matching generator).
 - **`std/scheduler`** - a Unity-`StartCoroutine`-style timer scheduler built
   on top of the `coroutine` type (see "Coroutines" above): `Scheduler.Schedule(e *Entry)`
   (honors whatever `e`'s coroutine already wrote into `e.NextWait`),
@@ -3178,6 +3181,5 @@ error if it can't be found.
 
 **Deliberately deferred, not built this round:** Unicode-aware string
 handling (everything above is ASCII-only), a general/shortest-round-tripping
-float-to-string formatter, `std/os` file I/O and env (blocked on
-`cstring == nil` / `cstring(*u8)` — see `examples/compiler_gaps`), and
+float-to-string formatter, directory listing (`ReadDir`), rich `Stat`, and
 anything else not listed above. `std/` keeps growing incrementally.

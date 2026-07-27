@@ -70,6 +70,7 @@ Run a multi-file example by passing its directory:
 | Example | Shows |
 | --- | --- |
 | [`path_demo`](../examples/path_demo/path_demo.llx) | `std:path` |
+| [`os_demo`](../examples/os_demo/os_demo.llx) | `std:os` file + env |
 | [`sort_demo`](../examples/sort_demo/sort_demo.llx) | `std:sort` |
 | [`maps_demo`](../examples/maps_demo/maps_demo.llx) | `std:maps` |
 | [`mathutil_demo`](../examples/mathutil_demo/mathutil_demo.llx) | `std:mathutil` |
@@ -86,9 +87,9 @@ Run a multi-file example by passing its directory:
 ## Compiler gaps
 
 [compiler_gaps](../examples/compiler_gaps/README.md) holds minimal
-repros for known language/compiler gaps (cross-package enums, `cstring`
-nil/pointer conversion, string indexing, etc.). Each case documents
-expected vs actual behavior.
+repros for known language/compiler gaps (cross-package enums, package
+vars, method-on-variant construction). Each case documents expected vs
+actual behavior.
 
 ## C interop
 
