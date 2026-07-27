@@ -129,6 +129,26 @@ func f() bool {
 	}
 }
 
+// TestAnyBoxNilMapRoundTrip proves boxing is genuinely value-agnostic - a
+// nil (never-`make`'d) map's control-block pointer is boxed exactly like any
+// other map's, since genAnyBox never inspects what a map value points to.
+func TestAnyBoxNilMapRoundTrip(t *testing.T) {
+	jm := compileAndJIT(t, `
+func f() int {
+	var m map[string]int
+	a := Any(m)
+	v, ok := AnyAs[map[string]int](a)
+	if !ok {
+		return -1
+	}
+	return len(v)
+}
+`)
+	if got := jm.runInt32(t, "f"); got != 0 {
+		t.Errorf("f() = %d, want 0", got)
+	}
+}
+
 // TestAnyFieldsOnBoxedMapYieldsZeroIterations proves AnyFields' existing
 // non-struct precedent (a boxed int already yields zero fields) also holds
 // for a boxed map - its descriptor has fieldCount 0/fieldsPtr null exactly
@@ -177,6 +197,45 @@ func f() int {
 `)
 	if got := jm.runInt32(t, "f"); got != 5 {
 		t.Errorf("f() = %d, want 5", got)
+	}
+}
+
+// TestAnyBoxArrayOfStructsWithMapFieldThreeLevelNesting proves the
+// recursive boxability composes through three levels (array -> struct ->
+// map), not just the two levels every other Any test exercises - each level
+// goes through the same isNestedBoxableIntoAny/typeDescriptorFor recursion,
+// so there's nothing depth-specific to special-case, but this is the first
+// test to actually prove it rather than assume it.
+func TestAnyBoxArrayOfStructsWithMapFieldThreeLevelNesting(t *testing.T) {
+	jm := compileAndJIT(t, `
+struct Bag {
+	Items map[string]int
+}
+func f() int {
+	b0 := Bag{Items: make(map[string]int)}
+	b0.Items["x"] = 5
+	b1 := Bag{Items: make(map[string]int)}
+	b1.Items["x"] = 7
+	bags := [2]Bag{b0, b1}
+	a := Any(bags)
+	e, ok := AnyIndex(a, 1)
+	if !ok {
+		return -1
+	}
+	sum := 0
+	for name, v := range AnyFields(e) {
+		if name == "Items" {
+			mv, mok := AnyAs[map[string]int](v)
+			if mok {
+				sum = sum + mv["x"]
+			}
+		}
+	}
+	return sum
+}
+`)
+	if got := jm.runInt32(t, "f"); got != 7 {
+		t.Errorf("f() = %d, want 7", got)
 	}
 }
 
