@@ -729,3 +729,17 @@ func (t *Tree) IsAssignmentTarget(n NodeIndex) bool {
 	}
 	return false
 }
+
+// ParamOf returns n's enclosing Param node when n is one of its own [name,
+// type] children (see Node's own doc comment), InvalidNode otherwise. Every
+// Param carries exactly those two children (see parser/decl.go's own
+// construction site), so any node whose parent is a Param is necessarily
+// one of them. Used by callers that need a parameter's real effective
+// type, which sema records only on the Param node itself, never on either
+// child individually.
+func (t *Tree) ParamOf(n NodeIndex) NodeIndex {
+	if parent := t.Parent(n); parent != InvalidNode && t.Nodes[parent].Kind == enums.NodeKinds.Param {
+		return parent
+	}
+	return InvalidNode
+}

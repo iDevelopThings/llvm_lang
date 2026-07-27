@@ -275,6 +275,67 @@ func TestHover_OperatorShowsSignatureDetail(t *testing.T) {
 	}
 }
 
+// TestHover_ParamNameShowsType is the regression test for a real gap: hovering
+// a parameter's own name (not its type annotation) resolved to an Ident with
+// only an Info.Refs entry (see resolve.go's declareLocal) and no Info.Types
+// entry of its own, so the type: line silently never rendered at all.
+func TestHover_ParamNameShowsType(t *testing.T) {
+	w, path := singleFileWorkspace(t, `func add(x int, y int) int {
+	return x + y
+}
+`)
+	fa, _ := w.Analysis(path)
+	nameOffset := strings.Index(fa.Tree.File.Src, "x int")
+	pos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(nameOffset))
+
+	hover := w.Hover(path, pos)
+	if hover == nil {
+		t.Fatal("Hover returned nil")
+	}
+	content, ok := hover.Contents.(protocol.MarkupContent)
+	if !ok {
+		t.Fatalf("hover.Contents = %T, want protocol.MarkupContent", hover.Contents)
+	}
+	if !strings.Contains(content.Value, "param x") {
+		t.Errorf("hover content = %q, want it to still show \"param x\"", content.Value)
+	}
+	if !strings.Contains(content.Value, "type:\n```go\nint\n```") {
+		t.Errorf("hover content = %q, want a \"type: int\" line", content.Value)
+	}
+}
+
+// TestHover_ParamTypeShowsType is TestHover_ParamNameShowsType's counterpart:
+// hovering a parameter's own type annotation must keep showing its type, now
+// that the lookup redirects through the enclosing Param node (see
+// ast.Tree.ParamOf) rather than reading the type child's own cached entry
+// directly.
+func TestHover_ParamTypeShowsType(t *testing.T) {
+	w, path := singleFileWorkspace(t, `struct Point {
+	x int
+	y int
+}
+
+func f(p Point) int {
+	return p.x
+}
+`)
+	fa, _ := w.Analysis(path)
+	typeOffset := strings.Index(fa.Tree.File.Src, "p Point") + len("p ")
+	pos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(typeOffset))
+
+	hover := w.Hover(path, pos)
+	if hover == nil {
+		t.Fatal("Hover returned nil")
+	}
+	content, ok := hover.Contents.(protocol.MarkupContent)
+	if !ok {
+		t.Fatalf("hover.Contents = %T, want protocol.MarkupContent", hover.Contents)
+	}
+	if !strings.Contains(content.Value, "type:\n```go\nPoint\n```") {
+		t.Errorf("hover content = %q, want a \"type: Point\" line", content.Value)
+	}
+}
+
 // TestHover_StructShowsSizeAlignLayout covers the CLion-style memory-layout
 // feature: hovering a struct must also show its real size/alignment/padding,
 // not just its field list. flag (1 byte) forces a 3-byte gap before n (a
