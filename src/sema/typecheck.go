@@ -5121,7 +5121,11 @@ func (c *checker) checkVariadicCallArgs(n ast.NodeIndex, args []ast.NodeIndex, a
 // rules through this one function. Reports whether at may be boxed at all.
 func (c *checker) checkBoxableIntoAny(a ast.NodeIndex, at Type) bool {
 	if !c.isBoxableIntoAny(at) {
-		c.errorAt(a, "cannot box %s into Any - enums, arrays, maps, function values, and multi-value/generator/coroutine results have no Any representation this round (a struct is only boxable if every one of its own fields is)", at)
+		if at.Kind == TypeStruct {
+			c.errorAt(a, "cannot box %s into Any - it has a field whose own type has no Any representation this round (an enum, array, map, function value, Any itself, or a multi-value/generator/coroutine result)", at)
+		} else {
+			c.errorAt(a, "cannot box %s into Any - enums, arrays, maps, function values, and multi-value/generator/coroutine results have no Any representation this round", at)
+		}
 		return false
 	}
 	if c.typeIsNonCopyable(at) {
@@ -5801,20 +5805,22 @@ func (c *checker) checkConversionCall(n, callee ast.NodeIndex, args []ast.NodeIn
 
 // isBoxableIntoAny reports whether t has a defined Any-boxing representation
 // this round (see LANGUAGE.md's "Any" section): every scalar/primitive kind,
-// TypePointer, and TypeAny itself (a no-op re-box) - not an enum
-// (variant-payload descriptor shape not designed yet), a dynamic/fixed array
-// or map (no descriptor shape), a function/cfunc value, or any of the three
-// kinds that are never a real storable value at all (TypeMultiReturn/
-// TypeGenerator/TypeCoroutine). A TypeStruct is boxable only if every one of
-// its own fields is - codegen's structDescriptor recurses into each field's
-// own type descriptor unconditionally (any.go), so a field of an otherwise-
-// unboxable kind (e.g. a `[]int`) must be rejected here, at the one real
-// compile-time checkpoint, rather than surfacing as a runtime codegen panic
-// the first time that particular struct is ever boxed anywhere in the
-// program. A pointer field doesn't recurse into its own pointee (TypePointer
-// is unconditionally boxable above) - the same cycle-safety a
-// self-referential struct already relies on for typeIsComparable/
-// typeIsPrintable.
+// TypePointer, and TypeAny itself at the top level (a no-op re-box, handled
+// directly by genAnyBox's own short-circuit before ever touching a type
+// descriptor) - not an enum (variant-payload descriptor shape not designed
+// yet), a dynamic/fixed array or map (no descriptor shape), a function/cfunc
+// value, or any of the three kinds that are never a real storable value at
+// all (TypeMultiReturn/TypeGenerator/TypeCoroutine). A TypeStruct is boxable
+// only if every one of its own fields is - codegen's structDescriptor
+// recurses into each field's own type descriptor unconditionally (any.go),
+// so a field of an otherwise-unboxable kind (e.g. a `[]int`, or `Any`
+// itself - typeDescriptorFor has no TypeAny case, only genAnyBox's top-level
+// short-circuit does) must be rejected here, at the one real compile-time
+// checkpoint, rather than surfacing as a runtime codegen panic the first
+// time that particular struct is ever boxed anywhere in the program. A
+// pointer field doesn't recurse into its own pointee (TypePointer is
+// unconditionally boxable above) - the same cycle-safety a self-referential
+// struct already relies on for typeIsComparable/typeIsPrintable.
 func (c *checker) isBoxableIntoAny(t Type) bool {
 	switch t.Kind {
 	case TypeEnum, TypeArray, TypeMap, TypeFunc, TypeCFunc,
@@ -5828,7 +5834,7 @@ func (c *checker) isBoxableIntoAny(t Type) bool {
 		defer restore()
 		for _, field := range c.tree.StructFields(t.Struct.Symbol.Decl) {
 			fieldType := c.typeFromNode(c.tree.Child(field, 1))
-			if !c.isBoxableIntoAny(fieldType) {
+			if fieldType.Kind == TypeAny || !c.isBoxableIntoAny(fieldType) {
 				return false
 			}
 		}

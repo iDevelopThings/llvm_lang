@@ -142,6 +142,17 @@ func TestAnyBoxStructWithUnboxableFieldRejected(t *testing.T) {
 		"func f() {\n\tb := Bag{Items: []int{1, 2}}\n\ta := Any(b)\n}\n", 1)
 }
 
+// An Any-typed field is legal at the top level (Any(x) where x is already
+// Any is a defined no-op re-box), but typeDescriptorFor has no TypeAny case
+// of its own - only genAnyBox's top-level short-circuit does - so a struct
+// with an Any-typed field must still be rejected the same way any other
+// unboxable field kind is, not just accepted because TypeAny happens to be
+// boxable at the top level.
+func TestAnyBoxStructWithAnyFieldRejected(t *testing.T) {
+	expectCheckErrors(t, "struct Wrapper {\n\tV Any\n}\n"+
+		"func f() {\n\tw := Wrapper{V: Any(5)}\n\ta := Any(w)\n}\n", 1)
+}
+
 // A struct field that's itself a pointer stays boxable regardless of what it
 // points to - TypePointer never recurses into its own Elem (the same
 // cycle-safety a self-referential struct already relies on for
