@@ -53,14 +53,10 @@ func Format(format string, args ...Any) string {
 // stringifyAny renders any boxed value as a human-readable string,
 // dispatching on its own boxed kind - every scalar kind gets its natural
 // formatting; a struct renders as "Name{field: value, ...}", each field
-// itself stringified the same way recursively (safe against unbounded
-// recursion - a struct can only cycle through itself via a pointer field,
-// which AnyFields never descends into, see LANGUAGE.md's "Any" section).
-// A struct with zero fields and a boxed pointer both fall through to the
-// same "<Name>" fallback below - AnyKind returns a raw ordinal with no
-// named kind to compare against (a deliberate Any simplification), so
-// there's no way to tell them apart without one; an empty struct is rare
-// enough this isn't worth chasing further.
+// itself stringified the same way recursively (safe against a self-
+// referential struct - see LANGUAGE.md's "Any" section on why AnyFields
+// can't recurse through a pointer field). A struct with zero fields and a
+// boxed pointer both fall through to the same "<Name>" fallback below.
 func stringifyAny(a Any) string {
     sv, sok := AnyAs[string](a)
     if sok {
@@ -162,6 +158,23 @@ tests {
         End   Point
     }
 
+    struct Node {
+        Value int
+        Next  *Node
+    }
+
+    func TestFormatEmptyString(t *test.Runner) {
+        t.AssertEqual(Format(""), "", "an empty format string with no args or verbs")
+    }
+
+    func TestFormatTrailingPercent(t *test.Runner) {
+        t.AssertEqual(Format("abc%"), "abc%", "a lone trailing %% at end-of-string, not a crash")
+    }
+
+    func TestFormatMultipleLiteralPercents(t *test.Runner) {
+        t.AssertEqual(Format("%%%%"), "%%", "consecutive %% pairs each collapse to one literal percent")
+    }
+
     func TestFormatSubstitutesEachVerb(t *test.Runner) {
         got := Format("count: %d name: %s ok: %t pi: %f", 5, "bob", true, 3.5)
         t.AssertEqual(got, "count: 5 name: bob ok: true pi: 3.5000", "one substitution per verb, in order")
@@ -218,6 +231,21 @@ tests {
     func TestFormatNestedStruct(t *test.Runner) {
         l := Line{Start: Point{X: 1, Y: 2}, End: Point{X: 3, Y: 4}}
         t.AssertEqual(Format("%v", l), "Line{Start: Point{X: 1, Y: 2}, End: Point{X: 3, Y: 4}}", "a struct field is itself recursively rendered")
+    }
+
+    func TestFormatSelfReferentialStructIsSafe(t *test.Runner) {
+        n := Node{Value: 1, Next: nil}
+        got := Format("%v", n)
+        t.AssertEqual(got, "Node{Value: 1, Next: <pointer>}", "AnyFields never descends into a pointer field, so a self-referential struct can't recurse forever")
+    }
+
+    func alreadyBoxed(args ...Any) string {
+        return Format("%v", args[0])
+    }
+
+    func TestVariadicCollectAcceptsAnAlreadyBoxedAny(t *test.Runner) {
+        boxed := Any(7)
+        t.AssertEqual(alreadyBoxed(boxed), "7", "an already-boxed Any forwarded into ...Any collection is passed through, not double-boxed")
     }
 
     func TestLogWritesFormattedLine(t *test.Runner) {

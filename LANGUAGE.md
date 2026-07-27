@@ -2550,6 +2550,11 @@ for name, value := range AnyFields(a) {
 }
 ```
 
+A pointer field's own descriptor never carries a field table, so `AnyFields`
+can never recurse through one - a self-referential struct (one holding a
+pointer to its own type) is safe to walk this way, unlike a naive recursive
+stringifier over the raw fields would be.
+
 `AnyKind`/`AnyName`/`AnyAs`/`AnyFields` all require a real `Any`-typed
 argument - calling one on a value of any other static type is a compile-time
 error, not something inferred or coerced.
@@ -2904,7 +2909,8 @@ error if it can't be found.
   letter is a readability convention rather than a checked type, and `%v`
   is the honest spelling of what actually happens. `%%` is a literal
   percent; a verb with no remaining argument renders
-  `%!<verb>(MISSING)` (matching Go's own `fmt` convention).
+  `%!<verb>(MISSING)` (matching Go's own `fmt` convention); an unrecognized
+  verb letter is left as-is in the output, consuming no argument.
   `Log`/`Info`/`Warn`/`Error` all defer to `Format` and `print` the result,
   the latter three prefixed with `[INFO]`/`[WARN]`/`[ERROR]`.
 - **`std/test`** - soft-fail test helpers for `llvmc -test`: `Runner`,
