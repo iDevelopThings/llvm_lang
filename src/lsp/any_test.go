@@ -1,6 +1,6 @@
-// Any-type and AnyKind/AnyName/AnyAs/AnyFields builtin coverage across every
-// LSP capability - see src/lsp/doc.go's own standing convention and
-// variadic_test.go for the identical shape this file follows.
+// Any-type and AnyKind/AnyName/AnyAs/AnyFields/AnyLen/AnyIndex builtin
+// coverage across every LSP capability - see src/lsp/doc.go's own standing
+// convention and variadic_test.go for the identical shape this file follows.
 package lsp
 
 import (
@@ -26,6 +26,18 @@ func describe(a Any) int {
 	return 0
 }
 
+func describeArray(a Any) int {
+	count := AnyLen(a)
+	e, ok := AnyIndex(a, 0)
+	if ok {
+		v, vok := AnyAs[int](e)
+		if vok {
+			return count + v
+		}
+	}
+	return count
+}
+
 func main() int {
 	p := Point{X: 1, Y: 2}
 	boxed := Any(p)
@@ -36,7 +48,8 @@ func main() int {
 			sum = sum + fv
 		}
 	}
-	return describe(Any(5)) + sum
+	s := []int{1, 2, 3}
+	return describe(Any(5)) + sum + describeArray(Any(s))
 }
 `
 
@@ -67,6 +80,22 @@ func TestAny_Hover_ParamShowsAnyType(t *testing.T) {
 	fa, _ := w.Analysis(path)
 
 	offset := strings.Index(fa.Tree.File.Src, "AnyKind(a)") + len("AnyKind(")
+	pos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(offset))
+
+	text := hoverText(t, w.Hover(path, pos))
+	if !strings.Contains(text, "Any") {
+		t.Errorf("Hover(a) = %q, want it to contain %q", text, "Any")
+	}
+}
+
+// TestAny_Hover_ArrayParamShowsAnyType covers hovering the `a Any` parameter
+// inside describeArray - the AnyLen/AnyIndex-using sibling of describe
+// above, proving the new builtins don't confuse ordinary hover resolution.
+func TestAny_Hover_ArrayParamShowsAnyType(t *testing.T) {
+	w, path := singleFileWorkspace(t, anyFixture)
+	fa, _ := w.Analysis(path)
+
+	offset := strings.Index(fa.Tree.File.Src, "AnyLen(a)") + len("AnyLen(")
 	pos := byteOffsetToPosition(fa.Tree.File, lexer.Pos(offset))
 
 	text := hoverText(t, w.Hover(path, pos))
@@ -169,7 +198,7 @@ func TestAny_DocumentSymbolsAndFolding_FuncsUsingAny(t *testing.T) {
 	for _, s := range syms {
 		names = append(names, s.Name)
 	}
-	for _, want := range []string{"Point", "describe", "main"} {
+	for _, want := range []string{"Point", "describe", "describeArray", "main"} {
 		if !slices.Contains(names, want) {
 			t.Errorf("DocumentSymbols names %v missing %q", names, want)
 		}
@@ -195,8 +224,9 @@ func TestAny_SemanticTokens_NoCrashAndCoversBuiltinCalls(t *testing.T) {
 }
 
 // broken/incomplete-source variant every capability above needs to survive:
-// AnyAs with no type argument (a real, rejected shape) plus a mid-typing
-// `Any(` call with no closing paren yet.
+// AnyAs with no type argument (a real, rejected shape), AnyIndex with a
+// missing second argument, plus a mid-typing `Any(` call with no closing
+// paren yet.
 func TestAny_MalformedAnySource_NoCrash(t *testing.T) {
 	src := `func Bad(a Any) int {
 	v, ok := AnyAs(a)
@@ -204,6 +234,11 @@ func TestAny_MalformedAnySource_NoCrash(t *testing.T) {
 		return v
 	}
 	return 0
+}
+
+func BadIndex(a Any) int {
+	v, ok := AnyIndex(a)
+	return AnyLen(v)
 }
 
 func Typing(x int) int {

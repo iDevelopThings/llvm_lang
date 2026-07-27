@@ -2510,24 +2510,27 @@ c := Any(b)         // Any(x) where x is already Any: a cheap no-op copy
 ```
 
 Every scalar/primitive type (`i8`/`i16`/`i32`/`i64`/`u8`/`u16`/`u32`/`u64`/
-`f32`/`f64`/`bool`/`string`/`cstring`/a pointer) and any struct type can be
-boxed (collecting into a `...Any` variadic parameter boxes implicitly, no
-`Any(x)` needed - see "Variadic parameters" above). Boxing copies the
-value's own bytes into a fresh, arena-allocated slot
-(see "Memory model" - the same allocator dynamic arrays and strings already
-use) - a boxed value stays valid regardless of whether it outlives the stack
-frame it was boxed in, at the cost of one allocation per `Any(x)` call, so
-this isn't meant for a hot path. **Not boxable this round**: an enum, a
-dynamic or fixed-size array, a map, a function/cfunc value, or a non-
-copyable type (one that declares a `destructor()`) - each is a real,
+`f32`/`f64`/`bool`/`string`/`cstring`/a pointer), any struct type, and a
+dynamic or fixed-size array can be boxed (collecting into a `...Any`
+variadic parameter boxes implicitly, no `Any(x)` needed - see "Variadic
+parameters" above). A struct or array is boxable only if every one of its
+own field/element types is, recursively. Boxing copies the value's own bytes
+into a fresh, arena-allocated slot (see "Memory model" - the same allocator
+dynamic arrays and strings already use) - a boxed value stays valid
+regardless of whether it outlives the stack frame it was boxed in, at the
+cost of one allocation per `Any(x)` call, so this isn't meant for a hot
+path. **Not boxable this round**: an enum, a map, a function/cfunc value, or
+a non-copyable type (one that declares a `destructor()`) - each is a real,
 reported error, not a crash.
 
-Four predeclared builtins read a boxed value back out:
+Six predeclared builtins read a boxed value back out:
 
 ```go
 AnyKind(a Any) i32      // the boxed value's own raw TypeKind wire value
 AnyName(a Any) string   // its display name, e.g. "int" or "Point"
 AnyAs[T](a Any) (T, bool)
+AnyLen(a Any) int                 // a boxed array's own length
+AnyIndex(a Any, i int) (Any, bool) // a boxed array's i'th element
 ```
 
 `AnyAs[T]` mirrors Go's own type-assertion shape (`v, ok := x.(int)`): if
@@ -2555,9 +2558,28 @@ can never recurse through one - a self-referential struct (one holding a
 pointer to its own type) is safe to walk this way, unlike a naive recursive
 stringifier over the raw fields would be.
 
+A boxed array's own length and elements are read with `AnyLen`/`AnyIndex`,
+mirroring Go's own `len`/bounds-checked-index shape:
+
+```go
+a := Any([]int{1, 2, 3})
+n := AnyLen(a)              // 3
+v, ok := AnyIndex(a, 1)     // Any(2), true
+_, ok = AnyIndex(a, 99)     // zero Any, false - never a crash
+```
+
+`AnyLen`/`AnyIndex` are permissive about the wrong kind at runtime, unlike
+the other four builtins below: calling either on a non-array `Any` (or an
+out-of-range index) just returns `0`/`(zero Any, false)`, since `Any` erases
+the static type and there's no way to check "is this an array" at compile
+time - the same reasoning `AnyFields` already applies to a non-struct `Any`.
+
 `AnyKind`/`AnyName`/`AnyAs`/`AnyFields` all require a real `Any`-typed
 argument - calling one on a value of any other static type is a compile-time
-error, not something inferred or coerced.
+error, not something inferred or coerced. `AnyLen`/`AnyIndex` share this same
+"argument must be `Any`" requirement (and `AnyIndex`'s second argument must
+be `int`); only the *boxed kind itself* being an array is checked at runtime,
+not compile time.
 
 `Any` is neither comparable (`==`/`!=`) nor printable (`print`) this round,
 and cannot cross an `extern func` signature (no defined C ABI shape) - each

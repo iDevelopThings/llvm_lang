@@ -73,13 +73,15 @@ b := Any(somePoint)
 ```
 
 Every scalar type (`i8`...`i64`, `u8`...`u64`, `f32`, `f64`, `bool`,
-`string`, `cstring`, a pointer) and any struct can be boxed. Boxing copies
-the value into a fresh allocation, so a boxed value stays valid even after
-the code that boxed it returns. Collecting into a `...Any` variadic
-parameter boxes each argument automatically, no `Any(x)` needed - see
+`string`, `cstring`, a pointer), any struct, and any array (fixed or
+dynamic) can be boxed - a struct/array only if every one of its own
+field/element types is. Boxing copies the value into a fresh allocation, so
+a boxed value stays valid even after the code that boxed it returns.
+Collecting into a `...Any` variadic parameter boxes each argument
+automatically, no `Any(x)` needed - see
 [Variadic parameters](functions-and-generics.md#variadic-parameters).
 
-Four builtins read a boxed value back out:
+Six builtins read a boxed value back out:
 
 ```go
 AnyKind(a)              // a raw kind ordinal (i32)
@@ -89,18 +91,22 @@ v, ok := AnyAs[int](a)  // the real value if the kind matches, else (0, false)
 for name, value := range AnyFields(a) {
     fv, ok := AnyAs[int](value)
 }
+
+n := AnyLen(a)             // a boxed array's own length
+e, ok := AnyIndex(a, 0)    // a boxed array's i'th element, bounds-checked
 ```
 
 `AnyAs[T]` always needs an explicit type argument - there is nothing left in
 a boxed value to infer it from. `AnyFields` walks a boxed struct's own
-fields, each itself boxed as an `Any`.
+fields, each itself boxed as an `Any`. `AnyLen`/`AnyIndex` are permissive
+about the wrong kind: calling either on a non-array `Any` (or an
+out-of-range index) just returns `0`/`(zero Any, false)`, not an error.
 
-Not boxable this round: enums, arrays, maps, function values, and any
-non-copyable type. `Any` cannot be compared with `==`, printed with
-`print`, or cross an `extern func` signature. See
-[Current limitations](current-limitations.md) and
-[the Any section](../LANGUAGE.md#any) of the language spec for the exact
-rules.
+Not boxable this round: enums, maps, function values, and any non-copyable
+type. `Any` cannot be compared with `==`, printed with `print`, or cross an
+`extern func` signature. See [Current limitations](current-limitations.md)
+and [the Any section](../LANGUAGE.md#any) of the language spec for the
+exact rules.
 
 ## Calling C
 

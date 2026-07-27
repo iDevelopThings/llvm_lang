@@ -1195,6 +1195,12 @@ func (g *Generator) genCallExpr(n ast.NodeIndex) llvm.Value {
 	if g.isBuiltinCall(calleeNode, "AnyName") {
 		return g.genAnyNameCall(argNodes[0])
 	}
+	if g.isBuiltinCall(calleeNode, "AnyLen") {
+		return g.genAnyLenCall(argNodes[0])
+	}
+	if g.isBuiltinCall(calleeNode, "AnyIndex") {
+		return g.genAnyIndexCall(n, argNodes)
+	}
 	if g.isAnyAsCall(calleeNode) {
 		return g.genAnyAsCall(n, argNodes[0])
 	}

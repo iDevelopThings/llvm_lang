@@ -63,7 +63,7 @@ short; this index makes the less-common features easy to find.
 | Coroutine scheduling | [Coroutines](advanced-features.md#coroutines) | [`scheduler_demo`](../examples/scheduler_demo/scheduler_demo.llx) |
 | `extern func` | [Calling C](advanced-features.md#calling-c) | [`scope_timer`](../examples/scope_timer/scope_timer.llx) |
 | `cstring` conversions and `cfunc` callbacks | [Calling C](advanced-features.md#calling-c) | — |
-| `Any` boxing and `AnyKind`/`AnyName`/`AnyAs`/`AnyFields` | [Any](advanced-features.md#any) | [`any_demo`](../examples/any_demo/any_demo.llx) |
+| `Any` boxing and `AnyKind`/`AnyName`/`AnyAs`/`AnyFields`/`AnyLen`/`AnyIndex` | [Any](advanced-features.md#any) | [`any_demo`](../examples/any_demo/any_demo.llx) |
 
 ## Compiler
 

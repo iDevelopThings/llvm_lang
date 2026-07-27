@@ -102,6 +102,38 @@ func TestAnyFieldsRangeBindings(t *testing.T) {
 	}
 }
 
+func TestAnyLenReturnsI32(t *testing.T) {
+	tree, info := checkSrc(t, "func f() {\n\ts := []int{1, 2}\n\ta := Any(s)\n\tn := AnyLen(a)\n}\n")
+	decl := tree.Children(tree.Root)[0]
+	body := tree.FuncBody(decl)
+	stmts := tree.Children(body)
+	init := tree.Child(stmts[2], 1)
+	if got := info.Types[init]; got.Kind != TypeI32 {
+		t.Fatalf("Types[AnyLen call] = %v, want i32", got)
+	}
+}
+
+func TestAnyIndexRoundTripType(t *testing.T) {
+	tree, info := checkSrc(t, "func f() {\n\ts := []int{1, 2}\n\ta := Any(s)\n\tv, ok := AnyIndex(a, 0)\n}\n")
+	decl := tree.Children(tree.Root)[0]
+	body := tree.FuncBody(decl)
+	stmts := tree.Children(body)
+	names := tree.MultiShortVarDeclNames(stmts[2])
+	if got := info.Types[names[0]]; got.Kind != TypeAny {
+		t.Errorf("v's Type = %v, want Any", got)
+	}
+	if got := info.Types[names[1]]; got.Kind != TypeBool {
+		t.Errorf("ok's Type = %v, want bool", got)
+	}
+}
+
+// TestAnyIndexUntypedIntLiteralRetyped proves the index argument's untyped
+// literal is defaulted to int exactly like an ordinary array index
+// (checkIndexExpr), not left untyped.
+func TestAnyIndexUntypedIntLiteralRetyped(t *testing.T) {
+	checkSrc(t, "func f() {\n\ts := []int{1, 2}\n\ta := Any(s)\n\tv, ok := AnyIndex(a, 1)\n}\n")
+}
+
 // --- invalid: boxing ---
 
 func TestAnyBoxEnumRejected(t *testing.T) {
@@ -109,12 +141,22 @@ func TestAnyBoxEnumRejected(t *testing.T) {
 		"func f() {\n\ts := Shape.Point\n\ta := Any(s)\n}\n", 1)
 }
 
-func TestAnyBoxDynamicArrayRejected(t *testing.T) {
-	expectCheckErrors(t, "func f() {\n\ts := []int{1, 2}\n\ta := Any(s)\n}\n", 1)
+// TestAnyBoxDynamicArrayAccepted/TestAnyBoxFixedArrayAccepted cover this
+// round's new array support (see LANGUAGE.md's "Any" section) - both array
+// kinds are boxable as long as their own element type is.
+func TestAnyBoxDynamicArrayAccepted(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\ts := []int{1, 2}\n\ta := Any(s)\n}\n", 0)
 }
 
-func TestAnyBoxFixedArrayRejected(t *testing.T) {
-	expectCheckErrors(t, "func f() {\n\ts := [2]int{1, 2}\n\ta := Any(s)\n}\n", 1)
+func TestAnyBoxFixedArrayAccepted(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\ts := [2]int{1, 2}\n\ta := Any(s)\n}\n", 0)
+}
+
+// TestAnyBoxArrayWithUnboxableElementRejected proves an array is only
+// boxable if its own element type is - a map has no Any descriptor shape
+// this round, so an array of maps must still be rejected.
+func TestAnyBoxArrayWithUnboxableElementRejected(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\ts := make([]map[string]int, 1)\n\ta := Any(s)\n}\n", 1)
 }
 
 func TestAnyBoxMapRejected(t *testing.T) {
@@ -131,15 +173,24 @@ func TestAnyBoxNonCopyableStructRejected(t *testing.T) {
 		"func f() {\n\tr := Res{0}\n\ta := Any(move r)\n}\n", 1)
 }
 
-// A struct containing a field of an otherwise-unboxable kind (here a
-// dynamic array) must be rejected at this same compile-time checkpoint,
-// not just when boxing that field type directly - codegen's structDescriptor
-// recurses into every field's own type descriptor unconditionally, so
-// letting this compile would panic the first time Bag is ever boxed
-// anywhere in the program, rather than reporting a clean diagnostic here.
+// A struct containing a field of an otherwise-unboxable kind (here a map -
+// arrays are boxable now, see TestAnyBoxDynamicArrayAccepted above) must be
+// rejected at this same compile-time checkpoint, not just when boxing that
+// field type directly - codegen's structDescriptor recurses into every
+// field's own type descriptor unconditionally, so letting this compile would
+// panic the first time Bag is ever boxed anywhere in the program, rather
+// than reporting a clean diagnostic here.
 func TestAnyBoxStructWithUnboxableFieldRejected(t *testing.T) {
+	expectCheckErrors(t, "struct Bag {\n\tItems map[string]int\n}\n"+
+		"func f() {\n\tb := Bag{Items: make(map[string]int)}\n\ta := Any(b)\n}\n", 1)
+}
+
+// TestAnyBoxStructWithArrayFieldAccepted proves a struct field that's itself
+// an array composes correctly with both this round's array support and the
+// pre-existing per-field struct recursion.
+func TestAnyBoxStructWithArrayFieldAccepted(t *testing.T) {
 	expectCheckErrors(t, "struct Bag {\n\tItems []int\n}\n"+
-		"func f() {\n\tb := Bag{Items: []int{1, 2}}\n\ta := Any(b)\n}\n", 1)
+		"func f() {\n\tb := Bag{Items: []int{1, 2}}\n\ta := Any(b)\n}\n", 0)
 }
 
 // An Any-typed field is legal at the top level (Any(x) where x is already
@@ -178,6 +229,22 @@ func TestAnyFieldsNonAnyArgRejected(t *testing.T) {
 
 func TestAnyAsNonAnyArgRejected(t *testing.T) {
 	expectCheckErrors(t, "func f() {\n\tv, ok := AnyAs[int](5)\n}\n", 1)
+}
+
+func TestAnyLenNonAnyArgRejected(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\tn := AnyLen(5)\n}\n", 1)
+}
+
+func TestAnyIndexNonAnyArgRejected(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\tv, ok := AnyIndex(5, 0)\n}\n", 1)
+}
+
+func TestAnyIndexNonIntIndexRejected(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\ts := []int{1, 2}\n\ta := Any(s)\n\tv, ok := AnyIndex(a, \"x\")\n}\n", 1)
+}
+
+func TestAnyIndexWrongArgCountRejected(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\ts := []int{1, 2}\n\ta := Any(s)\n\tv, ok := AnyIndex(a)\n}\n", 1)
 }
 
 func TestAnyAsMissingTypeArgRejected(t *testing.T) {

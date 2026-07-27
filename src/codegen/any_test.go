@@ -273,6 +273,237 @@ func f() int {
 	}
 }
 
+// --- AnyLen/AnyIndex: boxed array reflection ---
+
+func TestAnyLenFixedArray(t *testing.T) {
+	jm := compileAndJIT(t, `
+func one() int {
+	s := [1]int{7}
+	a := Any(s)
+	return AnyLen(a)
+}
+func three() int {
+	s := [3]int{10, 20, 30}
+	a := Any(s)
+	return AnyLen(a)
+}
+`)
+	if got := jm.runInt32(t, "one"); got != 1 {
+		t.Errorf("one() = %d, want 1", got)
+	}
+	if got := jm.runInt32(t, "three"); got != 3 {
+		t.Errorf("three() = %d, want 3", got)
+	}
+}
+
+func TestAnyLenDynamicArray(t *testing.T) {
+	jm := compileAndJIT(t, `
+func four() int {
+	s := []int{10, 20, 30, 40}
+	a := Any(s)
+	return AnyLen(a)
+}
+func empty() int {
+	s := make([]int, 0)
+	a := Any(s)
+	return AnyLen(a)
+}
+`)
+	if got := jm.runInt32(t, "four"); got != 4 {
+		t.Errorf("four() = %d, want 4", got)
+	}
+	if got := jm.runInt32(t, "empty"); got != 0 {
+		t.Errorf("empty() = %d, want 0 (zero-length dynamic array)", got)
+	}
+}
+
+// TestAnyLenNonArrayReturnsZero proves AnyLen's own permissive "wrong kind
+// at runtime is a harmless zero" behavior (checkAnyLenCall/genAnyLenCall),
+// not a crash, for both a boxed scalar and a boxed struct.
+func TestAnyLenNonArrayReturnsZero(t *testing.T) {
+	jm := compileAndJIT(t, `
+struct Point {
+	X int
+}
+func viaInt() int {
+	a := Any(42)
+	return AnyLen(a)
+}
+func viaStruct() int {
+	p := Point{X: 1}
+	a := Any(p)
+	return AnyLen(a)
+}
+`)
+	if got := jm.runInt32(t, "viaInt"); got != 0 {
+		t.Errorf("viaInt() = %d, want 0", got)
+	}
+	if got := jm.runInt32(t, "viaStruct"); got != 0 {
+		t.Errorf("viaStruct() = %d, want 0", got)
+	}
+}
+
+// TestAnyIndexFixedArrayRoundTrip covers first/middle/last in-bounds reads
+// for a fixed array, proving the returned Any's own AnyAs[int] round trip is
+// byte-correct, not just that AnyIndex reports ok=true.
+func TestAnyIndexFixedArrayRoundTrip(t *testing.T) {
+	jm := compileAndJIT(t, `
+func f(i int) int {
+	s := [3]int{10, 20, 30}
+	a := Any(s)
+	v, ok := AnyIndex(a, i)
+	if !ok {
+		return -1
+	}
+	iv, iok := AnyAs[int](v)
+	if !iok {
+		return -2
+	}
+	return iv
+}
+`)
+	for i, want := range map[int32]int32{0: 10, 1: 20, 2: 30} {
+		if got := jm.runInt32(t, "f", i); got != want {
+			t.Errorf("f(%d) = %d, want %d", i, got, want)
+		}
+	}
+}
+
+// TestAnyIndexDynamicArrayRoundTrip mirrors the fixed-array case above for a
+// dynamic array.
+func TestAnyIndexDynamicArrayRoundTrip(t *testing.T) {
+	jm := compileAndJIT(t, `
+func f(i int) int {
+	s := []int{10, 20, 30}
+	a := Any(s)
+	v, ok := AnyIndex(a, i)
+	if !ok {
+		return -1
+	}
+	iv, iok := AnyAs[int](v)
+	if !iok {
+		return -2
+	}
+	return iv
+}
+`)
+	for i, want := range map[int32]int32{0: 10, 1: 20, 2: 30} {
+		if got := jm.runInt32(t, "f", i); got != want {
+			t.Errorf("f(%d) = %d, want %d", i, got, want)
+		}
+	}
+}
+
+// TestAnyIndexOutOfBoundsReturnsFalse covers a negative index, an index
+// exactly at the length, and one well past it, for both array kinds -
+// AnyIndex must never crash or read out of bounds, only report ok=false.
+func TestAnyIndexOutOfBoundsReturnsFalse(t *testing.T) {
+	jm := compileAndJIT(t, `
+func fixedAt(i int) bool {
+	s := [3]int{1, 2, 3}
+	a := Any(s)
+	_, ok := AnyIndex(a, i)
+	return ok
+}
+func dynAt(i int) bool {
+	s := []int{1, 2, 3}
+	a := Any(s)
+	_, ok := AnyIndex(a, i)
+	return ok
+}
+`)
+	for _, i := range []int32{-1, 3, 100} {
+		if got := jm.runBool(t, "fixedAt", i); got {
+			t.Errorf("fixedAt(%d) = true, want false", i)
+		}
+		if got := jm.runBool(t, "dynAt", i); got {
+			t.Errorf("dynAt(%d) = true, want false", i)
+		}
+	}
+}
+
+// TestAnyIndexNonArrayReturnsFalse proves a wrong-kind `a` reports ok=false
+// rather than crashing (there's no descriptor-level array shape to index
+// into at all).
+func TestAnyIndexNonArrayReturnsFalse(t *testing.T) {
+	jm := compileAndJIT(t, `
+func f() bool {
+	a := Any(42)
+	_, ok := AnyIndex(a, 0)
+	return ok
+}
+`)
+	if got := jm.runBool(t, "f"); got {
+		t.Errorf("f() = true, want false")
+	}
+}
+
+// TestAnyFieldsStructWithArrayFieldReflectable exercises the array-boxing/
+// interning path end to end through a struct field: AnyFields walks to the
+// array field's own Any value, which AnyLen/AnyIndex then reflect over
+// exactly like a directly-boxed array.
+func TestAnyFieldsStructWithArrayFieldReflectable(t *testing.T) {
+	jm := compileAndJIT(t, `
+struct Bag {
+	Items []int
+}
+func f() int {
+	b := Bag{Items: []int{5, 6, 7}}
+	a := Any(b)
+	sum := 0
+	for name, v := range AnyFields(a) {
+		if name == "Items" {
+			sum = sum + AnyLen(v)
+			e, ok := AnyIndex(v, 1)
+			if ok {
+				ev, eok := AnyAs[int](e)
+				if eok {
+					sum = sum + ev
+				}
+			}
+		}
+	}
+	return sum
+}
+`)
+	// len(Items)=3, Items[1]=6 -> 3+6=9.
+	if got := jm.runInt32(t, "f"); got != 9 {
+		t.Errorf("f() = %d, want 9", got)
+	}
+}
+
+// TestAnyIndexArrayOfStructsFieldsWalk proves AnyIndex's returned Any for a
+// struct-typed array element is itself fully reflectable via AnyFields, not
+// just AnyAs[T] for a scalar element.
+func TestAnyIndexArrayOfStructsFieldsWalk(t *testing.T) {
+	jm := compileAndJIT(t, `
+struct Point {
+	X int
+	Y int
+}
+func f() int {
+	pts := [2]Point{Point{1, 2}, Point{3, 4}}
+	a := Any(pts)
+	e, ok := AnyIndex(a, 1)
+	if !ok {
+		return -1
+	}
+	sum := 0
+	for name, v := range AnyFields(e) {
+		fv, fok := AnyAs[int](v)
+		if fok {
+			sum = sum + fv
+		}
+	}
+	return sum
+}
+`)
+	// pts[1] = {X:3, Y:4} -> 3+4=7.
+	if got := jm.runInt32(t, "f"); got != 7 {
+		t.Errorf("f() = %d, want 7", got)
+	}
+}
+
 // TestVariadicGenericFuncInstantiatedAtAnyJIT is a real, JIT-executed proof
 // that a generic function's own variadic parameter, explicitly instantiated
 // at T=Any, gets the same implicit boxing an ordinary (non-generic) ...Any

@@ -753,10 +753,11 @@ func universeScope() *Scope {
 			Scope: u,
 		})
 	}
-	// AnyKind/AnyName/AnyFields are predeclared exactly like len/make/etc -
-	// see LANGUAGE.md's "Any" section: reflection builtins over a boxed Any
-	// value, dispatched by name (isBuiltinCall) rather than a real signature.
-	for _, name := range []string{"AnyKind", "AnyName", "AnyFields"} {
+	// AnyKind/AnyName/AnyFields/AnyLen/AnyIndex are predeclared exactly like
+	// len/make/etc - see LANGUAGE.md's "Any" section: reflection builtins
+	// over a boxed Any value, dispatched by name (isBuiltinCall) rather than
+	// a real signature.
+	for _, name := range []string{"AnyKind", "AnyName", "AnyFields", "AnyLen", "AnyIndex"} {
 		u.Define(&Symbol{
 			Name:  name,
 			Kind:  SymFunc,

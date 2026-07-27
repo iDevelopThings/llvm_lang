@@ -19,15 +19,19 @@ This is a quick list of deliberate limits, not a roadmap.
 
 ## Any
 
-- Boxing is limited to scalar types, pointers, and structs - an enum, a
-  dynamic or fixed-size array, a map, a function/cfunc value, or a
-  non-copyable type cannot be boxed into `Any`.
+- Boxing is limited to scalar types, pointers, structs, and arrays (fixed or
+  dynamic) - an enum, a map, a function/cfunc value, or a non-copyable type
+  cannot be boxed into `Any`. A struct or array is boxable only if every one
+  of its own field/element types is.
 - Boxing an `Any` into another `Any` is legal - a cheap no-op copy, not an
   error.
 - `Any` is neither comparable (`==`/`!=`) nor printable (`print`), and
   cannot cross an `extern func` signature.
 - `AnyKind` returns a raw `i32` ordinal, not a named/nameable enum value.
 - `AnyAs[T]` always needs an explicit type argument; `T` is never inferred.
+- `AnyLen`/`AnyIndex` on a non-array `Any` return a harmless `0`/
+  `(zero Any, false)` rather than a compile-time error - only the argument's
+  static type (`Any`) is checked at compile time, not the boxed kind itself.
 
 ## Collections
 

@@ -1,9 +1,9 @@
-// any_demo.llx - exercises the type-erased Any type and its four reflection
-// builtins: AnyKind, AnyName, AnyAs, AnyFields.
+// any_demo.llx - exercises the type-erased Any type and its reflection
+// builtins: AnyKind, AnyName, AnyAs, AnyFields, AnyLen, AnyIndex.
 //
 // Run with:
 //   .\llvmc.exe examples\any_demo\any_demo.llx
-//   echo $LASTEXITCODE   # (PowerShell) -> 5  (all five sanity checks passed)
+//   echo $LASTEXITCODE   # (PowerShell) -> 6  (all six sanity checks passed)
 
 struct Point {
     X int
@@ -55,6 +55,15 @@ func main() int {
         ok = ok + 1
     }
 
-    print(ok)   // 5
+    // Boxed arrays: AnyLen/AnyIndex, in bounds and out of bounds.
+    boxedArr := Any([]int{10, 20, 30})
+    elem, elemOk := AnyIndex(boxedArr, 1)
+    ev, evOk := AnyAs[int](elem)
+    oobElem, oobOk := AnyIndex(boxedArr, 99)
+    if AnyLen(boxedArr) == 3 && elemOk && evOk && ev == 20 && !oobOk {
+        ok = ok + 1
+    }
+
+    print(ok)   // 6
     return ok
 }

@@ -281,6 +281,7 @@ type Generator struct {
 	fieldDescriptorTy llvm.Type
 	anyPrimitiveDescs map[sema.TypeKind]llvm.Value
 	structAnyDescs    map[*sema.StructInfo]llvm.Value
+	arrayAnyDescs     map[arrayAnyDescKey]llvm.Value
 
 	// fmtMapNilTrap is the cached format-string global for the "assignment
 	// to entry in nil map" runtime trap (genMapTrapIfNil, maps.go) - built
