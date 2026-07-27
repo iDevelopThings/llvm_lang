@@ -127,6 +127,19 @@ cgo to build against gcc/g++, and for the resulting binary to load
 libLLVM-22.dll at run time), and getting that PATH setup wrong looks like a
 native crash (`0xC0000139`), not an obvious "PATH is wrong" error.
 
+# Branching and worktrees
+
+Base any new branch or worktree (in this repo or the sibling JetBrains
+plugin repo) on the **local** `master`, never `origin/master` or any other
+remote ref. Work regularly lands on local `master` directly, well ahead of
+whatever's actually been pushed - a branch forked from remote can be many
+commits stale before its own first commit, and that staleness doesn't
+surface until it's rebased/merged much later, by which point it may
+silently conflict with or even delete work that landed in the meantime
+(this has happened in practice: a branch forked from a stale remote master
+was missing an entire since-landed feature, and diffing it against current
+local master showed real code from that feature as "to be removed").
+
 # Project Info
 
 ## Enums
