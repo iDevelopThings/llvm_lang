@@ -888,3 +888,26 @@ func TestValueMatchWildcardArmDestructorStackDoesNotLeak(t *testing.T) {
 		t.Errorf("afterWildcard() = %d, want 1 (outer's destructor must fire on the wildcard's own path too)", got)
 	}
 }
+
+// TestMethodCallOnFreshUnitVariantReceiver covers a method called directly
+// on a bare unit-variant construction (`E.A.m()`, receiver never stored in a
+// variable) - genAddr's MemberExpr case used to assume every MemberExpr was
+// a struct-field chain and recursed into "E" (the enum type name) as if it
+// were a further receiver, panicking with "identifier E has no storage".
+func TestMethodCallOnFreshUnitVariantReceiver(t *testing.T) {
+	jm := compileAndJIT(t, `
+enum E {
+	A,
+}
+func (E) m() int {
+	return 1
+}
+func f() int {
+	return E.A.m()
+}
+`)
+
+	if got := jm.runInt32(t, "f"); got != 1 {
+		t.Errorf("f() = %d, want 1", got)
+	}
+}

@@ -71,6 +71,15 @@ func (g *Generator) genAddr(n ast.NodeIndex) llvm.Value {
 		return g.curReceiver
 
 	case enums.NodeKinds.MemberExpr:
+		if sym, ok := g.info.Refs[n]; ok && sym.Kind == sema.SymEnumVariant {
+			// `E.A` used somewhere an address is needed (e.g. a method-call
+			// receiver, `E.A.M()`) - its object child names the enum *type*,
+			// not a further struct field, so this can't recurse into
+			// genReceiverAddr like an ordinary field chain. genExpr's own
+			// MemberExpr case already builds this value directly; spill it
+			// like any other addressable rvalue (see default case below).
+			return g.genSpillToTemp(n)
+		}
 		objNode := g.tree.Child(n, 0)
 		base, structInfo := g.genReceiverAddr(objNode)
 		layout := g.structLayouts[structInfo]
@@ -136,12 +145,20 @@ func (g *Generator) genAddr(n ast.NodeIndex) llvm.Value {
 		return tmp
 
 	default:
-		v := g.genExpr(n)
-		t := g.llvmType(g.info.Types[n])
-		tmp := g.createEntryAlloca(t, "tmp")
-		g.builder.CreateStore(v, tmp)
-		return tmp
+		return g.genSpillToTemp(n)
 	}
+}
+
+// genSpillToTemp evaluates n as a plain rvalue and spills it into a fresh
+// stack slot - shared by genAddr's default case (any expression with no
+// lvalue storage of its own, e.g. a call result) and its MemberExpr case for
+// a bare enum-variant construction used as a receiver/lvalue context.
+func (g *Generator) genSpillToTemp(n ast.NodeIndex) llvm.Value {
+	v := g.genExpr(n)
+	t := g.llvmType(g.info.Types[n])
+	tmp := g.createEntryAlloca(t, "tmp")
+	g.builder.CreateStore(v, tmp)
+	return tmp
 }
 
 // genReceiverAddr computes the address of a struct-value expression used as

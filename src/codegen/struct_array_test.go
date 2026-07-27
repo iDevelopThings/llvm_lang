@@ -33,6 +33,31 @@ func pointSumAfterMove(px int, py int, dx int, dy int) int {
 	}
 }
 
+// TestMethodCallOnFreshCompositeLitReceiver covers a method called directly
+// on a composite-literal rvalue (`Point{3, 4}.sum()`, receiver never stored
+// in a variable) - genAddr's own CompositeLit case already spills it into a
+// temp before genReceiverAddr takes its address.
+func TestMethodCallOnFreshCompositeLitReceiver(t *testing.T) {
+	jm := compileAndJIT(t, `
+struct Point {
+	x int
+	y int
+}
+
+func (Point) sum() int {
+	return this.x + this.y
+}
+
+func f() int {
+	return Point{3, 4}.sum()
+}
+`)
+
+	if got := jm.runInt32(t, "f"); got != 7 {
+		t.Errorf("f() = %d, want 7", got)
+	}
+}
+
 // TestKeyedStructLiteralZeroFillsUnmentionedFields covers a keyed composite
 // literal that only names some fields - the rest must be zero, not garbage
 // stack memory (see genCompositeLitInto).
