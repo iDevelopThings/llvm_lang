@@ -5120,8 +5120,8 @@ func (c *checker) checkVariadicCallArgs(n ast.NodeIndex, args []ast.NodeIndex, a
 // `...Any` variadic parameter (checkVariadicCallArgs) enforce the exact same
 // rules through this one function. Reports whether at may be boxed at all.
 func (c *checker) checkBoxableIntoAny(a ast.NodeIndex, at Type) bool {
-	if !isBoxableIntoAny(at) {
-		c.errorAt(a, "cannot box %s into Any - enums, arrays, maps, function values, and multi-value/generator/coroutine results have no Any representation this round", at)
+	if !c.isBoxableIntoAny(at) {
+		c.errorAt(a, "cannot box %s into Any - enums, arrays, maps, function values, and multi-value/generator/coroutine results have no Any representation this round (a struct is only boxable if every one of its own fields is)", at)
 		return false
 	}
 	if c.typeIsNonCopyable(at) {
@@ -5552,7 +5552,7 @@ func (c *checker) checkAnyAsCall(n, callee ast.NodeIndex, args []ast.NodeIndex) 
 		c.errorAt(args[0], "AnyAs requires an Any argument, got %s", argType)
 		return invalidType, true
 	}
-	if !isBoxableIntoAny(target) {
+	if !c.isBoxableIntoAny(target) {
 		c.errorAt(explicit, "AnyAs[%s]: %s can never have been boxed into Any", target, target)
 		return invalidType, true
 	}
@@ -5801,16 +5801,38 @@ func (c *checker) checkConversionCall(n, callee ast.NodeIndex, args []ast.NodeIn
 
 // isBoxableIntoAny reports whether t has a defined Any-boxing representation
 // this round (see LANGUAGE.md's "Any" section): every scalar/primitive kind,
-// TypePointer, TypeStruct, and TypeAny itself (a no-op re-box) - not an enum
+// TypePointer, and TypeAny itself (a no-op re-box) - not an enum
 // (variant-payload descriptor shape not designed yet), a dynamic/fixed array
 // or map (no descriptor shape), a function/cfunc value, or any of the three
 // kinds that are never a real storable value at all (TypeMultiReturn/
-// TypeGenerator/TypeCoroutine).
-func isBoxableIntoAny(t Type) bool {
+// TypeGenerator/TypeCoroutine). A TypeStruct is boxable only if every one of
+// its own fields is - codegen's structDescriptor recurses into each field's
+// own type descriptor unconditionally (any.go), so a field of an otherwise-
+// unboxable kind (e.g. a `[]int`) must be rejected here, at the one real
+// compile-time checkpoint, rather than surfacing as a runtime codegen panic
+// the first time that particular struct is ever boxed anywhere in the
+// program. A pointer field doesn't recurse into its own pointee (TypePointer
+// is unconditionally boxable above) - the same cycle-safety a
+// self-referential struct already relies on for typeIsComparable/
+// typeIsPrintable.
+func (c *checker) isBoxableIntoAny(t Type) bool {
 	switch t.Kind {
 	case TypeEnum, TypeArray, TypeMap, TypeFunc, TypeCFunc,
 		TypeMultiReturn, TypeGenerator, TypeCoroutine:
 		return false
+	case TypeStruct:
+		if t.Struct == nil {
+			return true
+		}
+		restore := c.pushTree(t.Struct.Symbol.Tree)
+		defer restore()
+		for _, field := range c.tree.StructFields(t.Struct.Symbol.Decl) {
+			fieldType := c.typeFromNode(c.tree.Child(field, 1))
+			if !c.isBoxableIntoAny(fieldType) {
+				return false
+			}
+		}
+		return true
 	default:
 		return true
 	}

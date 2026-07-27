@@ -131,6 +131,26 @@ func TestAnyBoxNonCopyableStructRejected(t *testing.T) {
 		"func f() {\n\tr := Res{0}\n\ta := Any(move r)\n}\n", 1)
 }
 
+// A struct containing a field of an otherwise-unboxable kind (here a
+// dynamic array) must be rejected at this same compile-time checkpoint,
+// not just when boxing that field type directly - codegen's structDescriptor
+// recurses into every field's own type descriptor unconditionally, so
+// letting this compile would panic the first time Bag is ever boxed
+// anywhere in the program, rather than reporting a clean diagnostic here.
+func TestAnyBoxStructWithUnboxableFieldRejected(t *testing.T) {
+	expectCheckErrors(t, "struct Bag {\n\tItems []int\n}\n"+
+		"func f() {\n\tb := Bag{Items: []int{1, 2}}\n\ta := Any(b)\n}\n", 1)
+}
+
+// A struct field that's itself a pointer stays boxable regardless of what it
+// points to - TypePointer never recurses into its own Elem (the same
+// cycle-safety a self-referential struct already relies on for
+// typeIsComparable/typeIsPrintable), so this must NOT be rejected.
+func TestAnyBoxStructWithPointerFieldAccepted(t *testing.T) {
+	expectCheckErrors(t, "struct Node {\n\tValue int\n\tNext  *Node\n}\n"+
+		"func f() {\n\tn := Node{Value: 1, Next: nil}\n\ta := Any(n)\n}\n", 0)
+}
+
 // --- invalid: reflection builtins on a non-Any argument ---
 
 func TestAnyKindNonAnyArgRejected(t *testing.T) {
