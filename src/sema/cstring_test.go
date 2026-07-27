@@ -99,3 +99,49 @@ func TestCStringAssignableToItself(t *testing.T) {
 	src := "func f() {\n\tvar a cstring = cstring(\"hi\")\n\tvar b cstring = a\n}\n"
 	checkSrc(t, src)
 }
+
+// --- cstring/*u8/*i8 pointer interop (see LANGUAGE.md's "The cstring type")
+// - the one nil-comparison special case, and the *u8/*i8 -> cstring
+// reinterpret, both scoped narrowly so cstring keeps no general operator
+// support beyond them. ---
+
+// TestCStringEqualsNil and TestNilEqualsCString cover checkNilEquality's new
+// TypeCString gate, both operand orders.
+func TestCStringEqualsNil(t *testing.T) {
+	checkSrc(t, "func f() bool {\n\tc := cstring(\"hi\")\n\treturn c == nil\n}\n")
+}
+
+func TestNilEqualsCString(t *testing.T) {
+	checkSrc(t, "func f() bool {\n\tc := cstring(\"hi\")\n\treturn nil == c\n}\n")
+}
+
+// TestCStringFromU8PointerConversionTypeChecks and its *i8 counterpart cover
+// checkConversionCall's new pointer-to-cstring reinterpret case.
+func TestCStringFromU8PointerConversionTypeChecks(t *testing.T) {
+	src := "extern func getenv(name cstring) *u8\n" +
+		"func f() {\n" +
+		"\tp := getenv(cstring(\"PATH\"))\n" +
+		"\tc := cstring(p)\n" +
+		"}\n"
+	checkSrc(t, src)
+}
+
+func TestCStringFromI8PointerConversionTypeChecks(t *testing.T) {
+	src := "extern func getenv(name cstring) *i8\n" +
+		"func f() {\n" +
+		"\tp := getenv(cstring(\"PATH\"))\n" +
+		"\tc := cstring(p)\n" +
+		"}\n"
+	checkSrc(t, src)
+}
+
+// TestCStringFromWrongElemPointerIsError covers the reinterpret staying
+// scoped to *u8/*i8 - a *i32 is a real pointer but the wrong element type.
+func TestCStringFromWrongElemPointerIsError(t *testing.T) {
+	src := "extern func f2() *i32\n" +
+		"func f() {\n" +
+		"\tp := f2()\n" +
+		"\tc := cstring(p)\n" +
+		"}\n"
+	expectCheckErrors(t, src, 1)
+}

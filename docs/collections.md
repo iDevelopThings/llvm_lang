@@ -52,6 +52,16 @@ fixed arrays, and strings. An omitted bound uses the start or length.
 An explicit high bound may extend a dynamic array up to its capacity. Slicing
 a fixed array produces a dynamic array that shares its storage.
 
+A single string index (`s[i]`, not a range) reads one byte as a `u8`:
+
+```go
+s := "hello"
+print(s[0]) // 104
+```
+
+This is read-only - `s[i] = x` and `&s[i]` are both rejected, since strings
+are immutable. An out-of-range `i` traps at runtime, same as an array index.
+
 ## Maps
 
 Create maps with `make`, then use index syntax to read or write:

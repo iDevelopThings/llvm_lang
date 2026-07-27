@@ -145,6 +145,80 @@ func main() int {
 	}
 }
 
+// TestCStringNullCheckAndPointerConversionRoundTripJIT covers the two new
+// cstring/*u8 interop gaps together (see LANGUAGE.md's "The cstring type"):
+// an extern returning *u8 that may be null, a null check on the result
+// (checkNilEquality's new TypeCString gate applies once retyped, but the
+// interesting new path is the pointer itself - *u8 == nil already worked),
+// and on the non-null path cstring(p) (checkConversionCall's new *u8 ->
+// cstring reinterpret) followed by string(...) - the actual `getenv` idiom
+// this feature exists for, both the found and not-found cases.
+func TestCStringNullCheckAndPointerConversionRoundTripJIT(t *testing.T) {
+	jm := compileAndJIT(t, `
+extern func getenv(name cstring) *u8
+
+func lookupPath() int {
+	p := getenv(cstring("PATH"))
+	if p == nil {
+		return -1
+	}
+	s := string(cstring(p))
+	if len(s) > 0 {
+		return 1
+	}
+	return 0
+}
+
+func lookupMissing() int {
+	p := getenv(cstring("LLVM_LANG_DEFINITELY_UNSET_XYZ_VAR"))
+	if p == nil {
+		return 1
+	}
+	return 0
+}
+`)
+	if got := jm.runInt32(t, "lookupPath"); got != 1 {
+		t.Errorf("lookupPath() = %d, want 1 (PATH should be set and non-empty)", got)
+	}
+	if got := jm.runInt32(t, "lookupMissing"); got != 1 {
+		t.Errorf("lookupMissing() = %d, want 1 (getenv should return null)", got)
+	}
+}
+
+// TestCStringEqualsNilJIT covers checkNilEquality's new TypeCString gate at
+// runtime, not just type-checking: a real cstring value compares != nil, and
+// one built from a genuinely null pointer (getenv on a missing var, via the
+// *u8 -> cstring reinterpret) compares == nil - proving genBinaryExpr's
+// existing default ICmp path needs no changes for this, as analyzed.
+func TestCStringEqualsNilJIT(t *testing.T) {
+	jm := compileAndJIT(t, `
+extern func getenv(name cstring) *u8
+
+func nonNullIsNotNil() int {
+	c := cstring("hi")
+	if c == nil {
+		return 0
+	}
+	return 1
+}
+
+func nullFromMissingEnvIsNil() int {
+	p := getenv(cstring("LLVM_LANG_DEFINITELY_UNSET_XYZ_VAR"))
+	c := cstring(p)
+	if c == nil {
+		return 1
+	}
+	return 0
+}
+`)
+	if got := jm.runInt32(t, "nonNullIsNotNil"); got != 1 {
+		t.Errorf("nonNullIsNotNil() = %d, want 1", got)
+	}
+	if got := jm.runInt32(t, "nullFromMissingEnvIsNil"); got != 1 {
+		t.Errorf("nullFromMissingEnvIsNil() = %d, want 1", got)
+	}
+}
+
 // TestCStringConversionSharesUserDeclaredStrlenJIT covers strlenExtern's
 // (runtime.go) whole reason for existing: a program that both declares its
 // own `extern func strlen` AND uses `string(cs)` (genCStringToString, which

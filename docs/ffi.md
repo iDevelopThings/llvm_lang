@@ -30,6 +30,23 @@ Converting `string` to `cstring` creates NUL-terminated storage. Converting
 back copies bytes up to the first NUL. A `cstring` has no indexing, slicing,
 or `len`.
 
+A `cstring` can be compared against `nil`, and a `*u8`/`*i8` value converts to
+`cstring` directly (a pointer reinterpret, not a copy) - together these let
+you null-check a nullable C binding before converting it to a `string`:
+
+```go
+extern func getenv(name cstring) *u8
+
+p := getenv(cstring("PATH"))
+if p == nil {
+    // not set
+} else {
+    s := string(cstring(p))
+}
+```
+
+There is no conversion back from `cstring` to `*u8`/`*i8`.
+
 ## Callbacks
 
 Use `cfunc` for a C function pointer:

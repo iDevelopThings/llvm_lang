@@ -36,6 +36,10 @@ func main() int {
     print(str[:5])      // "hello"
     print(str[6:11])    // "world"
 
+    // A single index (not a range) reads one byte as a u8 - read-only,
+    // unlike a[i]/arr[i] above.
+    print(str[0])        // 104 (the byte value of 'h')
+
     // Slicing a fixed-size array (`[N]T`) produces a genuine `[]T`, not
     // another `[N]T` - matching Go's own real behavior - and shares the
     // fixed array's own storage, exactly like the dynamic-array case above.

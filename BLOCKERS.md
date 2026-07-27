@@ -130,3 +130,19 @@ with no real radius).
 **Current default:** unfixed. An enum-typed `var` with no initializer and a
 non-unit first variant remains a real, reachable crash. Avoid this shape in
 generated `.llx` code (agents and examples) until decided.
+
+## Reverse cstring -> `*u8`/`*i8` conversion has no target syntax
+
+`cstring(p)` for `p *u8`/`*i8` now works (a pure reinterpret - see
+LANGUAGE.md's "The cstring type"), but the reverse has nowhere to go:
+`*u8(cs)` parses today as `*` (dereference) applied to `u8(cs)` (an ordinary
+numeric conversion call), not a pointer-type conversion target - there is no
+`*T(x)` conversion-call grammar at all, only `*T` as a type-annotation
+position.
+
+**Why this isn't inferable:** adding it means new conversion-target grammar,
+with real ambiguity risk against the existing `*` prefix-dereference
+operator - not a plain "recognize a missing case" fix.
+
+**Current default:** unimplemented. A cstring can round-trip to `string`, but
+never back to a raw `*u8`/`*i8`.

@@ -108,6 +108,18 @@ func (g *Generator) genAddr(n ast.NodeIndex) llvm.Value {
 			return g.builder.CreateInBoundsGEP(elemLLType, ptr, []llvm.Value{idx}, "")
 		}
 
+		if targetType.Kind == sema.TypeString {
+			// A string's own {ptr, len} value, not its address (mirroring
+			// the dynamic-array branch above) - read-only at the sema level
+			// (checkLValue/checkAddressable reject `s[i] = x`/`&s[i]`), but
+			// genLoad still routes through here for the read path.
+			sv := g.genExpr(targetNode)
+			ptr := g.builder.CreateExtractValue(sv, 0, "")
+			length := g.builder.CreateExtractValue(sv, 1, "")
+			g.genBoundsCheck(idx, length)
+			return g.builder.CreateInBoundsGEP(g.i8Ty, ptr, []llvm.Value{idx}, "")
+		}
+
 		base := g.genAddr(targetNode)
 		g.genBoundsCheck(idx, llvm.ConstInt(g.i32Ty, uint64(targetType.Size), true))
 		arrType := g.llvmType(targetType)
@@ -1576,6 +1588,11 @@ func (g *Generator) genConversion(n, argNode ast.NodeIndex) llvm.Value {
 		return g.genStringToCString(argNode, v)
 	case to.Kind == sema.TypeString && from.Kind == sema.TypeCString:
 		return g.genCStringToString(v)
+	case to.Kind == sema.TypeCString && from.Kind == sema.TypePointer:
+		// *u8/*i8 -> cstring: both already lower to the same bare g.ptrTy
+		// (see llvmType's TypePointer/TypeCString cases) - a pure
+		// reinterpret, not the marshaling copy the two cases above perform.
+		return v
 	}
 
 	if to.Kind == sema.TypeAny {

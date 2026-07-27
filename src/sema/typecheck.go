@@ -2745,6 +2745,18 @@ func (c *checker) isMapIndexTarget(n ast.NodeIndex) bool {
 	return c.info.Types[target].Kind == TypeMap
 }
 
+// isStringIndexTarget reports whether n is a string index expression
+// (`s[i]`) - shared by checkLValue and checkAddressable, since a string byte
+// is read-only: strings are immutable, so neither `s[i] = v` nor `&s[i]` is
+// legal (see LANGUAGE.md's "Slicing" section).
+func (c *checker) isStringIndexTarget(n ast.NodeIndex) bool {
+	if c.tree.Nodes[n].Kind != enums.NodeKinds.IndexExpr {
+		return false
+	}
+	target := c.tree.Child(n, 0)
+	return c.info.Types[target].Kind == TypeString
+}
+
 // checkCompoundOp checks a compound-assignment operator (+= -= *= /=)
 // against its target/value types - the same rule as the corresponding
 // binary operator (see checkBinaryExpr), since `x += y` means exactly
@@ -2795,7 +2807,14 @@ func (c *checker) checkLValue(n ast.NodeIndex) (Type, bool) {
 	case enums.NodeKinds.MemberExpr,
 		enums.NodeKinds.IndexExpr:
 		t := c.checkExpr(n)
-		return t, !t.IsInvalid()
+		if t.IsInvalid() {
+			return invalidType, false
+		}
+		if c.isStringIndexTarget(n) {
+			c.errorAt(n, "cannot assign to a string byte - strings are immutable")
+			return invalidType, false
+		}
+		return t, true
 	case enums.NodeKinds.UnaryExpr:
 		// `*p = v` (see LANGUAGE.md's "Pointers" section) - a dereference is
 		// the one UnaryExpr shape that's ever a valid lvalue; `&x` (the only
@@ -4354,6 +4373,10 @@ func (c *checker) checkAddressable(n ast.NodeIndex) (Type, bool) {
 		if t.IsInvalid() {
 			return invalidType, false
 		}
+		if c.isStringIndexTarget(n) {
+			c.errorAt(n, "cannot take the address of a string byte - strings are immutable")
+			return invalidType, false
+		}
 		if !c.isAddressableChain(n) {
 			c.errorAt(n, "cannot take the address of this expression")
 			return invalidType, false
@@ -4423,6 +4446,12 @@ func (c *checker) isAddressableChain(n ast.NodeIndex) bool {
 			// backing), a map slot doesn't necessarily exist at all until an
 			// actual insert runs, so there's no stable address to hand back
 			// regardless of whether the map variable itself is addressable.
+			return false
+		}
+		if targetType.Kind == TypeString {
+			// A string byte is never addressable - strings are immutable
+			// (see LANGUAGE.md's "Slicing" section) - regardless of whether
+			// the string itself is addressable.
 			return false
 		}
 		return c.isAddressableChain(target)
@@ -4769,14 +4798,18 @@ func (c *checker) checkNilEquality(n, lNode, rNode ast.NodeIndex, lt, rt Type, o
 		c.errorAt(n, "cannot compare nil with nil (no pointer type to infer)")
 		return invalidType
 	case lt.Kind == TypeUntypedNil:
-		if rt.Kind != TypePointer {
+		// cstring accepted alongside TypePointer - it's a raw pointer at the
+		// ABI level too (see TypeCString's own doc comment), just without
+		// TypePointer's general operator support - this is the one nil-only
+		// special case it gets (see LANGUAGE.md's "The cstring type").
+		if rt.Kind != TypePointer && rt.Kind != TypeCString {
 			c.errorAt(n, "cannot compare nil with %s", rt)
 			return invalidType
 		}
 		c.retypeUntyped(lNode, rt)
 		return boolType
 	default:
-		if lt.Kind != TypePointer {
+		if lt.Kind != TypePointer && lt.Kind != TypeCString {
 			c.errorAt(n, "cannot compare nil with %s", lt)
 			return invalidType
 		}
@@ -4858,11 +4891,18 @@ func (c *checker) checkIndexExpr(n ast.NodeIndex) Type {
 	if tt.IsInvalid() {
 		return invalidType
 	}
-	if tt.Kind != TypeArray {
+	switch tt.Kind {
+	case TypeArray:
+		return *tt.Elem
+	case TypeString:
+		// A single string byte (see LANGUAGE.md's "Slicing" section) - read-
+		// only, never an lvalue (checkLValue/checkAddressable's own
+		// isStringIndexTarget checks reject `s[i] = x`/`&s[i]`).
+		return u8Type
+	default:
 		c.errorAt(n, "cannot index into %s (not an array)", tt)
 		return invalidType
 	}
-	return *tt.Elem
 }
 
 // checkMapIndexKey type-checks a map index expression's key operand (`m[k]`)
@@ -6347,6 +6387,18 @@ func (c *checker) checkConversionCall(n, callee ast.NodeIndex, args []ast.NodeIn
 	isCStringCrossing := (target.Kind == TypeCString && argType.Kind == TypeString) ||
 		(target.Kind == TypeString && argType.Kind == TypeCString)
 	if isCStringCrossing {
+		c.info.Types[n] = target
+		return target, true
+	}
+
+	// *u8/*i8 -> cstring: a pure reinterpret, not marshaling (both are
+	// already a bare pointer at the ABI level - see TypeCString's own doc
+	// comment) - the one-directional counterpart to a nullable extern return
+	// declared *u8/*i8 needing a real cstring for string(...) (LANGUAGE.md's
+	// "The cstring type"). The reverse (cstring -> *u8/*i8) has no
+	// conversion-target grammar today (see BLOCKERS.md) and isn't added here.
+	if target.Kind == TypeCString && argType.Kind == TypePointer && argType.Elem != nil &&
+		(argType.Elem.Kind == TypeU8 || argType.Elem.Kind == TypeI8) {
 		c.info.Types[n] = target
 		return target, true
 	}

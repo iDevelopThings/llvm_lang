@@ -247,6 +247,19 @@ view[0] = 100
 print(arr[1])           // 100 - shares the fixed array's own storage
 ```
 
+### Single-indexing a string
+
+`s[i]` (a single index, not a slice range) reads one byte of a string as a
+`u8`. Unlike a dynamic/fixed array's own `arr[i]`, this is **read-only** -
+`s[i] = x` and `&s[i]` are both compile errors, since strings are immutable.
+An out-of-range `i` traps at runtime, the same `0 <= i < len(s)` check and
+hard-abort mechanism an array index already uses (see above).
+
+```go
+s := "hello"
+print(s[0])   // 104 - the byte value of 'h', not a one-character string
+```
+
 ## Maps
 
 `map[K]V` - Go-style prefix type syntax, following exactly the same
@@ -2891,9 +2904,10 @@ extern func ok4(b Buf) int    // fine
 keyword. Unlike `string`'s own `{ptr, i32}` fat struct, `cstring` is a raw
 pointer with no length, matching C's own `char*` exactly - the reason it may
 cross an extern func signature while `string` may not. There is no `cstring`
-literal syntax and no operator support (`+`, `==`, `print`, `len`, indexing -
-none are defined for it); the only way to produce or consume one is the pair
-of explicit conversions below.
+literal syntax and no general operator support (`+`, `print`, `len`, indexing -
+none are defined for it) beyond the two exceptions below (`== nil`, and a
+pointer-to-cstring conversion); the only way to produce or consume one
+otherwise is the pair of explicit conversions below.
 
 ```go
 extern func strlen(s cstring) i64
@@ -2918,6 +2932,29 @@ arena-copied into a fresh `string` - a copy, not a borrow, so the result
 stays valid independent of whatever produced `cs`. Neither conversion is
 implicit - `cstring`/`string` never adapt to each other anywhere except
 through `T(x)`.
+
+A `cstring` may be compared against `nil` (`c == nil`, `nil == c`) - it's a
+raw pointer at the ABI level, same as `*T`, so this is the one operator
+`cstring` shares with a real pointer type; general `cstring == cstring` is
+still undefined. A `*u8`/`*i8` value also converts to `cstring` with
+`cstring(p)`, a pure reinterpret (both are the same bare pointer already, no
+marshaling copy) - useful for a nullable C binding that returns a `*u8`/`*i8`
+directly rather than `cstring`, letting the result be null-checked and then
+handed to `string(...)` for the real conversion:
+
+```go
+extern func getenv(name cstring) *u8
+
+p := getenv(cstring("PATH"))
+if p == nil {
+    // not set
+} else {
+    s := string(cstring(p))
+}
+```
+
+There is no reverse conversion (`*u8`/`*i8` from a `cstring`) yet - see
+`BLOCKERS.md`.
 
 ### `cfunc`: bare C function pointers
 
