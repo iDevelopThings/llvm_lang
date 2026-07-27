@@ -1,0 +1,20 @@
+// GAP: match arms on a foreign package's enum variants.
+// Actual:  strings.IntParseResult.Ok(n) does not bind n (undefined: n).
+// Expected: qualified variant arms destructure like same-package arms.
+//
+// Run: .\llvmc.exe examples\compiler_gaps\cross_package_enum_match
+
+import "std:strings"
+
+func main() int {
+    match strings.ParseInt("13") {
+        strings.IntParseResult.Ok(n) => {
+            print(n)
+            return n
+        }
+        _ => {
+            print(-1)
+            return 1
+        }
+    }
+}

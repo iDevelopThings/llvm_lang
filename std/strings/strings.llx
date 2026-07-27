@@ -326,6 +326,203 @@ func F64ToString(x f64) string {
     return F64ToStringPrecision(x, 4)
 }
 
+enum IntParseResult {
+    Ok(int),
+    Invalid,
+    Overflow,
+}
+
+enum I64ParseResult {
+    Ok(i64),
+    Invalid,
+    Overflow,
+}
+
+enum U64ParseResult {
+    Ok(u64),
+    Invalid,
+    Overflow,
+}
+
+enum F64ParseResult {
+    Ok(f64),
+    Invalid,
+}
+
+func digitValue(c string) int {
+    return IndexOf(digitChars, c)
+}
+
+func ParseI64(s string) I64ParseResult {
+    if len(s) == 0 {
+        return I64ParseResult.Invalid
+    }
+    i := 0
+    negative := false
+    if s[0:1] == "-" {
+        negative = true
+        i = 1
+        if i >= len(s) {
+            return I64ParseResult.Invalid
+        }
+    } else if s[0:1] == "+" {
+        i = 1
+        if i >= len(s) {
+            return I64ParseResult.Invalid
+        }
+    }
+    var n i64 = 0
+    saw := false
+    for i < len(s) {
+        d := digitValue(s[i:i+1])
+        if d < 0 {
+            return I64ParseResult.Invalid
+        }
+        saw = true
+        if negative {
+            // n is <= 0; check overflow before n = n*10 - d
+            if n < (-9223372036854775807 - 1) / 10 {
+                return I64ParseResult.Overflow
+            }
+            next := n * 10 - i64(d)
+            if next > n {
+                return I64ParseResult.Overflow
+            }
+            n = next
+        } else {
+            if n > 9223372036854775807 / 10 {
+                return I64ParseResult.Overflow
+            }
+            next := n * 10 + i64(d)
+            if next < n {
+                return I64ParseResult.Overflow
+            }
+            n = next
+        }
+        i = i + 1
+    }
+    if !saw {
+        return I64ParseResult.Invalid
+    }
+    return I64ParseResult.Ok(n)
+}
+
+func ParseInt(s string) IntParseResult {
+    match ParseI64(s) {
+        I64ParseResult.Ok(n) => {
+            if n > 2147483647 {
+                return IntParseResult.Overflow
+            }
+            if n < -2147483647 - 1 {
+                return IntParseResult.Overflow
+            }
+            return IntParseResult.Ok(int(n))
+        }
+        I64ParseResult.Invalid => {
+            return IntParseResult.Invalid
+        }
+        I64ParseResult.Overflow => {
+            return IntParseResult.Overflow
+        }
+    }
+}
+
+func ParseU64(s string) U64ParseResult {
+    if len(s) == 0 {
+        return U64ParseResult.Invalid
+    }
+    i := 0
+    if s[0:1] == "+" {
+        i = 1
+        if i >= len(s) {
+            return U64ParseResult.Invalid
+        }
+    }
+    if s[0:1] == "-" {
+        return U64ParseResult.Invalid
+    }
+    var n u64 = 0
+    saw := false
+    for i < len(s) {
+        d := digitValue(s[i:i+1])
+        if d < 0 {
+            return U64ParseResult.Invalid
+        }
+        saw = true
+        if n > 18446744073709551615 / 10 {
+            return U64ParseResult.Overflow
+        }
+        next := n * 10 + u64(d)
+        if next < n {
+            return U64ParseResult.Overflow
+        }
+        n = next
+        i = i + 1
+    }
+    if !saw {
+        return U64ParseResult.Invalid
+    }
+    return U64ParseResult.Ok(n)
+}
+
+func ParseF64(s string) F64ParseResult {
+    if len(s) == 0 {
+        return F64ParseResult.Invalid
+    }
+    i := 0
+    negative := false
+    if s[0:1] == "-" {
+        negative = true
+        i = 1
+    } else if s[0:1] == "+" {
+        i = 1
+    }
+    if i >= len(s) {
+        return F64ParseResult.Invalid
+    }
+    var intPart f64 = 0.0
+    sawDigit := false
+    for i < len(s) {
+        c := s[i:i+1]
+        if c == "." {
+            break
+        }
+        d := digitValue(c)
+        if d < 0 {
+            return F64ParseResult.Invalid
+        }
+        sawDigit = true
+        intPart = intPart * 10.0 + f64(d)
+        i = i + 1
+    }
+    var frac f64 = 0.0
+    var scale f64 = 1.0
+    if i < len(s) && s[i:i+1] == "." {
+        i = i + 1
+        for i < len(s) {
+            d := digitValue(s[i:i+1])
+            if d < 0 {
+                return F64ParseResult.Invalid
+            }
+            sawDigit = true
+            scale = scale * 10.0
+            frac = frac * 10.0 + f64(d)
+            i = i + 1
+        }
+    }
+    if i != len(s) || !sawDigit {
+        return F64ParseResult.Invalid
+    }
+    v := intPart
+    if scale > 1.0 {
+        v = v + frac / scale
+    }
+    if negative {
+        v = -v
+    }
+    return F64ParseResult.Ok(v)
+}
+
 tests {
     import "std:test"
 
@@ -361,4 +558,58 @@ tests {
         t.AssertEqual(UInt64ToString(42), "42", "ordinary value")
         t.AssertEqual(UInt64ToString(18446744073709551615), "18446744073709551615", "u64's own maximum")
     }
+    func TestParseInt(t *test.Runner) {
+        match ParseInt("42") {
+            IntParseResult.Ok(n) => {
+                t.AssertEqual(n, 42, "42")
+            }
+            _ => {
+                t.Assert(false, "expected Ok")
+            }
+        }
+        match ParseInt("-7") {
+            IntParseResult.Ok(n) => {
+                t.AssertEqual(n, -7, "-7")
+            }
+            _ => {
+                t.Assert(false, "expected Ok neg")
+            }
+        }
+        match ParseInt("abc") {
+            IntParseResult.Invalid => {
+                t.Assert(true, "invalid")
+            }
+            _ => {
+                t.Assert(false, "expected Invalid")
+            }
+        }
+        match ParseInt("999999999999") {
+            IntParseResult.Overflow => {
+                t.Assert(true, "overflow")
+            }
+            _ => {
+                t.Assert(false, "expected Overflow")
+            }
+        }
+    }
+
+    func TestParseF64(t *test.Runner) {
+        match ParseF64("3.25") {
+            F64ParseResult.Ok(v) => {
+                t.AssertApprox(v, 3.25, 0.0001, "3.25")
+            }
+            _ => {
+                t.Assert(false, "expected Ok")
+            }
+        }
+        match ParseF64("x") {
+            F64ParseResult.Invalid => {
+                t.Assert(true, "invalid")
+            }
+            _ => {
+                t.Assert(false, "expected Invalid")
+            }
+        }
+    }
+
 }

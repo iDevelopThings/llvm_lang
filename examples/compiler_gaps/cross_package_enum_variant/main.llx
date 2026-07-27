@@ -1,0 +1,13 @@
+// GAP: cross-package enum variant construction.
+// Actual:  os.Error.Ok -> "Error is a type, not a value"
+// Expected: e := os.Error.Ok is a valid Error value (same as Error.Ok in std/os).
+//
+// Run: .\llvmc.exe examples\compiler_gaps\cross_package_enum_variant
+
+import "std:os"
+
+func main() int {
+    e := os.Error.Ok
+    print(e.String())
+    return 0
+}

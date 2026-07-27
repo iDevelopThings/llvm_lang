@@ -1,0 +1,91 @@
+// sort.llx - std/sort: in-place heapsort over dynamic arrays.
+
+func siftDown[T](s []T, start int, end int, less func(T, T) bool) {
+    root := start
+    for {
+        child := 2 * root + 1
+        if child >= end {
+            return
+        }
+        if child + 1 < end {
+            if less(s[child], s[child+1]) {
+                child = child + 1
+            }
+        }
+        if !less(s[root], s[child]) {
+            return
+        }
+        tmp := s[root]
+        s[root] = s[child]
+        s[child] = tmp
+        root = child
+    }
+}
+
+func Sort[T](s []T, less func(T, T) bool) {
+    n := len(s)
+    if n < 2 {
+        return
+    }
+    start := n / 2 - 1
+    for start >= 0 {
+        siftDown(s, start, n, less)
+        start = start - 1
+    }
+    end := n - 1
+    for end > 0 {
+        tmp := s[end]
+        s[end] = s[0]
+        s[0] = tmp
+        siftDown(s, 0, end, less)
+        end = end - 1
+    }
+}
+
+func SortInts(s []int) {
+    Sort(s, func(a int, b int) bool {
+        return a < b
+    })
+}
+
+tests {
+    import "std:test"
+
+    func TestSortEmpty(t *test.Runner) {
+        s := make([]int, 0)
+        SortInts(s)
+        t.AssertEqual(len(s), 0, "empty")
+    }
+
+    func TestSortSingleton(t *test.Runner) {
+        s := make([]int, 0)
+        s = append(s, 7)
+        SortInts(s)
+        t.AssertEqual(s[0], 7, "one")
+    }
+
+    func TestSortUnsorted(t *test.Runner) {
+        s := make([]int, 0)
+        s = append(s, 3)
+        s = append(s, 1)
+        s = append(s, 4)
+        s = append(s, 1)
+        s = append(s, 5)
+        SortInts(s)
+        t.AssertEqual(s[0], 1, "0")
+        t.AssertEqual(s[1], 1, "1")
+        t.AssertEqual(s[2], 3, "2")
+        t.AssertEqual(s[3], 4, "3")
+        t.AssertEqual(s[4], 5, "4")
+    }
+
+    func TestSortAlreadySorted(t *test.Runner) {
+        s := make([]int, 0)
+        s = append(s, 1)
+        s = append(s, 2)
+        s = append(s, 3)
+        SortInts(s)
+        t.AssertEqual(s[0], 1, "sorted0")
+        t.AssertEqual(s[2], 3, "sorted2")
+    }
+}

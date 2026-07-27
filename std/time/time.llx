@@ -1,30 +1,18 @@
-// time.llx - std/time: a small, nicer-API wrapper around the exact same
-// Windows QueryPerformanceCounter/QueryPerformanceFrequency externs
-// examples/scope_timer.llx already binds directly (see that file, and
-// LANGUAGE.md's "External functions (FFI)" section for the general
-// mechanism) - built entirely as ordinary .llx code, no compiler changes.
-// examples/scope_timer itself is deliberately left completely untouched: it
-// stands on its own as a dogfooding example of the raw extern mechanism,
-// this package is a separate, additive convenience layer on top, not a
-// replacement for it.
-//
-// Frequency below is cached via a non-constant top-level `var` initializer
-// (LANGUAGE.md's "Global variable initializers" section confirms this is
-// real, supported behavior - a global's initializer may be any well-typed
-// expression, including a function call, not just a compile-time constant;
-// see CODEGEN.md's "Global var initializers" section for the actual
-// `@llvm.global_ctors`/`llvm_lang.global_init` mechanism this compiles down
-// to) rather than lazily computed on first use - QueryPerformanceFrequency
-// is documented by Windows itself to never change while the system is
-// running, so there's no correctness reason to defer it, and a plain
-// eagerly-run-once global initializer is simpler than hand-rolling a
-// "compute once, remember you already did" lazy-init check on every single
-// Now()/ElapsedSeconds() call.
+// time.llx - std/time: monotonic QPC stopwatch (same externs as
+// examples/scope_timer), Duration in nanoseconds, and Sleep via nanosleep.
 
 import "std:strings"
+import "std:os"
 
 extern func QueryPerformanceCounter(counter *i64) bool
 extern func QueryPerformanceFrequency(freq *i64) bool
+
+struct timespec {
+    tv_sec i64
+    tv_nsec i32
+}
+
+extern func nanosleep(req *timespec, rem *timespec) i32
 
 func queryFrequency() i64 {
     f := i64(0)
@@ -34,32 +22,17 @@ func queryFrequency() i64 {
 
 var frequency i64 = queryFrequency()
 
-// Now returns the current raw performance-counter tick count - meaningless
-// as an absolute value (it's not a wall-clock timestamp), only meaningful as
-// a difference between two calls, exactly like QueryPerformanceCounter
-// itself.
 func Now() i64 {
     t := i64(0)
     QueryPerformanceCounter(&t)
     return t
 }
 
-// ElapsedSeconds converts a tick count previously returned by Now() into a
-// real elapsed-seconds duration since then, dividing by the cached
-// frequency (ticks per second) - both operands are converted to f64 first
-// since this project's `/` on two `i64` operands would otherwise be integer
-// division (see LANGUAGE.md's "Operators" section: `- * /` work on any
-// numeric width, int division truncating same as every C-family language).
 func ElapsedSeconds(startTicks i64) f64 {
     elapsedTicks := Now() - startTicks
     return f64(elapsedTicks) / f64(frequency)
 }
 
-// FormattedDuration renders a duration in seconds (as ElapsedSeconds
-// returns) as a short human-readable string, picking whichever of
-// ns/us/ms/s keeps the shown number in roughly the 1-999 range (e.g.
-// "230.00us", "1.50s") rather than always printing a tiny/huge count of
-// seconds.
 func FormattedDuration(seconds f64) string {
     negative := seconds < 0.0
     v := seconds
@@ -87,6 +60,60 @@ func FormattedDuration(seconds f64) string {
     return result
 }
 
+// Duration is a nanosecond count. Zero heap; construct via Nanoseconds/etc.
+struct Duration {
+    ns i64
+
+    operator +(other Duration) Duration {
+        return Duration{this.ns + other.ns}
+    }
+    operator -(other Duration) Duration {
+        return Duration{this.ns - other.ns}
+    }
+    operator -() Duration {
+        return Duration{-this.ns}
+    }
+}
+
+func Nanoseconds(n i64) Duration {
+    return Duration{n}
+}
+
+func Microseconds(n i64) Duration {
+    return Duration{n * 1000}
+}
+
+func Milliseconds(n i64) Duration {
+    return Duration{n * 1000000}
+}
+
+func Seconds(n i64) Duration {
+    return Duration{n * 1000000000}
+}
+
+func (Duration) Nanoseconds() i64 {
+    return this.ns
+}
+
+func (Duration) SecondsF64() f64 {
+    return f64(this.ns) / 1000000000.0
+}
+
+// Sleep blocks for d via nanosleep. Negative/zero returns Ok immediately.
+func Sleep(d Duration) os.Error {
+    if d.ns <= 0 {
+        return os.Ok()
+    }
+    sec := d.ns / 1000000000
+    nsec := i32(d.ns % 1000000000)
+    req := timespec{tv_sec: sec, tv_nsec: nsec}
+    rc := nanosleep(&req, nil)
+    if rc == 0 {
+        return os.Ok()
+    }
+    return os.LastErrno()
+}
+
 tests {
     import "std:test"
 
@@ -106,5 +133,26 @@ tests {
 
     func TestFormattedDurationNegative(t *test.Runner) {
         t.AssertEqual(FormattedDuration(-1.5), "-1.50s", "negative duration keeps its sign")
+    }
+
+    func TestDurationArithmetic(t *test.Runner) {
+        a := Milliseconds(1500)
+        b := Microseconds(500)
+        sum := a + b
+        t.AssertEqual(sum.Nanoseconds(), i64(1500500000), "ms+us")
+        t.AssertEqual(Seconds(2).Nanoseconds(), i64(2000000000), "Seconds")
+        diff := a - Milliseconds(500)
+        t.AssertEqual(diff.Nanoseconds(), i64(1000000000), "subtract")
+        neg := -Milliseconds(1)
+        t.AssertEqual(neg.Nanoseconds(), i64(-1000000), "unary minus")
+    }
+
+    func TestSleepSmoke(t *test.Runner) {
+        start := Now()
+        err := Sleep(Milliseconds(1))
+        t.Assert(err.IsOk(), "Sleep Ok")
+        elapsed := ElapsedSeconds(start)
+        t.Assert(elapsed >= 0.0005, "slept at least ~0.5ms")
+        t.Assert(elapsed < 1.0, "slept under 1s")
     }
 }

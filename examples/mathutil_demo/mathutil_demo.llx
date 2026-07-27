@@ -1,44 +1,32 @@
-// mathutil_demo.llx - exercises every function std/mathutil exports: the
-// five libc <math.h> wrappers (Sqrt, Pow, Floor, Ceil, Fabs) and the three
-// generic pure-.llx helpers (Abs, Min, Max - each instantiated here at both
-// int and f64) - see LANGUAGE.md's "Standard library" section and
-// std/mathutil/mathutil.llx itself for what each wraps and why.
-//
-// Every printed value below is hand-verifiable:
-//   Sqrt(16.0)        == 4.0     (4*4 == 16)
-//   Pow(2.0, 10.0)    == 1024.0  (2^10)
-//   Floor(3.7)        == 3.0
-//   Ceil(3.2)         == 4.0
-//   Fabs(-5.5)        == 5.5
-//   Abs(-7)           == 7        (int instantiation)
-//   Min(3, 9)         == 3        (int instantiation)
-//   Max(3, 9)         == 9        (int instantiation)
-//   Min(2.5, 1.5)     == 1.5      (f64 instantiation)
-//   Max(2.5, 1.5)     == 2.5      (f64 instantiation)
+// mathutil_demo.llx - std/mathutil wrappers including trig.
 //
 // Run with:
 //   .\llvmc.exe examples\mathutil_demo\mathutil_demo.llx
-//   echo $LASTEXITCODE   # (PowerShell) -> 19  (Abs(-7) + Min(3,9) + Max(3,9) == 7+3+9)
+//   echo $LASTEXITCODE   # -> 19
 
 import "std:mathutil"
 
 func main() int {
-    print(mathutil.Sqrt(16.0))         // 4.000000
-    print(mathutil.Pow(2.0, 10.0))     // 1024.000000
-    print(mathutil.Floor(3.7))         // 3.000000
-    print(mathutil.Ceil(3.2))          // 4.000000
-    print(mathutil.Fabs(-5.5))         // 5.500000
+    print(mathutil.Sqrt(16.0))
+    print(mathutil.Pow(2.0, 10.0))
+    print(mathutil.Floor(3.7))
+    print(mathutil.Ceil(3.2))
+    print(mathutil.Fabs(-5.5))
 
     absResult := mathutil.Abs(-7)
-    print(absResult)                    // 7
+    print(absResult)
 
     minResult := mathutil.Min(3, 9)
     maxResult := mathutil.Max(3, 9)
-    print(minResult)                    // 3
-    print(maxResult)                    // 9
+    print(minResult)
+    print(maxResult)
 
-    print(mathutil.Min(2.5, 1.5))      // 1.500000
-    print(mathutil.Max(2.5, 1.5))      // 2.500000
+    print(mathutil.Min(2.5, 1.5))
+    print(mathutil.Max(2.5, 1.5))
 
-    return absResult + minResult + maxResult   // 7 + 3 + 9 = 19
+    print(mathutil.Sin(0.0))
+    print(mathutil.Cos(0.0))
+    print(mathutil.Pi())
+
+    return absResult + minResult + maxResult
 }

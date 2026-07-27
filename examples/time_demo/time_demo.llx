@@ -1,33 +1,11 @@
-// time_demo.llx - exercises std/time's own nicer API (Now/ElapsedSeconds)
-// on top of the exact same QueryPerformanceCounter/QueryPerformanceFrequency
-// pair examples/scope_timer.llx already binds directly - see
-// std/time/time.llx itself for why this is a separate, additive package
-// rather than a refactor of that existing dogfooding example (left
-// completely untouched by this round).
-//
-// A wall-clock elapsed duration is inherently not a hand-computable exact
-// value (it depends on this machine's own speed/load at the moment it
-// runs) - unlike every other demo in this round, so what's actually
-// hand-verified here are the three sanity *properties* any correct
-// measurement must satisfy, not one specific number:
-//   1. elapsed >= 0.0        - time never runs backwards
-//   2. elapsed < 5.0          - the busy loop below is small; this is a
-//                               generous upper bound, not a tight one
-//   3. a second Now() call is >= the first - the counter is monotonic
+// time_demo.llx - std/time Now/ElapsedSeconds plus Duration/Sleep.
 //
 // Run with:
 //   .\llvmc.exe examples\time_demo\time_demo.llx
-//   echo $LASTEXITCODE   # (PowerShell) -> 3  (all three sanity checks passed)
+//   echo $LASTEXITCODE   # -> 4
 
 import "std:time"
 
-// busyWork just needs to burn a measurable amount of wall-clock time - its
-// own accumulator is i64, not int/i32, specifically because the true sum of
-// 0..1999999 (1999999000000) is already far past i32's own ~2.1 billion
-// max and would silently wrap if accumulated in a plain int instead; this
-// isn't itself part of what the demo hand-verifies (only the timing
-// properties in main below are), just avoiding a misleadingly-wrong printed
-// number.
 func busyWork() i64 {
     var sum i64 = 0
     i := 0
@@ -43,8 +21,8 @@ func main() int {
     result := busyWork()
     elapsed := time.ElapsedSeconds(start)
 
-    print(result)     // 1999999000000 (sum of 0..1999999, exact in i64)
-    print(elapsed)    // some small positive number of seconds - inspect by eye
+    print(result)
+    print(elapsed)
 
     ok := 0
     if elapsed >= 0.0 {
@@ -53,12 +31,18 @@ func main() int {
     if elapsed < 5.0 {
         ok = ok + 1
     }
-
     end := time.Now()
     if end >= start {
         ok = ok + 1
     }
 
-    print(ok)   // 3
+    d := time.Milliseconds(1) + time.Microseconds(500)
+    print(d.Nanoseconds())
+    err := time.Sleep(time.Milliseconds(1))
+    if err.IsOk() {
+        ok = ok + 1
+    }
+
+    print(ok)
     return ok
 }

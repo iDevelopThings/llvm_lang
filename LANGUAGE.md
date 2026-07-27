@@ -3033,41 +3033,35 @@ error if it can't be found.
 
 **What's available so far:**
 
-- **`std/mathutil`** - thin wrappers around five libc `<math.h>` functions
-  (`Sqrt`, `Pow`, `Floor`, `Ceil`, `Fabs`, all `f64`-in/`f64`-out, bound via
-  `extern func` - see "External functions (FFI)" above), plus three generic
-  (see "Generics" above) pure-`.llx` helpers needing no libc call at all:
-  `Abs[T]`, `Min[T]`, `Max[T]` (comparison-based; `Min`/`Max` are exercised
-  at both `int` and `f64` in this project's own examples, `Abs` at `int`
-  only so far). Named "mathutil", not "mathutils", to read distinctly from
-  `examples/imports`'s own unrelated same-named demo fixture.
-- **`std/strings`** - `Contains`, `IndexOf` (mirroring Go's own
-  `strings.Index`, `-1` when not found), `HasPrefix`, `HasSuffix`,
-  `TrimSpace` (ASCII space, `0x20`, only - not full Unicode whitespace),
-  `Split` (Go-`strings.Split` semantics exactly, edge cases included:
-  `Split("", "")` is an empty slice, `Split(s, "")` splits into single-byte
-  pieces, a `sep` that never occurs returns a length-1 slice holding `s`
-  itself unchanged), `ToUpper`/`ToLower` (ASCII `a`-`z`/`A`-`Z` only), and three
-  number-formatting helpers: `IntToString` (handles `0` and the smallest
-  representable `int` correctly), `F64ToStringPrecision(x, decimals)` (a
-  fixed-decimal-place format, not a general shortest-round-tripping float
-  formatter), and `F64ToString` (`F64ToStringPrecision` with `decimals`
-  fixed to 4). Every one of these is hand-written using only this language's
-  own existing
-  primitives (slicing, `len`, `==`, `+`, loops) - deliberately zero `extern
-  func` anywhere in this package, since `string`'s own `{ptr, i32}`
-  representation has no real C-ABI shape `extern func`'s type restriction
-  would even accept (see "External functions (FFI)" above).
-- **`std/time`** - `Now() i64` (a raw performance-counter tick count) and
-  `ElapsedSeconds(startTicks i64) f64`, a nicer API on top of the exact same
-  `QueryPerformanceCounter`/`QueryPerformanceFrequency` externs
-  `examples/scope_timer.llx` already binds directly - that example is left
-  untouched; this package is an additive convenience layer, not a
-  replacement for it. The tick frequency is cached once via a non-constant
-  top-level `var` initializer (see "Global `var` initializers" above).
-  `FormattedDuration(seconds f64) string` renders an `ElapsedSeconds` result
-  with whichever of ns/us/ms/s keeps the shown number roughly in the 1-999
-  range (`"230.00us"`, `"1.50s"`), via `std/strings.F64ToStringPrecision`.
+- **`std/mathutil`** - libc `<math.h>` wrappers (`Sqrt`, `Pow`, `Floor`,
+  `Ceil`, `Fabs`, `Sin`, `Cos`, `Tan`, `Atan2`, all `f64`) plus
+  `Pi() f64` and generic `Abs`/`Min`/`Max`/`Clamp`/`Normalize2D`. Named
+  "mathutil" to read distinctly from `examples/imports`'s demo fixture.
+- **`std/strings`** - `Contains`, `IndexOf`, `HasPrefix`, `HasSuffix`,
+  `TrimSpace` (ASCII space only), `Split` (Go-`strings.Split` edge cases),
+  `ToUpper`/`ToLower` (ASCII), format helpers `IntToString` /
+  `Int64ToString` / `UInt64ToString` / `F64ToString` /
+  `F64ToStringPrecision`, and parse helpers `ParseInt` / `ParseI64` /
+  `ParseU64` / `ParseF64` returning small result enums (`Ok` / `Invalid` /
+  `Overflow` as applicable). Pure `.llx` (no `extern`); `string` is not
+  FFI-safe (see "External functions (FFI)" above).
+- **`std/path`** - `Separator`, `Join`, `Clean`, `Base`, `Dir`, `Ext`,
+  `IsAbs`. Accepts `/` and `\` on input; `Join`/`Clean` emit `Separator()`
+  (`\` on the current Windows target).
+- **`std/os`** - shared `Error` enum (`Ok`, classified unit variants,
+  `Unknown(i32)`), `FromErrno`, `Ok()`/`NotFound()` constructors (see
+  cross-package enum gap in `docs/current-limitations.md`), `IsOk` /
+  `IsNotFound`, and `StringResult` / `BytesResult`. File I/O and env are
+  not shipped yet.
+- **`std/time`** - QPC-based `Now() i64` / `ElapsedSeconds` (same externs
+  as `examples/scope_timer`, left untouched), `Duration` (nanosecond
+  count with `+`/`-`), constructors (`Nanoseconds`/`Milliseconds`/…),
+  `Sleep` via libc `nanosleep` returning `os.Error`, and
+  `FormattedDuration`. Monotonic stays on QPC deliberately; Sleep is the
+  portable libc path.
+- **`std/sort`** - in-place heapsort `Sort[T](s, less)` and `SortInts`.
+- **`std/maps`** - `Has`, `Keys`, `Values` (`Keys`/`Values` allocate one
+  slice each).
 - **`std/scheduler`** - a Unity-`StartCoroutine`-style timer scheduler built
   on top of the `coroutine` type (see "Coroutines" above): `Scheduler.Schedule(e *Entry)`
   (honors whatever `e`'s coroutine already wrote into `e.NextWait`),
@@ -3146,10 +3140,7 @@ error if it can't be found.
   `-test` section). No auto-formatting of values into messages.
 
 **Deliberately deferred, not built this round:** Unicode-aware string
-handling (everything above is ASCII-only, matching this language having no
-Unicode awareness anywhere else yet), a general/shortest-round-tripping
-float-to-string formatter (`F64ToStringPrecision`/`F64ToString` above are a
-simple fixed-precision one instead), file I/O, and anything else not listed
-above - `std/` is
-expected to keep growing incrementally, the same way any other part of this
-language does.
+handling (everything above is ASCII-only), a general/shortest-round-tripping
+float-to-string formatter, `std/os` file I/O and env (blocked on
+`cstring == nil` / `cstring(*u8)` — see `examples/compiler_gaps`), and
+anything else not listed above. `std/` keeps growing incrementally.

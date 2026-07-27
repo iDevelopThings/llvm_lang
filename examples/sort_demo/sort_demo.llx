@@ -1,0 +1,19 @@
+// sort_demo.llx - std/sort in-place SortInts.
+//
+// Run with:
+//   .\llvmc.exe examples\sort_demo\sort_demo.llx
+//   echo $LASTEXITCODE   # -> 1
+
+import "std:sort"
+
+func main() int {
+    s := make([]int, 0)
+    s = append(s, 3)
+    s = append(s, 1)
+    s = append(s, 2)
+    sort.SortInts(s)
+    print(s[0])
+    print(s[1])
+    print(s[2])
+    return 1
+}

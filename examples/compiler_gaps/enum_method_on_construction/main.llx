@@ -1,0 +1,18 @@
+// GAP: method call on a bare enum variant construction expression.
+// Actual:  E.A.M() -> codegen panic "identifier E has no storage"
+// Expected: works (receiver is the temporary value), or a clear compile error.
+//
+// Run: .\llvmc.exe examples\compiler_gaps\enum_method_on_construction
+
+enum E {
+    A,
+}
+
+func (E) M() int {
+    return 1
+}
+
+func main() int {
+    print(E.A.M())
+    return 0
+}

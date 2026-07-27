@@ -1,0 +1,18 @@
+// maps_demo.llx - std/maps Has/Keys/Values.
+//
+// Run with:
+//   .\llvmc.exe examples\maps_demo\maps_demo.llx
+//   echo $LASTEXITCODE   # -> 2
+
+import "std:maps"
+
+func main() int {
+    m := make(map[string]int)
+    m["a"] = 1
+    m["b"] = 2
+    print(maps.Has(m, "a"))
+    print(maps.Has(m, "z"))
+    print(len(maps.Keys(m)))
+    print(len(maps.Values(m)))
+    return 2
+}

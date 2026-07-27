@@ -69,6 +69,9 @@ Run a multi-file example by passing its directory:
 
 | Example | Shows |
 | --- | --- |
+| [`path_demo`](../examples/path_demo/path_demo.llx) | `std:path` |
+| [`sort_demo`](../examples/sort_demo/sort_demo.llx) | `std:sort` |
+| [`maps_demo`](../examples/maps_demo/maps_demo.llx) | `std:maps` |
 | [`mathutil_demo`](../examples/mathutil_demo/mathutil_demo.llx) | `std:mathutil` |
 | [`strings_demo`](../examples/strings_demo/strings_demo.llx) | `std:strings` |
 | [`slices_demo`](../examples/slices_demo/slices_demo.llx) | `std:slices` |
@@ -79,6 +82,13 @@ Run a multi-file example by passing its directory:
 | [`rand_demo`](../examples/rand_demo/rand_demo.llx) | `std:rand` |
 | [`log_demo`](../examples/log_demo/log_demo.llx) | `std:log` |
 | [`test_demo`](../examples/test_demo/test_demo.llx) | `std:test` and `llvmc -test`; intentionally fails |
+
+## Compiler gaps
+
+[compiler_gaps](../examples/compiler_gaps/README.md) holds minimal
+repros for known language/compiler gaps (cross-package enums, `cstring`
+nil/pointer conversion, string indexing, etc.). Each case documents
+expected vs actual behavior.
 
 ## C interop
 

@@ -1,0 +1,194 @@
+// os.llx - std/os: OS-facing helpers. Error/Result enums are the shared
+// failure convention (match on variants; no string payloads on hot paths).
+// File I/O and env wait on cstring nil / *u8→cstring conversions.
+
+import "std:strings"
+
+// Error is the shared OS/status enum. Ok is the success sentinel for
+// void-ish ops (Remove, Mkdir, Setenv, Sleep). Unknown carries a raw errno.
+enum Error {
+    Ok,
+    NotFound,
+    PermissionDenied,
+    AlreadyExists,
+    InvalidArgument,
+    IsDirectory,
+    NotDirectory,
+    UnexpectedEOF,
+    Busy,
+    Unknown(i32),
+}
+
+func (Error) String() string {
+    match this {
+        Error.Ok => {
+            return "ok"
+        }
+        Error.NotFound => {
+            return "not found"
+        }
+        Error.PermissionDenied => {
+            return "permission denied"
+        }
+        Error.AlreadyExists => {
+            return "already exists"
+        }
+        Error.InvalidArgument => {
+            return "invalid argument"
+        }
+        Error.IsDirectory => {
+            return "is a directory"
+        }
+        Error.NotDirectory => {
+            return "not a directory"
+        }
+        Error.UnexpectedEOF => {
+            return "unexpected EOF"
+        }
+        Error.Busy => {
+            return "busy"
+        }
+        Error.Unknown(code) => {
+            return "unknown error " + strings.IntToString(int(code))
+        }
+    }
+}
+
+// errno values match the portable CRT codes mingw/Unix share for these cases.
+func FromErrno(code i32) Error {
+    if code == 0 {
+        return Error.Ok
+    }
+    if code == 2 {
+        return Error.NotFound
+    }
+    if code == 13 {
+        return Error.PermissionDenied
+    }
+    if code == 17 {
+        return Error.AlreadyExists
+    }
+    if code == 22 {
+        return Error.InvalidArgument
+    }
+    if code == 21 {
+        return Error.IsDirectory
+    }
+    if code == 20 {
+        return Error.NotDirectory
+    }
+    if code == 16 {
+        return Error.Busy
+    }
+    return Error.Unknown(code)
+}
+
+extern func _errno() *i32
+
+func LastErrno() Error {
+    p := _errno()
+    return FromErrno(*p)
+}
+
+
+// Constructors — cross-package `os.Error.Ok` is not valid syntax yet (type
+// vs value), so callers use these instead.
+func Ok() Error {
+    return Error.Ok
+}
+
+func NotFound() Error {
+    return Error.NotFound
+}
+
+func (Error) IsOk() bool {
+    match this {
+        Error.Ok => {
+            return true
+        }
+        _ => {
+            return false
+        }
+    }
+}
+
+func (Error) IsNotFound() bool {
+    match this {
+        Error.NotFound => {
+            return true
+        }
+        _ => {
+            return false
+        }
+    }
+}
+enum BytesResult {
+    Ok([]u8),
+    Err(Error),
+}
+
+enum StringResult {
+    Ok(string),
+    Err(Error),
+}
+
+tests {
+    import "std:test"
+
+    func TestErrorString(t *test.Runner) {
+        ok := Error.Ok
+        t.AssertEqual(ok.String(), "ok", "Ok")
+        nf := Error.NotFound
+        t.AssertEqual(nf.String(), "not found", "NotFound")
+        pd := Error.PermissionDenied
+        t.AssertEqual(pd.String(), "permission denied", "PermissionDenied")
+        unk := Error.Unknown(99)
+        t.AssertEqual(unk.String(), "unknown error 99", "Unknown")
+    }
+
+    func TestFromErrno(t *test.Runner) {
+        t.AssertEqual(FromErrno(0), Error.Ok, "0 -> Ok")
+        t.AssertEqual(FromErrno(2), Error.NotFound, "ENOENT")
+        t.AssertEqual(FromErrno(13), Error.PermissionDenied, "EACCES")
+        t.AssertEqual(FromErrno(17), Error.AlreadyExists, "EEXIST")
+        t.AssertEqual(FromErrno(22), Error.InvalidArgument, "EINVAL")
+        t.AssertEqual(FromErrno(21), Error.IsDirectory, "EISDIR")
+        t.AssertEqual(FromErrno(20), Error.NotDirectory, "ENOTDIR")
+        t.AssertEqual(FromErrno(16), Error.Busy, "EBUSY")
+        match FromErrno(99) {
+            Error.Unknown(code) => {
+                t.AssertEqual(code, i32(99), "Unknown payload")
+            }
+            _ => {
+                t.Assert(false, "expected Unknown(99)")
+            }
+        }
+    }
+
+        func TestOkConstructor(t *test.Runner) {
+        t.AssertEqual(Ok(), Error.Ok, "Ok()")
+        t.Assert(Ok().IsOk(), "IsOk")
+        t.Assert(NotFound().IsNotFound(), "IsNotFound")
+    }
+
+    func TestStringResultMatch(t *test.Runner) {
+        ok := StringResult.Ok("hi")
+        match ok {
+            StringResult.Ok(s) => {
+                t.AssertEqual(s, "hi", "Ok payload")
+            }
+            StringResult.Err(e) => {
+                t.Assert(false, "unexpected Err: " + e.String())
+            }
+        }
+        bad := StringResult.Err(Error.NotFound)
+        match bad {
+            StringResult.Ok(s) => {
+                t.Assert(false, "unexpected Ok: " + s)
+            }
+            StringResult.Err(e) => {
+                t.AssertEqual(e, Error.NotFound, "Err payload")
+            }
+        }
+    }
+}

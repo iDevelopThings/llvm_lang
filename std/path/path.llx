@@ -1,0 +1,266 @@
+// path.llx - std/path: slash-aware path helpers. Pure .llx, no FFI.
+// Accepts both / and \ on input; Join/Clean emit Separator() (\ on this target).
+
+func Separator() string {
+    return "\\"
+}
+
+func isSep(c string) bool {
+    return c == "/" || c == "\\"
+}
+
+func volumeLen(path string) int {
+    if len(path) >= 2 {
+        c0 := path[0:1]
+        if path[1:2] == ":" {
+            if c0 >= "A" && c0 <= "Z" {
+                return 2
+            }
+            if c0 >= "a" && c0 <= "z" {
+                return 2
+            }
+        }
+    }
+    return 0
+}
+
+func IsAbs(path string) bool {
+    if len(path) == 0 {
+        return false
+    }
+    if isSep(path[0:1]) {
+        return true
+    }
+    return volumeLen(path) > 0
+}
+
+func Base(path string) string {
+    if len(path) == 0 {
+        return "."
+    }
+    end := len(path)
+    for end > 0 && isSep(path[end-1:end]) {
+        end = end - 1
+    }
+    if end == 0 {
+        return Separator()
+    }
+    start := end
+    for start > 0 && !isSep(path[start-1:start]) {
+        start = start - 1
+    }
+    return path[start:end]
+}
+
+func Dir(path string) string {
+    if len(path) == 0 {
+        return "."
+    }
+    end := len(path)
+    for end > 0 && isSep(path[end-1:end]) {
+        end = end - 1
+    }
+    if end == 0 {
+        return Separator()
+    }
+    start := end
+    for start > 0 && !isSep(path[start-1:start]) {
+        start = start - 1
+    }
+    if start == 0 {
+        return "."
+    }
+    for start > 0 && isSep(path[start-1:start]) {
+        start = start - 1
+    }
+    if start == 0 {
+        if isSep(path[0:1]) {
+            return Separator()
+        }
+        return "."
+    }
+    vol := volumeLen(path)
+    if start <= vol {
+        if vol > 0 {
+            return path[0:vol] + Separator()
+        }
+        return Separator()
+    }
+    return path[0:start]
+}
+
+func Ext(path string) string {
+    b := Base(path)
+    i := len(b) - 1
+    for i > 0 {
+        if b[i:i+1] == "." {
+            return b[i:len(b)]
+        }
+        i = i - 1
+    }
+    return ""
+}
+
+func Join(elem ...string) string {
+    if len(elem) == 0 {
+        return ""
+    }
+    result := ""
+    i := 0
+    for i < len(elem) {
+        e := elem[i]
+        if len(e) == 0 {
+            i = i + 1
+            continue
+        }
+        if len(result) == 0 {
+            result = e
+        } else if isSep(result[len(result)-1:len(result)]) {
+            if isSep(e[0:1]) {
+                result = result + e[1:len(e)]
+            } else {
+                result = result + e
+            }
+        } else if isSep(e[0:1]) {
+            result = result + e
+        } else {
+            result = result + Separator() + e
+        }
+        i = i + 1
+    }
+    return Clean(result)
+}
+
+func Clean(path string) string {
+    if len(path) == 0 {
+        return "."
+    }
+    vol := volumeLen(path)
+    rest := path[vol:len(path)]
+    rooted := len(rest) > 0 && isSep(rest[0:1])
+
+    // Collect components, resolving . and ..
+    parts := make([]string, 0)
+    i := 0
+    for i < len(rest) {
+        for i < len(rest) && isSep(rest[i:i+1]) {
+            i = i + 1
+        }
+        if i >= len(rest) {
+            break
+        }
+        start := i
+        for i < len(rest) && !isSep(rest[i:i+1]) {
+            i = i + 1
+        }
+        part := rest[start:i]
+        if part == "." {
+            continue
+        }
+        if part == ".." {
+            if len(parts) > 0 {
+                parts = parts[0:len(parts)-1]
+            } else if !rooted {
+                parts = append(parts, "..")
+            }
+            continue
+        }
+        parts = append(parts, part)
+    }
+
+    out := ""
+    if vol > 0 {
+        out = path[0:vol]
+    }
+    if rooted {
+        out = out + Separator()
+    }
+    j := 0
+    for j < len(parts) {
+        if j > 0 || rooted || vol > 0 {
+            if !(j == 0 && rooted) {
+                if len(out) == 0 || !isSep(out[len(out)-1:len(out)]) {
+                    out = out + Separator()
+                }
+            } else if j > 0 {
+                out = out + Separator()
+            }
+        }
+        if j == 0 && rooted {
+            // already have root sep
+            if len(out) == 0 || !isSep(out[len(out)-1:len(out)]) {
+                out = out + Separator()
+            }
+        }
+        if j > 0 {
+            if len(out) == 0 || !isSep(out[len(out)-1:len(out)]) {
+                out = out + Separator()
+            }
+        }
+        out = out + parts[j]
+        j = j + 1
+    }
+
+    if len(out) == 0 {
+        return "."
+    }
+    // Fix awkward Join of root-only
+    if rooted && len(parts) == 0 {
+        if vol > 0 {
+            return path[0:vol] + Separator()
+        }
+        return Separator()
+    }
+    return out
+}
+
+tests {
+    import "std:test"
+
+    func TestSeparator(t *test.Runner) {
+        t.AssertEqual(Separator(), "\\", "windows separator")
+    }
+
+    func TestIsAbs(t *test.Runner) {
+        t.Assert(IsAbs("C:\\a"), "drive abs")
+        t.Assert(IsAbs("c:/a"), "drive slash abs")
+        t.Assert(IsAbs("\\a"), "root abs")
+        t.Assert(IsAbs("/a"), "unix-style root abs")
+        t.Assert(!IsAbs("a\\b"), "relative")
+        t.Assert(!IsAbs(""), "empty")
+    }
+
+    func TestBase(t *test.Runner) {
+        t.AssertEqual(Base("a\\b\\c.txt"), "c.txt", "nested")
+        t.AssertEqual(Base("c.txt"), "c.txt", "bare")
+        t.AssertEqual(Base("a\\b\\"), "b", "trailing sep")
+        t.AssertEqual(Base(""), ".", "empty")
+        t.AssertEqual(Base("\\"), "\\", "root")
+    }
+
+    func TestDir(t *test.Runner) {
+        t.AssertEqual(Dir("a\\b\\c.txt"), "a\\b", "nested")
+        t.AssertEqual(Dir("c.txt"), ".", "bare")
+        t.AssertEqual(Dir("C:\\a\\b"), "C:\\a", "drive")
+    }
+
+    func TestExt(t *test.Runner) {
+        t.AssertEqual(Ext("a\\b\\c.txt"), ".txt", "txt")
+        t.AssertEqual(Ext("a\\b\\c"), "", "none")
+        t.AssertEqual(Ext("a\\.hidden"), "", "dotfile no ext")
+        t.AssertEqual(Ext("a\\b.tar.gz"), ".gz", "multi")
+    }
+
+    func TestJoin(t *test.Runner) {
+        t.AssertEqual(Join("a", "b", "c"), "a\\b\\c", "simple")
+        t.AssertEqual(Join("a\\", "b"), "a\\b", "left sep")
+        t.AssertEqual(Join("a", "/b"), "a\\b", "right abs-ish cleaned")
+    }
+
+    func TestClean(t *test.Runner) {
+        t.AssertEqual(Clean("a\\b\\..\\c"), "a\\c", "dotdot")
+        t.AssertEqual(Clean("a\\.\\b"), "a\\b", "dot")
+        t.AssertEqual(Clean(""), ".", "empty")
+        t.AssertEqual(Clean("a//b"), "a\\b", "mixed seps")
+    }
+}

@@ -2547,3 +2547,21 @@ unchanged and passing. Parser/sema/codegen/LSP coverage added
 duplicate type (`int` vs `i32` too), unboxable arm type, multi-type arm,
 value pattern, non-type name, and a type pattern in an enum/value match.
 `LANGUAGE.md`, `CODEGEN.md`, `docs/`, and `examples/type_match/` updated.
+## 2026-07-27 - stdlib Error/Result enums, path/time/sort/maps polish
+
+**Decision:** `std/os` introduces a shared `Error` enum (`Ok` + classified
+unit variants + `Unknown(i32)`) and small non-generic result enums
+(`StringResult` / `BytesResult`) for `match`-friendly fallible ops. No
+`Result[T]` — generic enums are unsupported. Hot paths avoid string error
+payloads; `Error.String()` is for display only.
+
+`std/path`, `Duration`/`Sleep` in `std/time` (QPC kept for monotonic),
+`std/sort`, `std/maps`, string `Parse*`, and mathutil trig landed in the
+same pass. File I/O and env are deferred pending `cstring == nil` and
+`cstring(*u8)` (see `examples/compiler_gaps`).
+
+**Cross-package enum construction** (`os.Error.Ok`) is not available;
+`os.Ok()` / `os.NotFound()` constructors paper over it until that gap closes.
+
+**Status:** partial — Error/path/time Duration/Sleep/sort/maps/parse/trig
+shipped with `tests{}` and demos; os file/env still open.

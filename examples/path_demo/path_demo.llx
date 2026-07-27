@@ -1,0 +1,18 @@
+// path_demo.llx - exercises std/path Join/Clean/Base/Dir/Ext/IsAbs.
+//
+// Run with:
+//   .\llvmc.exe examples\path_demo\path_demo.llx
+//   echo $LASTEXITCODE   # -> 1
+
+import "std:path"
+
+func main() int {
+    print(path.Join("a", "b", "c.txt"))
+    print(path.Clean("a\\b\\..\\c"))
+    print(path.Base("a\\b\\c.txt"))
+    print(path.Dir("a\\b\\c.txt"))
+    print(path.Ext("a\\b\\c.txt"))
+    print(path.IsAbs("C:\\x"))
+    print(path.IsAbs("rel\\x"))
+    return 1
+}

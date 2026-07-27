@@ -14,17 +14,50 @@ func main() {
 
 | Package | Main API |
 | --- | --- |
-| `std:mathutil` | `Sqrt`, `Pow`, `Floor`, `Ceil`, `Fabs`, `Abs`, `Min`, `Max`, `Clamp`, `Normalize2D` |
-| `std:strings` | Search, trim, split, case conversion, and number formatting |
+| `std:mathutil` | `Sqrt`, `Pow`, `Floor`, `Ceil`, `Fabs`, `Sin`, `Cos`, `Tan`, `Atan2`, `Pi`, `Abs`, `Min`, `Max`, `Clamp`, `Normalize2D` |
+| `std:strings` | Search, trim, split, case, number format/parse |
 | `std:slices` | Generic `Contains`, `IndexOf`, `Reverse`, `Map`, `Filter`, `Reduce` |
+| `std:sort` | In-place `Sort` / `SortInts` |
+| `std:maps` | `Has`, `Keys`, `Values` |
+| `std:path` | `Join`, `Clean`, `Base`, `Dir`, `Ext`, `IsAbs`, `Separator` |
+| `std:os` | `Error` / Result enums (file I/O and env coming next) |
 | `std:collections` | Generational `SlotMap[T]` handles |
 | `std:vectors` | `Vector2` and `Vector3` arithmetic |
 | `std:rect` | Rectangle queries and set operations |
 | `std:rand` | Seeded integer, float, range, and boolean random values |
-| `std:time` | Monotonic time and duration formatting |
+| `std:time` | Monotonic time, `Duration`, `Sleep`, duration formatting |
 | `std:scheduler` | Cooperative coroutine scheduling |
 | `std:log` | Formatted logging with `{}` placeholders |
 | `std:test` | Assertions used by `llvmc -test` |
+
+## Errors (`std:os`)
+
+OS-facing helpers share an `Error` enum. Void-ish ops return `Error` and
+use `Error.Ok` (via `os.Ok()` from other packages) as success. Value-returning
+ops use small result enums such as `StringResult` / `BytesResult` with
+`Ok(...)` / `Err(Error)` arms for `match`.
+
+```go
+import "std:os"
+
+err := os.Ok()
+if err.IsOk() {
+    print("ok")
+}
+```
+
+Hot paths keep unit variants (plus `Unknown(i32)` for raw errno). Use
+`Error.String()` only when formatting for humans. Cross-package
+`os.Error.NotFound` construction is not valid yet — call `os.Ok()`,
+`os.NotFound()`, or helpers like `IsOk` / `IsNotFound` instead.
+
+File and environment APIs are not shipped in this round.
+
+## `std:path`
+
+`Join` / `Clean` accept `/` and `\` and emit `Separator()` (`\` on the
+current Windows target). `Base`, `Dir`, `Ext`, and `IsAbs` cover the usual
+path queries.
 
 ## `std:strings`
 
@@ -33,6 +66,9 @@ The package includes `Contains`, `IndexOf`, `HasPrefix`, `HasSuffix`,
 
 Number formatting uses `IntToString`, `Int64ToString`, `UInt64ToString`,
 `F64ToString`, and `F64ToStringPrecision`.
+
+Parsing uses `ParseInt`, `ParseI64`, `ParseU64`, and `ParseF64`, each
+returning a small result enum (`Ok` / `Invalid` / `Overflow` as applicable).
 
 ## `std:collections`
 
@@ -72,7 +108,11 @@ Call `Seed` for repeatable output. `IntRange(min, max)` includes both bounds;
 
 - `std:slices` provides `Contains`, `IndexOf`, in-place `Reverse`, `Map`,
   `Filter`, and `Reduce`.
-- `std:time` provides `Now`, `ElapsedSeconds`, and `FormattedDuration`.
+- `std:sort` provides generic in-place `Sort` and `SortInts`.
+- `std:maps` provides `Has`, `Keys`, and `Values` (`Keys`/`Values` allocate).
+- `std:time` provides QPC-based `Now` / `ElapsedSeconds`, `Duration`
+  constructors (`Nanoseconds`, `Milliseconds`, …), `Sleep`, and
+  `FormattedDuration`.
 - `std:scheduler` provides `Entry`, `Scheduler.Schedule`,
   `ScheduleDelayed`, `HasPending`, and `Tick`.
 - `std:log` provides `Format`, `Log`, `Info`, `Warn`, and `Error`. Formatting

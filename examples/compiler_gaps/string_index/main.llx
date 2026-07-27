@@ -1,0 +1,12 @@
+// GAP: single-index a string to a byte.
+// Actual:  "cannot index into string (not an array)"
+// Expected: s[i] yields u8, read-only, runtime bounds-checked (s[i:i+1] already works).
+//
+// Run: .\llvmc.exe examples\compiler_gaps\string_index
+
+func main() int {
+    s := "AB"
+    print(s[0])
+    print(s[1])
+    return int(s[0])
+}
