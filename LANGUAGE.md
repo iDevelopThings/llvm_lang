@@ -2894,6 +2894,19 @@ error if it can't be found.
   by a power of two standing in for the right-shift this language has no
   operator for - see the package's own doc comment) rather than binding
   libc's `rand()`, whose quality/range varies by platform.
+- **`std/log`** - printf-style formatted logging, built entirely on
+  `...Any` variadics (see "Variadic parameters" above) and `Any`'s own
+  reflection builtins (see "Any" above), with zero special-casing of its
+  own: `Format(format string, args ...Any) string` substitutes each
+  `%v`/`%s`/`%d`/`%f`/`%t` verb in order with its argument, rendered via a
+  universal `Any` stringifier (a struct renders as `Name{field: value,
+  ...}`, recursively); every verb behaves identically at runtime, so the
+  letter is a readability convention rather than a checked type, and `%v`
+  is the honest spelling of what actually happens. `%%` is a literal
+  percent; a verb with no remaining argument renders
+  `%!<verb>(MISSING)` (matching Go's own `fmt` convention).
+  `Log`/`Info`/`Warn`/`Error` all defer to `Format` and `print` the result,
+  the latter three prefixed with `[INFO]`/`[WARN]`/`[ERROR]`.
 - **`std/test`** - soft-fail test helpers for `llvmc -test`: `Runner`,
   `NewRunner`, `Assert` / `AssertFalse` / `AssertEqual[T]` /
   `AssertNotEqual[T]` / `AssertNil[T]` / `AssertNotNil[T]` /

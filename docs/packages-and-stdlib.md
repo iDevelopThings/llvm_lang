@@ -81,6 +81,7 @@ lives on disk.
 | `std:vectors` | `Vector2`/`Vector3` with operator overloads (`+ - * /`, unary `-`), `Length`, `Normalize`, `Dot`, `Cross` (`Vector3`), `Distance`, `Lerp` |
 | `std:rect` | Axis-aligned `Rect` (built on `std:vectors`): `Min`/`Max`/`Center`, `Contains`, `Intersects`, `Intersection`, `Union` |
 | `std:rand` | Pseudo-random `Int`, `IntRange`, `Float`, `FloatRange`, `Bool`, seedable via `Seed` |
+| `std:log` | Printf-style `Format`/`Log`/`Info`/`Warn`/`Error`, built on `...Any` variadics |
 | `std:test` | Assertions used by `llvmc -test` |
 
 Example:
@@ -110,6 +111,7 @@ Try:
 - `SlotMap`'s own `llvmc -test` assertions live in a `tests{}` block at the
   end of [`std/collections/collections.llx`](../std/collections/collections.llx)
   itself - see [`compiler.md`](compiler.md#run-language-tests) for the
-  `tests{}` construct. `std/vectors/vectors.llx`, `std/rect/rect.llx`, and
-  `std/rand/rand.llx` do the same.
+  `tests{}` construct. `std/vectors/vectors.llx`, `std/rect/rect.llx`,
+  `std/rand/rand.llx`, and `std/log/log.llx` do the same.
 - [`rand_demo.llx`](../examples/rand_demo/rand_demo.llx)
+- [`log_demo.llx`](../examples/log_demo/log_demo.llx)

@@ -1,0 +1,25 @@
+// log_demo.llx - exercises std/log's printf-style Format/Log/Info/Warn/Error,
+// built on ...Any variadics (implicit boxing) and Any's own reflection.
+//
+// Run with:
+//   .\llvmc.exe examples\log_demo\log_demo.llx
+
+import "std:log"
+
+struct Point {
+    X int
+    Y int
+}
+
+func main() int {
+    log.Info("starting up, pid=%d", 1234)
+
+    p := Point{X: 3, Y: 4}
+    line := log.Format("point is %v, name=%s, ready=%t", p, "origin", true)
+    print(line)
+
+    log.Warn("disk at %d%% capacity", 87)
+    log.Error("failed after %d retries: %v", 3, p)
+
+    return 0
+}

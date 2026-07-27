@@ -192,52 +192,73 @@ func ToLower(s string) string {
 // byte-value/rune concept this language doesn't have.
 var digitChars string = "0123456789"
 
-// IntToString converts n to its base-10 decimal string, handling both traps
+// Int64ToString converts n to its base-10 decimal string, handling two traps
 // a naively-ported "while n > 0" itoa hits:
 //   - n == 0 is special-cased up front, returning "0" directly - the
-//     reverse-digit-extraction loop below never runs at all for 0 (its own
-//     condition is `value > 0`), so without this early return it would
-//     silently produce "" instead.
-//   - a negative n has its sign recorded and stripped before the same
-//     extraction loop runs on the (now non-negative) magnitude, with "-"
-//     prepended to the result at the very end.
+//     reverse-digit-extraction loop below never runs at all for 0.
+//   - a negative n is NEVER negated to a positive magnitude first - i64's
+//     own minimum has no representable positive i64 to negate into (it
+//     would silently overflow back to itself, two's complement's one
+//     self-negating value, leaving every digit unextracted). Digits are
+//     extracted directly from the negative value instead: `%`/`/` both
+//     truncate toward zero (see LANGUAGE.md's "Operators" section), so a
+//     negative n%10 is already each digit's own negation (`-42 % 10 == -2`),
+//     and n/10 shrinks a negative magnitude toward zero exactly like it
+//     shrinks a positive one - the loop condition and multiply-by-sign are
+//     the only things that differ between the two branches below.
 //
-// The magnitude is computed in i64, not i32, specifically so that
-// n == the smallest representable int (i32's own minimum, -2147483648)
-// doesn't overflow when negated: i64(n) first sign-extends n into a much
-// wider range, and negating *that* never overflows i64 (2147483648 fits
-// comfortably in i64's own far larger range) the way negating it directly
-// in i32 would (there's no representable positive i32 for -2147483648's
-// exact magnitude in two's complement).
-//
-// Digits are extracted least-significant-first (the classic n%10 / n/10
-// loop) and built into the result by prepending each new digit to whatever's
+// Digits are built into the result by prepending each new one to whatever's
 // already been accumulated (`digitChars[d:d+1] + result`, not
 // `result + digitChars[d:d+1]`) - string concatenation is the only
 // "buffer" primitive this language's string type actually offers (no
 // mutable byte buffer / in-place reverse to do instead), so building the
 // correctly-ordered string directly this way, rather than accumulating in
 // reverse and reversing afterwards, is the simplest option available.
-func IntToString(n int) string {
+func Int64ToString(n i64) string {
     if n == 0 {
         return "0"
     }
 
     negative := n < 0
-    value := i64(n)
+    value := n
+    result := ""
     if negative {
-        value = -value
+        for value < 0 {
+            d := i32(-(value % 10))
+            result = digitChars[d:d+1] + result
+            value = value / 10
+        }
+        return "-" + result
     }
 
-    result := ""
     for value > 0 {
         d := i32(value % 10)
         result = digitChars[d:d+1] + result
         value = value / 10
     }
+    return result
+}
 
-    if negative {
-        result = "-" + result
+// IntToString is Int64ToString with n widened to i64 first - i32's own
+// range is a strict subset of i64's, so this covers every int value.
+func IntToString(n int) string {
+    return Int64ToString(i64(n))
+}
+
+// UInt64ToString converts n to its base-10 decimal string - simpler than
+// Int64ToString, since an unsigned value is never negative, so there's no
+// sign to record/strip/reapply.
+func UInt64ToString(n u64) string {
+    if n == 0 {
+        return "0"
+    }
+
+    value := n
+    result := ""
+    for value > 0 {
+        d := i32(value % 10)
+        result = digitChars[d:d+1] + result
+        value = value / 10
     }
     return result
 }
@@ -319,5 +340,25 @@ tests {
         t.AssertEqual(F64ToStringPrecision(1.5, 2), "1.50", "keeps a trailing zero")
         t.AssertEqual(F64ToStringPrecision(-1.5, 2), "-1.50", "negative")
         t.AssertEqual(F64ToStringPrecision(0.999996, 4), "1.0000", "rounds up into the integer part")
+    }
+
+    func TestIntToStringUnchanged(t *test.Runner) {
+        t.AssertEqual(IntToString(0), "0", "zero")
+        t.AssertEqual(IntToString(42), "42", "positive")
+        t.AssertEqual(IntToString(-42), "-42", "negative")
+        t.AssertEqual(IntToString(-2147483647 - 1), "-2147483648", "i32's own minimum")
+    }
+
+    // i64's own minimum has no representable positive i64 magnitude to
+    // negate - the exact reason Int64ToString's own digit-extraction loop
+    // never negates at all (see its doc comment).
+    func TestInt64ToStringHandlesI64Minimum(t *test.Runner) {
+        t.AssertEqual(Int64ToString(-9223372036854775807 - 1), "-9223372036854775808", "i64's own minimum")
+    }
+
+    func TestUInt64ToString(t *test.Runner) {
+        t.AssertEqual(UInt64ToString(0), "0", "zero")
+        t.AssertEqual(UInt64ToString(42), "42", "ordinary value")
+        t.AssertEqual(UInt64ToString(18446744073709551615), "18446744073709551615", "u64's own maximum")
     }
 }

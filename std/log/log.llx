@@ -1,0 +1,234 @@
+// log.llx - std/log: printf-style formatted logging, built entirely on
+// ...Any variadics (implicit boxing - see LANGUAGE.md's "Variadic
+// parameters" section) and Any's own reflection builtins (AnyAs/AnyName/
+// AnyFields - see LANGUAGE.md's "Any" section).
+//
+// Format substitutes each %v/%s/%d/%f/%t verb in `format` (in order) with
+// its corresponding argument, rendered via this package's own universal
+// stringify. Every verb behaves identically at runtime - there is no
+// compile-time link between a verb letter and an argument's real kind
+// (unlike Go's own vet-checked printf), so %d/%s/%f/%t are purely a
+// readability convention for callers, not a runtime type check; %v is the
+// honest spelling of what actually happens. %% is a literal percent sign.
+// A verb with no remaining argument renders as "%!<verb>(MISSING)",
+// matching Go's own fmt package convention for the same situation.
+
+import "std:strings"
+
+func Format(format string, args ...Any) string {
+    result := ""
+    argIndex := 0
+    i := 0
+    for i < len(format) {
+        c := format[i:i+1]
+        if c != "%" || i+1 >= len(format) {
+            result = result + c
+            i = i + 1
+            continue
+        }
+
+        verb := format[i+1:i+2]
+        if verb == "%" {
+            result = result + "%"
+            i = i + 2
+            continue
+        }
+        if verb == "v" || verb == "s" || verb == "d" || verb == "f" || verb == "t" {
+            if argIndex < len(args) {
+                result = result + stringifyAny(args[argIndex])
+                argIndex = argIndex + 1
+            } else {
+                result = result + "%!" + verb + "(MISSING)"
+            }
+            i = i + 2
+            continue
+        }
+
+        result = result + c
+        i = i + 1
+    }
+    return result
+}
+
+// stringifyAny renders any boxed value as a human-readable string,
+// dispatching on its own boxed kind - every scalar kind gets its natural
+// formatting; a struct renders as "Name{field: value, ...}", each field
+// itself stringified the same way recursively (safe against unbounded
+// recursion - a struct can only cycle through itself via a pointer field,
+// which AnyFields never descends into, see LANGUAGE.md's "Any" section).
+// A struct with zero fields and a boxed pointer both fall through to the
+// same "<Name>" fallback below - AnyKind returns a raw ordinal with no
+// named kind to compare against (a deliberate Any simplification), so
+// there's no way to tell them apart without one; an empty struct is rare
+// enough this isn't worth chasing further.
+func stringifyAny(a Any) string {
+    sv, sok := AnyAs[string](a)
+    if sok {
+        return sv
+    }
+    bv, bok := AnyAs[bool](a)
+    if bok {
+        if bv {
+            return "true"
+        }
+        return "false"
+    }
+    iv, iok := AnyAs[int](a)
+    if iok {
+        return strings.IntToString(iv)
+    }
+    i8v, i8ok := AnyAs[i8](a)
+    if i8ok {
+        return strings.Int64ToString(i64(i8v))
+    }
+    i16v, i16ok := AnyAs[i16](a)
+    if i16ok {
+        return strings.Int64ToString(i64(i16v))
+    }
+    i64v, i64ok := AnyAs[i64](a)
+    if i64ok {
+        return strings.Int64ToString(i64v)
+    }
+    u8v, u8ok := AnyAs[u8](a)
+    if u8ok {
+        return strings.UInt64ToString(u64(u8v))
+    }
+    u16v, u16ok := AnyAs[u16](a)
+    if u16ok {
+        return strings.UInt64ToString(u64(u16v))
+    }
+    u32v, u32ok := AnyAs[u32](a)
+    if u32ok {
+        return strings.UInt64ToString(u64(u32v))
+    }
+    u64v, u64ok := AnyAs[u64](a)
+    if u64ok {
+        return strings.UInt64ToString(u64v)
+    }
+    f32v, f32ok := AnyAs[f32](a)
+    if f32ok {
+        return strings.F64ToString(f64(f32v))
+    }
+    f64v, f64ok := AnyAs[f64](a)
+    if f64ok {
+        return strings.F64ToString(f64v)
+    }
+    csv, csok := AnyAs[cstring](a)
+    if csok {
+        return string(csv)
+    }
+
+    fieldsStr := ""
+    fieldCount := 0
+    for name, fv := range AnyFields(a) {
+        if fieldCount > 0 {
+            fieldsStr = fieldsStr + ", "
+        }
+        fieldsStr = fieldsStr + name + ": " + stringifyAny(fv)
+        fieldCount = fieldCount + 1
+    }
+    if fieldCount > 0 {
+        return AnyName(a) + "{" + fieldsStr + "}"
+    }
+    return "<" + AnyName(a) + ">"
+}
+
+func Log(format string, args ...Any) {
+    print(Format(format, args...))
+}
+
+func Info(format string, args ...Any) {
+    print("[INFO] " + Format(format, args...))
+}
+
+func Warn(format string, args ...Any) {
+    print("[WARN] " + Format(format, args...))
+}
+
+func Error(format string, args ...Any) {
+    print("[ERROR] " + Format(format, args...))
+}
+
+tests {
+    import "std:test"
+
+    struct Point {
+        X int
+        Y int
+    }
+
+    struct Line {
+        Start Point
+        End   Point
+    }
+
+    func TestFormatSubstitutesEachVerb(t *test.Runner) {
+        got := Format("count: %d name: %s ok: %t pi: %f", 5, "bob", true, 3.5)
+        t.AssertEqual(got, "count: 5 name: bob ok: true pi: 3.5000", "one substitution per verb, in order")
+    }
+
+    func TestFormatVIsUniversal(t *test.Runner) {
+        t.AssertEqual(Format("%v %v %v", 5, "bob", true), "5 bob true", "%v works for any kind, not just Any specifically")
+    }
+
+    func TestFormatLiteralPercent(t *test.Runner) {
+        t.AssertEqual(Format("100%% done"), "100% done", "%% is a literal percent, consumes no argument")
+    }
+
+    func TestFormatMissingArgument(t *test.Runner) {
+        t.AssertEqual(Format("count: %d"), "count: %!d(MISSING)", "a verb with no remaining argument, not a crash")
+    }
+
+    func TestFormatExtraArgumentsIgnored(t *test.Runner) {
+        t.AssertEqual(Format("%d", 1, 2, 3), "1", "only as many verbs are substituted as the format string has")
+    }
+
+    func TestFormatUnknownVerbPassesThrough(t *test.Runner) {
+        t.AssertEqual(Format("%q", 5), "%q", "an unrecognized verb is left as-is, consumes no argument")
+    }
+
+    func TestFormatNoVerbsIgnoresArgs(t *test.Runner) {
+        t.AssertEqual(Format("no verbs here", 1, 2, 3), "no verbs here", "extra args with no verbs to consume them")
+    }
+
+    func TestFormatEveryIntegerWidth(t *test.Runner) {
+        var a i8 = 1
+        var b i16 = 2
+        var c i32 = 3
+        var d i64 = 4
+        var e u8 = 5
+        var f u16 = 6
+        var g u32 = 7
+        var h u64 = 8
+        got := Format("%v %v %v %v %v %v %v %v", a, b, c, d, e, f, g, h)
+        t.AssertEqual(got, "1 2 3 4 5 6 7 8", "every integer width formats correctly")
+    }
+
+    func TestFormatBothFloatWidths(t *test.Runner) {
+        var a f32 = 1.5
+        var b f64 = 2.5
+        t.AssertEqual(Format("%v %v", a, b), "1.5000 2.5000", "both float widths format correctly")
+    }
+
+    func TestFormatStruct(t *test.Runner) {
+        p := Point{X: 1, Y: 2}
+        t.AssertEqual(Format("%v", p), "Point{X: 1, Y: 2}", "a struct renders as Name{field: value, ...}")
+    }
+
+    func TestFormatNestedStruct(t *test.Runner) {
+        l := Line{Start: Point{X: 1, Y: 2}, End: Point{X: 3, Y: 4}}
+        t.AssertEqual(Format("%v", l), "Line{Start: Point{X: 1, Y: 2}, End: Point{X: 3, Y: 4}}", "a struct field is itself recursively rendered")
+    }
+
+    func TestLogWritesFormattedLine(t *test.Runner) {
+        // Log/Info/Warn/Error all defer entirely to Format for their own
+        // content - this just confirms they compile and run without
+        // crashing; the real formatting behavior is Format's own, tested
+        // above, and print()'s own output isn't capturable from here.
+        Log("plain %v", 42)
+        Info("info %v", 42)
+        Warn("warn %v", 42)
+        Error("error %v", 42)
+        t.Assert(true, "Log/Info/Warn/Error all ran without crashing")
+    }
+}
