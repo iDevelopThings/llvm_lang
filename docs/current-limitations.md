@@ -29,11 +29,15 @@ This is a quick list of deliberate limits, not a roadmap.
   for it, and `AnyAs[T]` only checks that `T` is a map, not its key/value
   types. Iterating a boxed map's own key/value pairs is not supported.
 - A boxed enum's `AnyFields` walks its own *active variant's* associated
-  data only - which variant is active is a runtime property of the value
-  being boxed, not something a struct field/array element of enum type
-  tracks statically, so `AnyName`/`AnyFields` called directly on one of
-  those (bypassing `AnyAs[EnumType]` first) reports the enum's own type
-  name with zero fields rather than a specific variant's.
+  data - correct for a directly boxed enum value (`Any(someEnumValue)`).
+  When an enum value is reached instead as a struct field or array element,
+  the field/element's own descriptor is built once for the whole struct/
+  array type, before any specific value (and its live discriminant) is in
+  hand - this round doesn't re-select the active variant at the point a
+  field is actually walked, so `AnyName`/`AnyFields` called directly on
+  that field's own `Any` (bypassing `AnyAs[EnumType]` first) reports the
+  enum's own type name with zero fields rather than the real active
+  variant's. Not an architectural limit - a scope decision for this round.
 - Boxing an `Any` into another `Any` is legal - a cheap no-op copy, not an
   error.
 - `Any` is neither comparable (`==`/`!=`) nor printable (`print`), and

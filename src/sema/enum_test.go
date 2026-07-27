@@ -84,6 +84,18 @@ func main() {}
 `, 1)
 }
 
+// A zero-variant enum can never have a real value - even its own zero
+// value has no legitimate variant to zero-init into - so every codegen
+// path that switches on an enum's own discriminant would build an
+// unreachable-only switch with no real case. Rejected outright rather than
+// hardened case-by-case in codegen.
+func TestEnumZeroVariantsIsError(t *testing.T) {
+	expectAllErrors(t, `
+enum Empty {}
+func main() {}
+`, 1)
+}
+
 // --- construction ---
 
 func TestEnumUnitVariantConstructionType(t *testing.T) {

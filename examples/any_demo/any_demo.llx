@@ -3,11 +3,16 @@
 //
 // Run with:
 //   .\llvmc.exe examples\any_demo\any_demo.llx
-//   echo $LASTEXITCODE   # (PowerShell) -> 7  (all seven sanity checks passed)
+//   echo $LASTEXITCODE   # (PowerShell) -> 8  (all eight sanity checks passed)
 
 struct Point {
     X int
     Y int
+}
+
+enum Shape {
+    Point,
+    Circle(f64),
 }
 
 func main() int {
@@ -75,6 +80,21 @@ func main() int {
         ok = ok + 1
     }
 
-    print(ok)   // 7
+    // An enum's AnyName is its own active variant's name, not the enum
+    // type's - AnyFields walks that variant's own associated data.
+    boxedCircle := Any(Shape.Circle(2.0))
+    print(AnyName(boxedCircle))   // "Circle"
+    circleSum := 0.0
+    for name, field := range AnyFields(boxedCircle) {
+        fv, fok := AnyAs[f64](field)
+        if fok {
+            circleSum = circleSum + fv
+        }
+    }
+    if AnyName(boxedCircle) == "Circle" && circleSum == 2.0 {
+        ok = ok + 1
+    }
+
+    print(ok)   // 8
     return ok
 }

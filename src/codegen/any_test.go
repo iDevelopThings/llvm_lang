@@ -797,6 +797,115 @@ func f() int {
 	}
 }
 
+// TestAnyBoxEnumMixedWidthTupleFieldsByteCorrect proves field offsets are
+// read correctly for a tuple variant whose associated data isn't all one
+// uniform width (every other enum-reflection test uses only f64 payloads,
+// which a wrong constFieldOffset computation could still pass by
+// coincidence - a mixed i8/f64/i32/string tuple can't).
+func TestAnyBoxEnumMixedWidthTupleFieldsByteCorrect(t *testing.T) {
+	jm := compileAndJIT(t, `
+enum Tagged {
+	Tup(i8, f64, i32, string)
+}
+func f() int {
+	a := Any(Tagged.Tup(5, 2.5, 7, "hi"))
+	ok := 0
+	for name, v := range AnyFields(a) {
+		if name == "0" {
+			fv, fok := AnyAs[i8](v)
+			if fok && fv == 5 {
+				ok = ok + 1
+			}
+		}
+		if name == "1" {
+			fv, fok := AnyAs[f64](v)
+			if fok && fv == 2.5 {
+				ok = ok + 1
+			}
+		}
+		if name == "2" {
+			fv, fok := AnyAs[i32](v)
+			if fok && fv == 7 {
+				ok = ok + 1
+			}
+		}
+		if name == "3" {
+			fv, fok := AnyAs[string](v)
+			if fok && fv == "hi" {
+				ok = ok + 1
+			}
+		}
+	}
+	return ok
+}
+`)
+	if got := jm.runInt32(t, "f"); got != 4 {
+		t.Errorf("f() = %d, want 4", got)
+	}
+}
+
+// TestAnyKindForEnumIsStableAcrossVariants proves AnyKind reports the same
+// TypeEnum-kind ordinal for every variant of an enum (AnyKind never
+// distinguishes which specific enum/variant, same as it already can't for
+// two different structs - AnyName is what fills that gap).
+func TestAnyKindForEnumIsStableAcrossVariants(t *testing.T) {
+	jm := compileAndJIT(t, `
+enum Shape {
+	Point,
+	Circle(f64)
+}
+func f() bool {
+	a := Any(Shape.Point)
+	b := Any(Shape.Circle(1.0))
+	return AnyKind(a) == AnyKind(b)
+}
+`)
+	if got := jm.runBool(t, "f"); !got {
+		t.Errorf("f() = %v, want true", got)
+	}
+}
+
+// TestAnyBoxStructWithEnumFieldDirectFieldsIsDocumentedLimitation proves the
+// documented current-limitations.md gap: calling AnyFields directly on a
+// struct's own enum-typed field (bypassing AnyAs[EnumType] first) reports
+// the enum's own type name with zero fields, not the real active variant's
+// data - since that field's descriptor is built once for the whole struct
+// type, with no specific value's discriminant in hand. Locks in the
+// current, intentionally-scoped behavior so a future real fix updates this
+// test deliberately rather than silently changing it.
+func TestAnyBoxStructWithEnumFieldDirectFieldsIsDocumentedLimitation(t *testing.T) {
+	jm := compileAndJIT(t, `
+enum Shape {
+	Point,
+	Circle(f64)
+}
+struct Bag {
+	Item Shape
+}
+func f() int {
+	b := Bag{Item: Shape.Circle(9.0)}
+	a := Any(b)
+	fieldCount := 0
+	nameOk := false
+	for name, v := range AnyFields(a) {
+		if name == "Item" {
+			nameOk = AnyName(v) == "Shape"
+			for fname, fv := range AnyFields(v) {
+				fieldCount = fieldCount + 1
+			}
+		}
+	}
+	if !nameOk {
+		return -1
+	}
+	return fieldCount
+}
+`)
+	if got := jm.runInt32(t, "f"); got != 0 {
+		t.Errorf("f() = %d, want 0 (documented limitation - see docs/current-limitations.md; -1 means AnyName(v) wasn't \"Shape\")", got)
+	}
+}
+
 // TestAnyBoxEnumTwoDifferentActiveVariantsReflectIndependently is the single
 // most important behavioral proof of this feature: two boxed values of the
 // SAME enum type, each holding a different active variant, must each report

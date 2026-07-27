@@ -2576,9 +2576,12 @@ walks that same active variant's own associated data: nothing for a unit
 variant, positional `"0"`/`"1"`/... names for a tuple variant, or its real
 declared names for a struct variant. Boxing two different values of the same
 enum type, each holding a different variant, is not a shared or stale
-descriptor - each one's own `AnyKind`/`AnyName`/`AnyFields` always reflects
+descriptor - each one's own `AnyKind`/`AnyName`/`AnyFields` reflects
 whichever variant is genuinely active in that specific value, decided at
-runtime from its own discriminant.
+runtime from its own discriminant. This only holds for a directly boxed
+enum value (`Any(someEnumValue)`) - see `docs/current-limitations.md` for
+the narrower behavior when an enum value is reached as a struct field or
+array element instead.
 
 ```go
 a := Any(Shape.Circle(2.0))

@@ -194,28 +194,42 @@ func (g *Generator) structDescriptor(info *sema.StructInfo) llvm.Value {
 	layout := g.structLayouts[info]
 
 	fieldCount := len(layout.fieldNames)
-	fieldsPtr := llvm.ConstNull(g.ptrTy)
-	if fieldCount > 0 {
-		fieldDescs := make([]llvm.Value, fieldCount)
-		for i, name := range layout.fieldNames {
-			fieldDescs[i] = g.ctx.ConstStruct([]llvm.Value{
-				g.constStringValue(name),
-				g.typeDescriptorFor(layout.fieldSemaTypes[i]),
-				g.constFieldOffset(layout.llvmType, i),
-			}, false)
-		}
-		arrConst := llvm.ConstArray(g.fieldDescriptorTy, fieldDescs)
-		glob := llvm.AddGlobal(g.mod, arrConst.Type(), ".any.fields."+info.Symbol.Name)
-		glob.SetInitializer(arrConst)
-		glob.SetGlobalConstant(true)
-		glob.SetLinkage(llvm.PrivateLinkage)
-		fieldsPtr = glob
-	}
+	fieldsPtr := g.buildFieldTableGlobal(fieldCount, ".any.fields."+info.Symbol.Name, func(i int) (string, sema.Type, llvm.Value) {
+		return layout.fieldNames[i], layout.fieldSemaTypes[i], g.constFieldOffset(layout.llvmType, i)
+	})
 
 	noElemDesc, noArrayLen, noElemSize := llvm.ConstNull(g.ptrTy), llvm.ConstInt(g.i32Ty, 0, false), llvm.ConstInt(g.i64Ty, 0, false)
 	desc := g.buildTypeDescriptorGlobal(sema.TypeStruct, info.Symbol.Name, fieldCount, fieldsPtr, noElemDesc, noArrayLen, noElemSize, ".any.desc."+info.Symbol.Name)
 	g.structAnyDescs[info] = desc
 	return desc
+}
+
+// buildFieldTableGlobal builds the shared `fieldsPtr` array global a
+// TypeDescriptor's own field table points at (or a null pointer for
+// fieldCount == 0) - the part structDescriptor/variantDescriptor otherwise
+// duplicated identically, since both describe "a fixed set of named,
+// recursively-descriptored, byte-offset fields," just sourced from a
+// struct's own layout vs. one enum variant's own payload layout. at(i)
+// returns the i'th field's own (name, sema type, byte offset).
+func (g *Generator) buildFieldTableGlobal(fieldCount int, globalName string, at func(i int) (string, sema.Type, llvm.Value)) llvm.Value {
+	if fieldCount == 0 {
+		return llvm.ConstNull(g.ptrTy)
+	}
+	fieldDescs := make([]llvm.Value, fieldCount)
+	for i := range fieldCount {
+		name, t, offset := at(i)
+		fieldDescs[i] = g.ctx.ConstStruct([]llvm.Value{
+			g.constStringValue(name),
+			g.typeDescriptorFor(t),
+			offset,
+		}, false)
+	}
+	arrConst := llvm.ConstArray(g.fieldDescriptorTy, fieldDescs)
+	glob := llvm.AddGlobal(g.mod, arrConst.Type(), globalName)
+	glob.SetInitializer(arrConst)
+	glob.SetGlobalConstant(true)
+	glob.SetLinkage(llvm.PrivateLinkage)
+	return glob
 }
 
 // arrayAnyDescKey interns one shared descriptor per distinct array shape -
@@ -301,23 +315,9 @@ func (g *Generator) variantDescriptor(variant *sema.EnumVariant) llvm.Value {
 	fieldTypes := layout.variantPayloadTypes[variant]
 
 	fieldCount := len(fieldTypes)
-	fieldsPtr := llvm.ConstNull(g.ptrTy)
-	if fieldCount > 0 {
-		fieldDescs := make([]llvm.Value, fieldCount)
-		for i, ft := range fieldTypes {
-			fieldDescs[i] = g.ctx.ConstStruct([]llvm.Value{
-				g.constStringValue(variantFieldName(variant, i)),
-				g.typeDescriptorFor(ft),
-				g.constFieldOffset(payloadTy, i),
-			}, false)
-		}
-		arrConst := llvm.ConstArray(g.fieldDescriptorTy, fieldDescs)
-		glob := llvm.AddGlobal(g.mod, arrConst.Type(), ".any.fields."+variant.Enum.Symbol.Name+"."+variant.Name)
-		glob.SetInitializer(arrConst)
-		glob.SetGlobalConstant(true)
-		glob.SetLinkage(llvm.PrivateLinkage)
-		fieldsPtr = glob
-	}
+	fieldsPtr := g.buildFieldTableGlobal(fieldCount, ".any.fields."+variant.Enum.Symbol.Name+"."+variant.Name, func(i int) (string, sema.Type, llvm.Value) {
+		return variantFieldName(variant, i), fieldTypes[i], g.constFieldOffset(payloadTy, i)
+	})
 
 	noElemDesc, noArrayLen, noElemSize := llvm.ConstNull(g.ptrTy), llvm.ConstInt(g.i32Ty, 0, false), llvm.ConstInt(g.i64Ty, 0, false)
 	globalName := ".any.desc." + variant.Enum.Symbol.Name + "." + variant.Name

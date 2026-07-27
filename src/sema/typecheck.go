@@ -520,6 +520,20 @@ func (c *checker) checkEnumDecl(decl ast.NodeIndex) {
 		return
 	}
 
+	if len(info.Order) == 0 {
+		// A zero-variant enum can never have a real value - even its own
+		// zero value has no legitimate variant to zero-init into (tag 0
+		// names nothing) - so every codegen path that switches on an
+		// enum's own discriminant (equality, hashing, printing, Any
+		// boxing) would build an unreachable-only switch with no real
+		// case, several of which construct a PHI node with zero incoming
+		// edges instead of a defined trap. Rejecting the declaration
+		// itself is simpler and more complete than hardening every one of
+		// those codegen sites individually.
+		c.errorAt(nameNode, "enum %s must declare at least one variant", c.tree.Text(nameNode))
+		return
+	}
+
 	for _, variantNode := range c.tree.EnumVariants(decl) {
 		variant := info.Variants[c.tree.Text(variantNode)]
 		if variant == nil {

@@ -131,3 +131,30 @@ first instead, since it doesn't carry this same unresolved scope question.
 Revisit this entry once there's a concrete answer - either from the user
 directly, or once a specific `Any`-lookup use case (e.g. JSON decode-by-type-name)
 makes one of the above answers obviously correct.
+
+## An enum's zero value can hold a null payload for a non-unit first variant
+
+`var s SomeEnum` (no initializer) zero-inits to discriminant 0 - the first
+declared variant - regardless of whether that variant is a unit variant or
+carries associated data. `enum Shape { Circle(f64), Point }` zero-initialized
+reports itself as `Circle` with a *null* payload pointer: reading its
+associated data (via `print(s)`, `AnyFields` after boxing, anything that
+dereferences the payload) is a real access violation, not a clean trap or a
+sensible zero value. Found (as a pre-existing gap, not introduced by any
+one round) while reviewing enum reflection - `print`/`==` already reach the
+same null-payload dereference through their own existing codegen, this
+isn't new to `Any`, just newly reachable through one more path.
+
+**Why this needs a human call, not a default:** several real fixes exist,
+each with different user-facing consequences this project hasn't decided
+between - require every enum-typed `var` to have an explicit initializer
+(closes the gap but changes a general declaration rule, not enum-specific),
+require an enum's first variant to be a unit variant (a real declaration-
+order constraint with no other motivation), or zero-init a non-unit first
+variant into some synthesized "empty" payload (extra runtime work for
+every enum, and still not obviously *correct* data to read for a `Circle`
+with no real radius).
+
+**Current default:** unfixed. An enum-typed `var` with no initializer and a
+non-unit first variant remains a real, reachable crash. Avoid this shape in
+generated `.llx` code (agents and examples) until decided.
