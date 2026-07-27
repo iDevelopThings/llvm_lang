@@ -1,0 +1,90 @@
+// type_match.llx - `match` over an `Any` value, where each arm names a TYPE
+// instead of an enum variant or a value (see LANGUAGE.md's "match" section's
+// "Type matching" subsection). Covers:
+//   - a `name Type` arm, binding the narrowed value
+//   - a bare `Type` arm, matching without binding
+//   - two different struct types as separate arms
+//   - an enum arm, matching whichever variant the value holds
+//   - a pointer arm, which matches any pointer at all
+//   - the mandatory wildcard `_` arm every type match requires
+//
+// Run with:
+//   .\llvmc.exe examples\type_match\type_match.llx
+//   echo $LASTEXITCODE   # (PowerShell) -> 42
+
+import "std:log"
+
+struct Point {
+    X int
+    Y int
+}
+
+struct Size {
+    W int
+    H int
+}
+
+enum Shape {
+    Circle(int)
+    Square
+}
+
+// describe renders any boxed value, dispatching on its own boxed type. The
+// binding in each arm has that arm's type - `p` below is a real Point, so
+// its fields are ordinary field accesses.
+func describe(a Any) string {
+    match a {
+        v int => {
+            return "int " + log.Format("%d", v)
+        }
+        v string => {
+            return "string " + v
+        }
+        p Point => {
+            return log.Format("Point(%d, %d)", p.X, p.Y)
+        }
+        s Size => {
+            return log.Format("Size(%d x %d)", s.W, s.H)
+        }
+        Shape => {
+            // No binding: this arm only cares that it IS a Shape. An enum
+            // arm matches whichever variant is live.
+            return "a shape"
+        }
+        *Point => {
+            // A pointer arm matches ANY pointer, whatever it points to -
+            // see docs/current-limitations.md.
+            return "a pointer"
+        }
+        _ => {
+            return "something else"
+        }
+    }
+}
+
+// score is the same dispatch used as an EXPRESSION - every arm yields a
+// value rather than returning one.
+func score(a Any) int {
+    return match a {
+        v int => v
+        v bool => 10
+        _ => 0
+    }
+}
+
+func main() int {
+    print(describe(Any(7)))                        // int 7
+    print(describe(Any("hello")))                  // string hello
+    print(describe(Any(Point{X: 1, Y: 2})))        // Point(1, 2)
+    print(describe(Any(Size{W: 3, H: 4})))         // Size(3 x 4)
+    print(describe(Any(Shape.Circle(5))))          // a shape
+    print(describe(Any(Shape.Square)))             // a shape
+
+    p := Point{X: 9, Y: 9}
+    print(describe(Any(&p)))                       // a pointer
+    print(describe(Any(1.5)))                      // something else
+
+    // score(Any(30))=30, score(Any(true))=10, score(Any("x"))=0,
+    // plus 2 -> 42, this program's own exit code.
+    return score(Any(30)) + score(Any(true)) + score(Any("x")) + 2
+}

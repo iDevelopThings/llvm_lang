@@ -321,10 +321,9 @@ func (p *Parser) parseMatchExpr() ast.NodeIndex {
 }
 
 // parseMatchExprArm parses one expression-mode match arm:
-// `pattern0, pattern1, ... => body` - the pattern-list grammar itself is
-// identical to parseMatchArm's own (see that function's own doc comment for
-// what each pattern shape can be), but body may now be either of two
-// surface shapes:
+// `pattern0, pattern1, ... => body` - the pattern list itself is the shared
+// parseMatchArmPatterns grammar (see parseMatchArmPattern for what each
+// pattern shape can be), but body may now be either of two surface shapes:
 //
 //   - a real brace-delimited block (`{ ... }`) - parsed via parseBlock,
 //     completely unchanged, and may contain `yield` anywhere inside, at any
@@ -342,13 +341,7 @@ func (p *Parser) parseMatchExpr() ast.NodeIndex {
 // wrapped expression's own span and no token of their own - there's no
 // `{`/`}`/`yield` keyword anywhere in the source for either to point at.
 func (p *Parser) parseMatchExprArm() ast.NodeIndex {
-	patterns := []ast.NodeIndex{p.parseExpr(precLowest)}
-	for {
-		if _, ok := p.accept(enums.Lexemes.Comma); !ok {
-			break
-		}
-		patterns = append(patterns, p.parseExpr(precLowest))
-	}
+	patterns := p.parseMatchArmPatterns()
 	p.expect(enums.Lexemes.FatArrow)
 
 	var body ast.NodeIndex

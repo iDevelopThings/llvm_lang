@@ -1333,17 +1333,64 @@ func (r *resolver) resolveMatchArm(scope *Scope, arm ast.NodeIndex) {
 //     declared into scope, not references to already-declared ones (the
 //     exact opposite of what resolveExpr's own CallExpr/CompositeLit cases
 //     assume).
+//
 //   - Anything else - a bare value expression (a literal, a variable/
 //     constant reference, or any other expression shape whose lexical head
 //     doesn't resolve to an enum type) - is now resolved through the
 //     ordinary resolveExpr reference-resolution path instead, introducing no
 //     fresh bindings at all, exactly like a plain switch-case value in Go.
 //
+//   - A type pattern (an Any match's `name Type`/`Type` arm - see
+//     LANGUAGE.md's "Type matching" section): the type resolves as a real
+//     type reference (resolveType), and a `name Type` form's own name is a
+//     fresh binding. Only the shapes the expression grammar can't produce
+//     reach their own cases here - one that merely names its type is
+//     indistinguishable from a value pattern until Check knows the subject's
+//     type, and resolves as an ordinary reference either way.
+//
 // The bare wildcard `_` (an Ident whose text is exactly "_") stays
 // special-cased exactly as before - resolved to nothing at all, neither a
 // binding nor a reference.
 func (r *resolver) resolvePattern(scope *Scope, pattern ast.NodeIndex) {
 	switch r.tree.Nodes[pattern].Kind {
+	case enums.NodeKinds.TypePattern:
+		// `name Type` (an Any match's type pattern - see LANGUAGE.md's "Type
+		// matching" section): the type is a real type reference, the name a
+		// fresh binding, exactly like a tuple-variant pattern's own.
+		name, typeNode := r.tree.TypePatternParts(pattern)
+		r.resolveType(scope, typeNode)
+		r.declarePatternBinding(scope, name)
+	case enums.NodeKinds.PointerType,
+		enums.NodeKinds.ArrayType,
+		enums.NodeKinds.MapType,
+		enums.NodeKinds.FuncType,
+		enums.NodeKinds.CFuncType:
+		// A bare type pattern with no binding, in a shape the expression
+		// grammar can't produce at all (`*T`, `[]T`, `map[K]V`) - a type
+		// pattern that merely names its type instead lands in the Ident/
+		// MemberExpr/IndexExpr cases, resolved as an ordinary reference.
+		r.resolveType(scope, pattern)
+	case enums.NodeKinds.BinaryExpr:
+		// `name * Type` parsed as an ordinary `Ident * Ident` BinaryExpr -
+		// genuinely ambiguous with multiplication (`y * y`) at the grammar
+		// level (see parser's parseMatchArmPattern doc comment), and Resolve
+		// can't wait for Check's subject-type dispatch to decide either,
+		// since ONE of the two readings needs `left` declared as a fresh
+		// binding and the OTHER needs it resolved as an existing reference -
+		// resolving it the wrong way either corrupts an ordinary value-match
+		// multiplication (shadowing the real operand with an empty binding)
+		// or leaves a genuine binding pattern's name undeclared. Decided the
+		// same way patternEnumVariantRef already decides the enum-vs-value
+		// ambiguity: a lexical peek at `right`, unambiguous because a
+		// same-named local variable already shadows an outer type name in
+		// ordinary scope lookup, so there's no real program where both
+		// readings are simultaneously plausible.
+		if left, right, ok := r.binaryPointerPatternParts(scope, pattern); ok {
+			r.resolveType(scope, right)
+			r.declarePatternBinding(scope, left)
+			return
+		}
+		r.resolveExpr(scope, pattern)
 	case enums.NodeKinds.Ident:
 		if r.tree.Text(pattern) == "_" {
 			return
@@ -1421,6 +1468,28 @@ func (r *resolver) patternEnumVariantRef(scope *Scope, n ast.NodeIndex) (*Symbol
 		return nil, false
 	}
 	return objSym, true
+}
+
+// binaryPointerPatternParts is resolvePattern's own peek for the `name *
+// Type` ambiguity (see its own BinaryExpr case) - patternEnumVariantRef's
+// identical style, applied to the analogous problem: right's name resolves
+// lexically like an ordinary reference would, and IsType() is checked
+// without recording anything, leaving the real resolution (resolveType/
+// declarePatternBinding, or resolveExpr for ordinary multiplication) to the
+// caller.
+func (r *resolver) binaryPointerPatternParts(scope *Scope, pattern ast.NodeIndex) (left, right ast.NodeIndex, ok bool) {
+	if r.tree.Nodes[pattern].Tok.Lexeme != enums.Lexemes.Asterisk {
+		return ast.InvalidNode, ast.InvalidNode, false
+	}
+	l, rr := r.tree.Child(pattern, 0), r.tree.Child(pattern, 1)
+	if r.tree.Nodes[l].Kind != enums.NodeKinds.Ident || r.tree.Nodes[rr].Kind != enums.NodeKinds.Ident {
+		return ast.InvalidNode, ast.InvalidNode, false
+	}
+	sym, found := scope.Lookup(r.tree.Text(rr))
+	if !found || !sym.Kind.IsType() {
+		return ast.InvalidNode, ast.InvalidNode, false
+	}
+	return l, rr, true
 }
 
 // resolveMemberPatternRef records n's own EnumName.Variant reference - given

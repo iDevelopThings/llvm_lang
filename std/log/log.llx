@@ -1,7 +1,8 @@
 // log.llx - std/log: printf-style formatted logging, built entirely on
 // ...Any variadics (implicit boxing - see LANGUAGE.md's "Variadic
-// parameters" section) and Any's own reflection builtins (AnyAs/AnyName/
-// AnyFields - see LANGUAGE.md's "Any" section).
+// parameters" section), type matching over Any (LANGUAGE.md's "Type
+// matching" section), and Any's own reflection builtins (AnyName/AnyFields -
+// see LANGUAGE.md's "Any" section).
 //
 // Format substitutes each %v/%s/%d/%f/%t verb in `format` (in order) with
 // its corresponding argument, rendered via this package's own universal
@@ -51,82 +52,49 @@ func Format(format string, args ...Any) string {
 }
 
 // stringifyAny renders any boxed value as a human-readable string,
-// dispatching on its own boxed kind - every scalar kind gets its natural
+// dispatching on its own boxed type (see LANGUAGE.md's "Type matching"
+// section) - every scalar kind gets its natural
 // formatting; a struct renders as "Name{field: value, ...}", each field
 // itself stringified the same way recursively (safe against a self-
 // referential struct - see LANGUAGE.md's "Any" section on why AnyFields
 // can't recurse through a pointer field). A struct with zero fields and a
 // boxed pointer both fall through to the same "<Name>" fallback below.
 func stringifyAny(a Any) string {
-    sv, sok := AnyAs[string](a)
-    if sok {
-        return sv
-    }
-    bv, bok := AnyAs[bool](a)
-    if bok {
-        if bv {
-            return "true"
+    match a {
+        v string => { return v }
+        v bool => {
+            if v {
+                return "true"
+            }
+            return "false"
         }
-        return "false"
-    }
-    iv, iok := AnyAs[int](a)
-    if iok {
-        return strings.IntToString(iv)
-    }
-    i8v, i8ok := AnyAs[i8](a)
-    if i8ok {
-        return strings.Int64ToString(i64(i8v))
-    }
-    i16v, i16ok := AnyAs[i16](a)
-    if i16ok {
-        return strings.Int64ToString(i64(i16v))
-    }
-    i64v, i64ok := AnyAs[i64](a)
-    if i64ok {
-        return strings.Int64ToString(i64v)
-    }
-    u8v, u8ok := AnyAs[u8](a)
-    if u8ok {
-        return strings.UInt64ToString(u64(u8v))
-    }
-    u16v, u16ok := AnyAs[u16](a)
-    if u16ok {
-        return strings.UInt64ToString(u64(u16v))
-    }
-    u32v, u32ok := AnyAs[u32](a)
-    if u32ok {
-        return strings.UInt64ToString(u64(u32v))
-    }
-    u64v, u64ok := AnyAs[u64](a)
-    if u64ok {
-        return strings.UInt64ToString(u64v)
-    }
-    f32v, f32ok := AnyAs[f32](a)
-    if f32ok {
-        return strings.F64ToString(f64(f32v))
-    }
-    f64v, f64ok := AnyAs[f64](a)
-    if f64ok {
-        return strings.F64ToString(f64v)
-    }
-    csv, csok := AnyAs[cstring](a)
-    if csok {
-        return string(csv)
-    }
-
-    fieldsStr := ""
-    fieldCount := 0
-    for name, fv := range AnyFields(a) {
-        if fieldCount > 0 {
-            fieldsStr = fieldsStr + ", "
+        v int => { return strings.IntToString(v) }
+        v i8 => { return strings.Int64ToString(i64(v)) }
+        v i16 => { return strings.Int64ToString(i64(v)) }
+        v i64 => { return strings.Int64ToString(v) }
+        v u8 => { return strings.UInt64ToString(u64(v)) }
+        v u16 => { return strings.UInt64ToString(u64(v)) }
+        v u32 => { return strings.UInt64ToString(u64(v)) }
+        v u64 => { return strings.UInt64ToString(v) }
+        v f32 => { return strings.F64ToString(f64(v)) }
+        v f64 => { return strings.F64ToString(v) }
+        v cstring => { return string(v) }
+        _ => {
+            fieldsStr := ""
+            fieldCount := 0
+            for name, fv := range AnyFields(a) {
+                if fieldCount > 0 {
+                    fieldsStr = fieldsStr + ", "
+                }
+                fieldsStr = fieldsStr + name + ": " + stringifyAny(fv)
+                fieldCount = fieldCount + 1
+            }
+            if fieldCount > 0 {
+                return AnyName(a) + "{" + fieldsStr + "}"
+            }
+            return "<" + AnyName(a) + ">"
         }
-        fieldsStr = fieldsStr + name + ": " + stringifyAny(fv)
-        fieldCount = fieldCount + 1
     }
-    if fieldCount > 0 {
-        return AnyName(a) + "{" + fieldsStr + "}"
-    }
-    return "<" + AnyName(a) + ">"
 }
 
 func Log(format string, args ...Any) {

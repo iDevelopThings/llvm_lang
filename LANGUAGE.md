@@ -793,7 +793,7 @@ print(d)   // Point
 
 ## match
 
-A **statement** (not an expression this round - see "Explicitly deferred" below) for dispatching on a value - either exhaustively, on an enum value's own active variant, destructuring its associated data (if any) into fresh local names scoped to the matching arm alone; or, this round's own generalization, Go-`switch`-style on a plain int/bool/string value's equality against each arm's own pattern(s). Which of the two applies is decided purely by the subject's own type - the grammar itself is identical either way:
+A **statement** (not an expression this round - see "Explicitly deferred" below) for dispatching on a value - exhaustively, on an enum value's own active variant, destructuring its associated data (if any) into fresh local names scoped to the matching arm alone; Go-`switch`-style, on a plain int/bool/string value's equality against each arm's own pattern(s); or, on an `Any` value's own boxed type (see "Type matching" below). Which of the three applies is decided purely by the subject's own type - the grammar itself is near-identical either way:
 
 ```go
 match shape {
@@ -830,7 +830,8 @@ Each pattern is one of:
 - `EnumName.Variant` (unit) - matches that variant, binding nothing.
 - `EnumName.Variant(binding0, binding1, ...)` (tuple) - matches that variant, binding each fresh local name positionally to the variant's own declared associated-data types, scoped to that arm's body only.
 - `EnumName.Variant{field0: binding0, ...}` (struct-style) - matches that variant, binding each named field to a fresh local name via an explicit `field: newLocalName` mapping, reusing the same keyed-composite-literal-style syntax construction uses.
-- **an ordinary value expression** (new this round) - a literal, a variable/constant reference, or any other expression - checked for equality against the subject, exactly like a plain switch-case value in Go. Only legal when the subject itself is a value-match subject (see "Value matching" below), never alongside an enum subject.
+- **an ordinary value expression** - a literal, a variable/constant reference, or any other expression - checked for equality against the subject, exactly like a plain switch-case value in Go. Only legal when the subject itself is a value-match subject (see "Value matching" below), never alongside an enum subject.
+- **a type**, either `name Type` (binding the narrowed value) or a bare `Type` - only legal when the subject is an `Any` (see "Type matching" below).
 - the wildcard `_` - matches anything not otherwise covered by an earlier arm, binding nothing. Always a lone pattern on its own arm - never combined with any other pattern in the same comma-separated list.
 
 Each arm's body is an ordinary `Block` (braces). Control simply exits the whole `match` after one arm's body finishes running - **no fallthrough, no explicit `break` needed**, unlike C's `switch`.
@@ -905,6 +906,61 @@ match x {
     _ => { }
 }
 ```
+
+### Type matching
+
+The third subject kind: when the subject's own static type is `Any` (see "Any" below), each arm names a **type** instead of an enum variant or a value, optionally binding the narrowed value:
+
+```go
+func stringify(a Any) string {
+    match a {
+        v int => {
+            return itoa(v)
+        }
+        v string => {
+            return v
+        }
+        Point => {
+            return "a point"
+        }
+        _ => {
+            return "unknown"
+        }
+    }
+}
+```
+
+Each arm's pattern is `name Type` (binds the narrowed value to a fresh local, scoped to that arm's body alone) or a bare `Type` (matches, binding nothing). Any type expression works - a primitive, a struct, an enum, a generic instantiation (`Pair[int, string]`), a pointer, a map, an array.
+
+The rules:
+
+- **A wildcard `_` arm is MANDATORY**, exactly as for a value match: `Any`'s own space of boxed types is open-ended, so no set of arms is ever exhaustive.
+- **Exactly one type per arm** - `int, string => { ... }` is a clean diagnostic ("an Any match arm may name only one type"), mirroring the identical enum-match restriction for the identical reason: one shared arm body can't type its binding as two types at once.
+- **Every named type must be one `Any` could actually hold** (see "Any" below for which types are boxable) - an arm naming a function type, say, is dead code, and is rejected with "match arm: `<type>` can never have been boxed into Any".
+- **No two arms may name the same type.** Unlike a value match's best-effort duplicate-literal detection, this is a hard guarantee - a type is always known at compile time. `int` and `i32` are the same type spelled two ways, and are caught as a duplicate.
+
+An **enum-typed arm** names the enum type itself, never one of its variants, and matches whichever variant the boxed value actually holds. Destructuring that variant is a separate, ordinary enum `match` on the bound value:
+
+```go
+match a {
+    s Shape => {
+        match s {
+            Shape.Circle(r) => { yield r }
+            Shape.Point => { yield 0.0 }
+        }
+    }
+    _ => { yield -1.0 }
+}
+```
+
+A **pointer-typed arm matches any pointer**, whatever its pointee type: every pointer boxed into `Any` shares one type identity, so `v *Point` also matches a boxed `*int` (see `docs/current-limitations.md`). The same is true for a map arm and its key/value types. Two arms differing only in pointee (or in a map's key/value types) are therefore not duplicates, but the earlier one always wins.
+
+Two grammar notes, both consequences of a type pattern being written with no operator between the name and the type:
+
+- `name *Something` (both sides bare names) parses as an ordinary multiplication expression, exactly like `x * y` always has - it's disambiguated afterward, not by the grammar: it reads as a pointer-typed binding only when matching an `Any` subject *and* the name after `*` actually names a declared type, so an ordinary value match's own `base * y` keeps meaning multiplication regardless of what else is in scope. A leading `*` with no name before it (`*Point`, no binding) is always a pointer type, never a deref - that shape has no value-pattern reading to preserve.
+- An arm binding a **fixed**-size array (`v [3]int`) is not expressible - `name [` is read as a generic instantiation. The bare form (`[3]int => { ... }`) works, as does a binding on a dynamic array (`v []int`).
+
+A type pattern used against a non-`Any` subject is a clean "a type pattern is only legal when matching an Any value" diagnostic.
 
 ### `match` as an expression
 

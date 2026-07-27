@@ -57,8 +57,12 @@ rejection rules live in [`LANGUAGE.md`](../LANGUAGE.md).
 ## `Any` and reflection
 
 - Functions, C callbacks, and non-copyable values cannot be boxed.
-- Maps expose no entries. `AnyAs[MapType]` confirms only that the value is a
-  map, not its key and value types.
+- Maps expose no entries. `AnyAs[MapType]` and a `map[K]V` match arm confirm
+  only that the value is a map, not its key and value types. Pointers are
+  the same: `AnyAs[*Point]` and a `*Point` match arm accept any pointer,
+  whatever it points to.
+- A type-match arm cannot bind a fixed-size array (`v [3]int`); use the
+  unbound form (`[3]int => { ... }`). Dynamic arrays (`v []int`) bind fine.
 - A directly boxed enum exposes its active payload. An enum reached as a
   struct field or array element reports no payload fields; recover it with
   `AnyAs[EnumType]` and box that enum directly before inspecting its payload.

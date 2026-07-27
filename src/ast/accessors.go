@@ -566,6 +566,52 @@ func (t *Tree) IsWildcardMatchArm(arm NodeIndex) bool {
 	return len(patterns) == 1 && t.Nodes[patterns[0]].Kind == enums.NodeKinds.Ident && t.Text(patterns[0]) == "_"
 }
 
+// TypePatternParts decomposes a match arm's own type pattern (see
+// LANGUAGE.md's "Type matching" section) into its optional fresh binding
+// name and the node its narrowed type is computed from: a TypePattern
+// node's own two children for the `name Type` form; a `name * Type` shape
+// parsed as an ordinary BinaryExpr (both sides bare identifiers - the one
+// pattern shape parseMatchArmPattern deliberately leaves ambiguous with
+// multiplication, `x * y`, rather than committing to either reading at parse
+// time - see that function's own doc comment), returning (name, pattern)
+// since there's no separate type-only child node to point at - sema resolves
+// the pointer type from the pattern itself (checkTypeMatchArmPattern) and
+// records it there for every other consumer (codegen, LSP) to find the same
+// way; or (InvalidNode, pattern) for the bare `Type` form, where the type
+// node IS the whole pattern.
+func (t *Tree) TypePatternParts(pattern NodeIndex) (name, typeNode NodeIndex) {
+	if t.Nodes[pattern].Kind == enums.NodeKinds.TypePattern {
+		return t.Child(pattern, 0), t.Child(pattern, 1)
+	}
+	if t.Nodes[pattern].Kind == enums.NodeKinds.BinaryExpr && t.Nodes[pattern].Tok.Lexeme == enums.Lexemes.Asterisk {
+		left, right := t.Child(pattern, 0), t.Child(pattern, 1)
+		if t.Nodes[left].Kind == enums.NodeKinds.Ident && t.Nodes[right].Kind == enums.NodeKinds.Ident {
+			return left, pattern
+		}
+	}
+	return InvalidNode, pattern
+}
+
+// IsTypeOnlyPattern reports whether pattern can ONLY be a type pattern - a
+// `name Type` TypePattern, or a type-position node with no expression
+// reading at all (`*T`, `[]T`, `map[K]V`, ... - see parseMatchArmPattern). A
+// pattern that merely *names* a type (a bare Ident/MemberExpr/IndexExpr) is
+// deliberately excluded: it's indistinguishable from an enum-variant or
+// value pattern until the match subject's own type is known.
+func (t *Tree) IsTypeOnlyPattern(pattern NodeIndex) bool {
+	switch t.Nodes[pattern].Kind {
+	case enums.NodeKinds.TypePattern,
+		enums.NodeKinds.PointerType,
+		enums.NodeKinds.ArrayType,
+		enums.NodeKinds.MapType,
+		enums.NodeKinds.FuncType,
+		enums.NodeKinds.CFuncType:
+		return true
+	default:
+		return false
+	}
+}
+
 // MultiAssignStmtTargets returns n's (a MultiAssignStmt's) leading lvalue
 // target children - every child except the last (see Node's own
 // MultiAssignStmt doc comment for the [target0, ..., targetN, call] shape

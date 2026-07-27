@@ -47,6 +47,7 @@ dedicated example yet.
 | Enums and payloads | [Enums](enums.md) | [`enums`](../examples/enums/enums.llx) |
 | Enum and multi-pattern value matches | [`match`](match.md) | [`match_values`](../examples/match_values/match_values.llx) |
 | Match expressions and `yield` | [`match`](match.md#match-expressions) | [`match_expr`](../examples/match_expr/match_expr.llx) |
+| Type matching over `Any` | [`match`](match.md#matching-types) | [`type_match`](../examples/type_match/type_match.llx) |
 | Destructors and scope cleanup | [Ownership](ownership.md) | [`destructors`](../examples/destructors/destructors.llx) |
 | Non-copyable values and `move` | [Ownership](ownership.md#transfer-with-move) | — |
 | Pointers, `nil`, `new`, and `delete` | [Pointers](pointers.md) | [`pointers`](../examples/pointers/pointers.llx) |

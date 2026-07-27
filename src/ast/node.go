@@ -407,6 +407,17 @@ type Span struct {
 //     Block whose every reachable path must yield") regardless of which
 //     surface form the user actually wrote - see YieldStmt's own doc
 //     comment above.
+//     One further pattern shape exists for an `Any` subject (LANGUAGE.md's
+//     "Type matching" section): a type pattern, either a bare type-position
+//     node (an Ident/MemberExpr/IndexExpr naming one, or a PointerType/
+//     ArrayType/MapType), or - when it binds the narrowed value - a
+//     TypePattern node wrapping both.
+//   - TypePattern: [name, type] - fixed arity, a match arm's `name Type`
+//     type pattern (LANGUAGE.md's "Type matching" section). name is a fresh
+//     binding Ident, declared into the arm's own scope exactly like an
+//     enum tuple-variant pattern's bindings; type is an ordinary
+//     type-position node. The binding-less `Type` form needs no node of its
+//     own - the type node itself is the whole pattern.
 //   - MultiAssignStmt: [target0, target1, ..., targetN, value] - the
 //     assignment-form counterpart to MultiShortVarDecl, identical shape:
 //     every child except the last is an already-existing lvalue target

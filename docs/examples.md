@@ -43,6 +43,7 @@ Run a multi-file example by passing its directory:
 | [`enums`](../examples/enums/enums.llx) | Tagged unions, methods, and exhaustive matching |
 | [`match_values`](../examples/match_values/match_values.llx) | Matching integers, strings, and booleans |
 | [`match_expr`](../examples/match_expr/match_expr.llx) | Matches that produce values |
+| [`type_match`](../examples/type_match/type_match.llx) | Matching the type inside an `Any` |
 
 ## Functions and generic code
 

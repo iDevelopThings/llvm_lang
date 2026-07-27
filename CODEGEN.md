@@ -1611,11 +1611,21 @@ reference actually resolve to a declared enum type):
   each binding is declared directly into that arm's own child scope
   (`declarePatternBinding`, the same `Scope.Define`-based mechanism an
   ordinary `ShortVarDecl`'s own name already goes through).
-- **Anything else** (new this round - see `LANGUAGE.md`'s "Value matching"
-  section) - a bare literal, a variable/constant reference, or any other
-  expression shape - is instead routed straight through the ordinary
-  `resolveExpr` reference-resolution path, introducing no fresh bindings at
-  all.
+- **Anything else** (see `LANGUAGE.md`'s "Value matching" section) - a bare
+  literal, a variable/constant reference, or any other expression shape - is
+  instead routed straight through the ordinary `resolveExpr`
+  reference-resolution path, introducing no fresh bindings at all.
+- **A type pattern** (see `LANGUAGE.md`'s "Type matching" section) - the one
+  pattern shape with grammar of its own, since `v int` isn't expressible as
+  an expression at all (`parseMatchArmPattern`, `parser/stmt.go`). A
+  `name Type` binding becomes a `TypePattern` node whose type child resolves
+  via `resolveType` and whose name is declared like any other pattern
+  binding; a bare type needs no wrapper node, and only reaches its own
+  resolution path when its shape can't be an expression (`*T`, `[]T`,
+  `map[K]V`) - one that merely names a type is indistinguishable from a
+  value pattern until `Check` knows the subject's type, and resolves as an
+  ordinary reference either way. `ast.Tree.TypePatternParts` is the single
+  decomposition every later pass uses.
 
 `sema.Check`'s own `checkMatchArmPattern` mirrors the enum-pattern half of
 this split: it resolves the pattern against the matched enum's own
@@ -1685,11 +1695,25 @@ keyed by (node kind, raw source text) - only a bare `NumberLit`/`StringLit`/
 `BoolLit` pattern is ever compared this way; anything computed is silently
 skipped, since its actual value isn't known until runtime.
 
-### `match` codegen: two lowering strategies, dispatched by subject type
+### Type-match type checking (`checkTypeMatchStmt`, `sema/typecheck.go`)
+
+Each arm's pattern resolves to a real `Type` through the ordinary
+`typeFromNode` path (`checkTypeMatchArmPattern`), so no type-resolution
+logic is invented here either; the binding, if present, is seeded exactly
+like an enum tuple-variant pattern's own (`seedPatternBinding`). On top of
+that: a mandatory wildcard (the value-match rule verbatim, for the same
+reason), one type per arm (the enum-match rule verbatim), every named type
+`isBoxableIntoAny` (reusing the same predicate `Any(x)`/`AnyAs[T]` do), and
+a **hard** duplicate check by `Type.Equal` - unlike the value path's
+best-effort literal dedupe, a type is always statically known. A pattern
+that names something real but not a type (a variable) is caught here rather
+than by `Resolve`, which can't know the subject is an `Any`.
+
+### `match` codegen: three lowering strategies, dispatched by subject type
 
 `genMatchStmt` (`enum.go`) type-checks the subject's own type first
 (mirroring `checkMatchStmt`'s identical dispatch one layer up) and routes to
-one of two genuinely different lowering functions, kept deliberately
+one of three genuinely different lowering functions, kept deliberately
 separate rather than tangled into one - a value pattern's own runtime
 equality simply isn't a compile-time-constant discriminant the way an enum
 variant's is, so it needs a different lowering shape entirely:
@@ -1731,6 +1755,25 @@ the way the enum path needs one. Applies the identical
 `snapshotDestructors`/`restoreDestructors` discipline the enum path (and
 `genIfStmt`) already use, at every arm and once more after the whole
 statement.
+
+**`Any` subject - a `switch` on the boxed descriptor's runtime kind
+(`genTypeMatchStmt`, `any.go`).** The subject is evaluated once, its
+descriptor's kind field loaded once (offset 0 - the same direct load
+`genAnyKindCall` does), and fed to a real LLVM `switch`, one case per
+*distinct kind* any arm names, defaulting to the mandatory wildcard's own
+block (sema's `checkTypeMatchStmt` guarantees it exists, so there is no
+`unreachable` default here either). A kind alone doesn't identify a type
+whenever several arms share one - two different structs both report
+`TypeStruct` - so a bucket holding more than one arm, or one whose kind
+carries descriptor identity at all (struct/array/enum), instead runs a
+short-circuit chain of `anyDescMatches` tests inside its own case, falling
+through to the wildcard when none match. `anyDescMatches` is reused
+verbatim from `AnyAs`/`AnySet`, including its per-variant descriptor set
+for an enum arm (so such an arm matches whichever variant is live) and its
+deliberate lack of a per-pointee check for a pointer arm. An arm's binding
+loads the boxed value out of `dataPtr` only on its own matching branch, for
+exactly the reason `genAnyAsCall` documents: a mismatched box may hold
+fewer bytes than the arm's type.
 
 ### `match` as an expression: a shared `frame`, one `phi` at the merge block
 

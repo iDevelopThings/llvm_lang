@@ -13,7 +13,8 @@ if ok {
 ```
 
 `AnyAs[T]` always needs an explicit type argument. A failed conversion
-returns `T`'s zero value and `false`.
+returns `T`'s zero value and `false`. To branch over several types at once,
+match on the value instead - see [Matching types](match.md#matching-types).
 
 Boxing supports numbers, booleans, strings, pointers, structs, enums, fixed
 and dynamic arrays, and maps. Functions, C callbacks, and non-copyable values

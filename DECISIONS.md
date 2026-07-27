@@ -2493,3 +2493,57 @@ the language has no writable parameterized coroutine-handle type.
 **Status:** shipped (parser/ast/sema/loader + `std/stubs.llx` + LANGUAGE.md +
 `src/lsp/stub_test.go`). Plugin consumption is a separate round in the
 JetBrains plugin repo.
+
+## 2026-07-27 - Type matching over `Any`: a genuinely new pattern shape, `name Type`
+
+`match` gained a third subject kind - an `Any` value, whose arms name types
+(`v int => ...`, or a bare `int => ...`).
+
+**Why this needed new grammar, unlike every earlier match round:** every
+pattern shape so far reused `parseExpr` verbatim, because each doubles as a
+legal construction or value expression. `v int` has no operator between its
+two tokens, so no expression grammar produces it. It's spelled that way
+anyway, rather than a zero-new-grammar `int(v)` or Go's `case int v:`,
+because this language puts the name before the type everywhere else it binds
+one (a parameter, a field, a `var`); `Type(name)` would have read as a call
+and been the odd one out.
+
+A leading `*`/`[`/`map` (no name before it) is unambiguously a type - the
+expression grammar never starts a pattern that way. `name * T` (both sides
+bare names) IS genuinely ambiguous with multiplication, and no fixed amount
+of lookahead resolves it (a review caught an earlier version pre-deciding
+this at parse time, which broke ordinary value-match multiplication for any
+RHS beyond a bare name - ranging from misparsing to blowing the parser's
+error budget). Fixed by leaving the grammar itself ambiguous, like every
+earlier match round's patterns: `parseMatchArmPattern` parses `name * T` as
+an ordinary `BinaryExpr`, and Resolve decides which reading applies with a
+lexical peek at the right-hand name (`resolver.binaryPointerPatternParts`,
+mirroring `patternEnumVariantRef`'s identical trick for the enum-vs-value
+ambiguity) - a pointer-type binding only when that name resolves to a
+declared type, ordinary multiplication otherwise. Check's own
+`typeMatchArmType` re-checks the same fact via `Info.Refs` instead of
+re-deriving it, so the two passes can't disagree. `name [` stays a generic
+instantiation (`Pair[int, string]`), so a *fixed*-size array arm has no
+binding form - a dynamic one (`v []int`) does, decided by the token after
+`[`. A type pattern reaching a non-`Any` match is rejected outright.
+
+**Accepted imprecision: a pointer-typed arm matches ANY pointer**,
+regardless of pointee. Not new to matching - every pointer boxed into `Any`
+shares one interned descriptor (the same imprecision class a boxed map's
+key/value types already have), and the per-arm predicate is `anyDescMatches`,
+reused verbatim from `AnyAs`/`AnySet`. Fixing it means per-pointee pointer
+descriptors: a change to boxing, not to matching.
+
+**Lowering:** one load of the boxed descriptor's kind, then a real LLVM
+`switch` on it, defaulting to the mandatory wildcard; a bucket whose kind
+several arms share (two structs, two enums) runs a short-circuit
+`anyDescMatches` chain inside its own case - see `genTypeMatchStmt`
+(`src/codegen/any.go`).
+
+**Status:** shipped. `std/log`'s `stringifyAny` - the motivating use case -
+is now one type match instead of a 13-deep `AnyAs[T]` chain, its own tests
+unchanged and passing. Parser/sema/codegen/LSP coverage added
+(`typematch_test.go` in each), invalid paths included: missing wildcard,
+duplicate type (`int` vs `i32` too), unboxable arm type, multi-type arm,
+value pattern, non-type name, and a type pattern in an enum/value match.
+`LANGUAGE.md`, `CODEGEN.md`, `docs/`, and `examples/type_match/` updated.

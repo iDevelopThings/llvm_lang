@@ -452,10 +452,11 @@ func (g *Generator) genPrintEnumVariant(variant *sema.EnumVariant, payload llvm.
 
 // genMatchStmt lowers a `match subject { pattern => body, ... }` (see
 // LANGUAGE.md's "match" section), dispatching on the subject's own type to
-// one of two genuinely different lowering strategies (see CODEGEN.md's
+// one of three genuinely different lowering strategies (see CODEGEN.md's
 // "match codegen" section): an enum subject gets a real LLVM `switch` on
-// its compile-time-constant discriminant (this function, below - unchanged
-// from before this round), while a plain scalar (int/bool/string) subject
+// its compile-time-constant discriminant (this function, below), an Any
+// subject is routed to genTypeMatchStmt (a switch on the boxed descriptor's
+// runtime kind - any.go), while a plain scalar (int/bool/string) subject
 // is routed to genValueMatchStmt instead - a value pattern isn't a
 // compile-time-constant discriminant LLVM's `switch` instruction needs, so
 // it needs a genuinely different runtime-comparison-chain lowering, kept in
@@ -494,6 +495,9 @@ func (g *Generator) genMatchStmt(n ast.NodeIndex, frame *matchExprCodegenCtx) bo
 		enumType = *enumType.Elem
 	}
 	if enumType.Kind != sema.TypeEnum {
+		if subjType.Kind == sema.TypeAny {
+			return g.genTypeMatchStmt(n, frame)
+		}
 		return g.genValueMatchStmt(n, subjType, frame)
 	}
 

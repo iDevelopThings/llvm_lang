@@ -77,6 +77,7 @@ const (
 	NodeKindTypeParamList     NodeKind = 61
 	NodeKindTypeArgList       NodeKind = 62
 	NodeKindTestBlockDecl     NodeKind = 63
+	NodeKindTypePattern       NodeKind = 64
 )
 
 type NodeKindContainer struct {
@@ -144,6 +145,7 @@ type NodeKindContainer struct {
 	TypeParamList     NodeKind
 	TypeArgList       NodeKind
 	TestBlockDecl     NodeKind
+	TypePattern       NodeKind
 }
 
 // NodeKinds is the entry point for the NodeKind enum.
@@ -212,6 +214,7 @@ var NodeKinds = NodeKindContainer{
 	TypeParamList:     NodeKindTypeParamList,
 	TypeArgList:       NodeKindTypeArgList,
 	TestBlockDecl:     NodeKindTestBlockDecl,
+	TypePattern:       NodeKindTypePattern,
 }
 
 // NodeKindInfo is the static metadata attached to a NodeKind.
@@ -477,6 +480,10 @@ var nodeKindInfos = map[NodeKind]NodeKindInfo{
 		NodeKind: NodeKindTestBlockDecl,
 		Name:     "TestBlockDecl",
 	},
+	NodeKindTypePattern: {
+		NodeKind: NodeKindTypePattern,
+		Name:     "TypePattern",
+	},
 }
 
 var nodeKindValues = []NodeKind{
@@ -544,6 +551,7 @@ var nodeKindValues = []NodeKind{
 	NodeKindTypeParamList,
 	NodeKindTypeArgList,
 	NodeKindTestBlockDecl,
+	NodeKindTypePattern,
 }
 
 var nodeKindByName = map[string]NodeKind{
@@ -611,6 +619,7 @@ var nodeKindByName = map[string]NodeKind{
 	"typeparamlist":     NodeKindTypeParamList,
 	"typearglist":       NodeKindTypeArgList,
 	"testblockdecl":     NodeKindTestBlockDecl,
+	"typepattern":       NodeKindTypePattern,
 }
 
 // Values returns every declared value in declaration order.

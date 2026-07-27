@@ -72,3 +72,4 @@ values:
   - name: TypeParamList
   - name: TypeArgList
   - name: TestBlockDecl
+  - name: TypePattern

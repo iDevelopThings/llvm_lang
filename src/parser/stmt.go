@@ -845,29 +845,15 @@ func (p *Parser) parseMatchStmt() ast.NodeIndex {
 
 // parseMatchArm parses one `pattern0, pattern1, ... => { body }` arm - a
 // comma-separated list of one or more patterns (Go's own `case a, b, c:`
-// multi-value-per-arm shape), each parsed with the ordinary expression
-// grammar (parseExpr): a wildcard `_` (a bare Ident), a unit-variant pattern
-// (a MemberExpr), a tuple-variant pattern (a CallExpr whose "arguments" are
-// fresh binding names), a struct-variant pattern (a CompositeLit whose keyed
-// elements' values are fresh binding names), or - new this round - an
-// ordinary value expression (a literal, a variable reference, ...) - see
-// ast.Node's own MatchArm doc comment for why none of this needs any new
-// expression-parsing grammar at all: every one of these shapes already
-// parses via CallExpr/CompositeLit/MemberExpr/any-other-expression's own
-// existing grammar, since a pattern's own shape is deliberately identical to
-// either a variant's own construction expression or a plain value
-// expression. This grammar itself makes no attempt to restrict how many
-// patterns an arm may have (an enum-match arm's "exactly one pattern" rule
-// is sema's job - checkEnumMatchStmt - since the grammar has no notion yet
-// of whether the enclosing match's subject is an enum or a plain value).
+// multi-value-per-arm shape), each parsed by parseMatchArmPattern. Almost
+// every pattern shape is an ordinary expression, deliberately identical to
+// either a variant's own construction expression or a plain value one - see
+// ast.Node's own MatchArm doc comment. This grammar makes no attempt to
+// restrict how many patterns an arm may have (an enum-match arm's "exactly
+// one pattern" rule is sema's job - checkEnumMatchStmt - since the grammar
+// has no notion yet of what the enclosing match's subject even is).
 func (p *Parser) parseMatchArm() ast.NodeIndex {
-	patterns := []ast.NodeIndex{p.parseExpr(precLowest)}
-	for {
-		if _, ok := p.accept(enums.Lexemes.Comma); !ok {
-			break
-		}
-		patterns = append(patterns, p.parseExpr(precLowest))
-	}
+	patterns := p.parseMatchArmPatterns()
 	p.expect(enums.Lexemes.FatArrow)
 	body := p.parseBlock()
 
@@ -877,4 +863,121 @@ func (p *Parser) parseMatchArm() ast.NodeIndex {
 	}
 	children := append(patterns, body)
 	return p.tree.NewNode(enums.NodeKinds.MatchArm, lexer.Token{}, span, children...)
+}
+
+// parseMatchArmPatterns parses an arm's own comma-separated pattern list -
+// shared verbatim by the statement- and expression-position arm grammars
+// (parseMatchArm/parseMatchExprArm), which differ only in their body shape.
+func (p *Parser) parseMatchArmPatterns() []ast.NodeIndex {
+	patterns := []ast.NodeIndex{p.parseMatchArmPattern()}
+	for {
+		if _, ok := p.accept(enums.Lexemes.Comma); !ok {
+			break
+		}
+		patterns = append(patterns, p.parseMatchArmPattern())
+	}
+	return patterns
+}
+
+// parseMatchArmPattern parses one match-arm pattern. Every enum-variant and
+// plain-value pattern shape is an ordinary expression (parseExpr - see
+// parseMatchArm), and so is a type pattern that merely names a type
+// (`int`, `Point`, `Pair[int, string]`): sema decides which it is, from the
+// subject's own type. The two shapes that genuinely need type grammar here
+// are an `Any` match's type patterns (LANGUAGE.md's "Type matching"
+// section):
+//
+//   - `name Type` - a binding, wrapped in a TypePattern node. An identifier
+//     followed by a plain identifier (or the `map` keyword) is recognized by
+//     one-token lookahead (atTypePatternBinding) - nothing in the expression
+//     grammar juxtaposes two bare names that way. `name *Type` is NOT
+//     resolved here at all: no fixed amount of lookahead past the `*` can
+//     tell `base *Point` apart from the ordinary multiplication `base * y`
+//     in general (`base * g()`, `base * (b+c)`, ... are unambiguous, but
+//     only because of what comes arbitrarily far after the `*`, not because
+//     of the `*` itself) - so this shape is left to parseExpr, producing an
+//     ordinary `BinaryExpr` exactly as multiplication always has, and it's
+//     sema, not the parser, that reinterprets an `Ident * Ident` arm pattern
+//     as a pointer-type binding when (and only when) the enclosing match's
+//     subject is actually `Any` (see checkTypeMatchArmPattern) - a plain
+//     value-match arm like `y * y` keeps meaning multiplication, unchanged.
+//   - a bare type whose own leading token can't start a nameable type
+//     (`[]T`, `[N]T`, `map[K]V`) - parsed straight through parseTypeExpr, no
+//     wrapper node needed since the type node IS the pattern. `[`/`map` can
+//     only ever begin a type (atTypeOnlyStart), apart from an array literal,
+//     which is still handled below exactly as parseIndexExpr handles the
+//     same ambiguity. A leading bare `*` (`*Point`, `*p`) is likewise always
+//     the pointer type, never a deref value pattern (LANGUAGE.md's "Type
+//     matching" section) - unlike `name *Type`, this shape has no
+//     legitimate ambiguity to preserve: parseExpr never begins a pattern
+//     with `*` for a genuinely different reason (a deref used bare as a
+//     value-match pattern was never a documented, tested shape), so this one
+//     case is simple to just always resolve as a type.
+func (p *Parser) parseMatchArmPattern() ast.NodeIndex {
+	switch {
+	case p.atTypeOnlyStart(), p.at(enums.Lexemes.Asterisk):
+		typ := p.parseTypeExpr()
+		if p.atCompositeLitBody() {
+			// `[3]int{1, 2, 3}` - an array literal used as a value pattern,
+			// not a type pattern; from here it's an ordinary expression again.
+			return p.continueExpr(p.finishCompositeLit(typ), precLowest)
+		}
+		return typ
+
+	case p.atTypePatternBinding():
+		return p.finishTypePatternBinding(p.expectIdent())
+
+	case p.at(enums.Lexemes.Identifier) && p.lex.Peek().Lexeme == enums.Lexemes.LeftBracket:
+		// `name []T` or a generic instantiation used as a bare type pattern
+		// (`Pair[int, string]`) - told apart only by the token after `[`,
+		// one further than the available lookahead, so the name is consumed
+		// first and the expression reading resumed from it when it turns out
+		// not to be a binding after all.
+		nameTok := p.tok
+		p.advance()
+		if p.lex.Peek().Lexeme == enums.Lexemes.RightBracket {
+			return p.finishTypePatternBinding(nameTok)
+		}
+		return p.continueExpr(p.tree.NewNode(enums.NodeKinds.Ident, nameTok, tokenSpan(nameTok)), precLowest)
+
+	default:
+		return p.parseExpr(precLowest)
+	}
+}
+
+// finishTypePatternBinding builds a `name Type` TypePattern, with nameTok's
+// own identifier already consumed and the parser positioned at the type.
+func (p *Parser) finishTypePatternBinding(nameTok lexer.Token) ast.NodeIndex {
+	name := p.tree.NewNode(enums.NodeKinds.Ident, nameTok, tokenSpan(nameTok))
+	typ := p.parseTypeExpr()
+	span := ast.Span{
+		Start: nameTok.Start,
+		End:   p.tree.SpanOf(typ).End,
+	}
+	return p.tree.NewNode(enums.NodeKinds.TypePattern, lexer.Token{}, span, name, typ)
+}
+
+// atTypePatternBinding reports whether the parser sits on the leading
+// identifier of a `name Type` type pattern (see parseMatchArmPattern) -
+// decided by the token after it: a plain identifier (or the `map` keyword)
+// there can never continue an expression, so the pattern must be a binding.
+// `name *Type` is NOT decided here at all - no fixed amount of lookahead
+// past the `*` can tell it apart from multiplication in general (`base * y`
+// alone is genuinely ambiguous; `base * g()` isn't, but only because of what
+// comes after `g`, arbitrarily far ahead) - see
+// rewrapAsPointerTypePatternIfAmbiguous, which resolves it after the fact
+// instead. A leading `[` needs more lookahead than this function has to
+// give (a generic instantiation vs. a slice-type binding), and is handled by
+// parseMatchArmPattern directly.
+func (p *Parser) atTypePatternBinding() bool {
+	if !p.at(enums.Lexemes.Identifier) {
+		return false
+	}
+	next := p.lex.Peek()
+	switch next.Lexeme {
+	case enums.Lexemes.Identifier:
+		return true
+	default:
+		return false
+	}
 }

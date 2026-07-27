@@ -5,6 +5,7 @@ package sema
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -2019,6 +2020,29 @@ func (c *checker) typeFromNode(n ast.NodeIndex) Type {
 	return t
 }
 
+// isTypePositionShape reports whether kind is a node shape computeTypeFromNode
+// can read a real type out of - keep the two in sync. Used where a type node
+// arrives from a position that also admits value expressions (a type-match
+// arm's own pattern), so "this isn't a type at all" needs its own diagnostic
+// rather than a silent invalidType.
+func isTypePositionShape(kind enums.NodeKind) bool {
+	switch kind {
+	case enums.NodeKinds.Ident,
+		enums.NodeKinds.MemberExpr,
+		enums.NodeKinds.IndexExpr,
+		enums.NodeKinds.ArrayType,
+		enums.NodeKinds.MapType,
+		enums.NodeKinds.PointerType,
+		enums.NodeKinds.FuncType,
+		enums.NodeKinds.CFuncType,
+		enums.NodeKinds.MultiReturnType,
+		enums.NodeKinds.YieldReturnType:
+		return true
+	default:
+		return false
+	}
+}
+
 func (c *checker) computeTypeFromNode(n ast.NodeIndex) Type {
 	switch c.tree.Nodes[n].Kind {
 	case enums.NodeKinds.Ident, enums.NodeKinds.MemberExpr:
@@ -3228,9 +3252,10 @@ func (c *checker) checkMatchExprArmBody(body ast.NodeIndex) {
 
 // checkMatchDispatch is checkMatchStmt/checkMatchExprStmt's own shared
 // dispatch core (see LANGUAGE.md's "match" section) - dispatching on the
-// subject's own resolved type to one of two genuinely different checked
+// subject's own resolved type to one of three genuinely different checked
 // shapes - an enum value (checkEnumMatchStmt, the original exhaustiveness-
-// checked feature) or a plain scalar value (checkValueMatchStmt, the
+// checked feature), an Any value (checkTypeMatchStmt, whose arms name types
+// rather than values), or a plain scalar value (checkValueMatchStmt, the
 // Go-`switch`-style generalization - see isValueMatchType). The subject may
 // be an enum value directly, or a pointer to one (`this` inside a method -
 // see checkThisExpr) - auto-dereferenced here, the same auto-deref every
@@ -3293,6 +3318,11 @@ func (c *checker) checkMatchDispatch(n ast.NodeIndex, checkArm func(body ast.Nod
 
 	if enumType.Kind == TypeEnum {
 		c.checkEnumMatchStmt(n, enumType, checkArm)
+		return
+	}
+
+	if subjType.Kind == TypeAny {
+		c.checkTypeMatchStmt(n, subjType, checkArm)
 		return
 	}
 
@@ -3440,6 +3470,9 @@ func (c *checker) checkValueMatchStmt(n, subjectNode ast.NodeIndex, subjType Typ
 		}
 
 		for _, pattern := range c.tree.MatchArmPatterns(arm) {
+			if c.rejectTypeOnlyPattern(pattern) {
+				continue
+			}
 			patType := c.checkValueExpr(pattern)
 			if !patType.IsInvalid() {
 				c.checkEqualityOperands(pattern, subjectNode, pattern, subjType, patType, "==")
@@ -3452,6 +3485,150 @@ func (c *checker) checkValueMatchStmt(n, subjectNode ast.NodeIndex, subjType Typ
 	if !hasWildcard {
 		c.errorAt(n, "value match requires a wildcard _ arm (exhaustiveness cannot be checked for %s)", subjType)
 	}
+}
+
+// checkTypeMatchStmt type-checks a match whose subject is an `Any` value
+// (see LANGUAGE.md's "Type matching" section): every arm names a concrete
+// type instead of a value, optionally binding the narrowed value (`v int =>
+// ...`). Four rules, all of them checked here:
+//
+//   - A wildcard `_` arm is MANDATORY, exactly like a value match's
+//     (checkValueMatchStmt) - Any's kind space is open-ended, so no set of
+//     arms is ever exhaustive.
+//   - Exactly one pattern per arm, mirroring checkEnumMatchStmt's identical
+//     restriction for the identical reason: one shared arm body can't have
+//     its binding typed as two different types at once.
+//   - Every named type must be boxable into Any (isBoxableIntoAny) - an arm
+//     naming a type no `Any(x)` could ever have produced is dead code.
+//   - No two arms may name the same type (Type.Equal). Unlike a value
+//     match's best-effort literal dedupe, this is a hard guarantee: a type
+//     is always statically known, so there's nothing to be approximate
+//     about.
+//
+// AnyNew's own constructibility exclusions deliberately do NOT apply here
+// (an enum, a non-copyable struct, or `Any` itself are all legal arm types):
+// those exist to keep a zero value safely *constructible*, while an arm only
+// ever reads a value that was already legally boxed. checkArm is
+// checkMatchDispatch's own "how do I check one arm's own body" callback.
+func (c *checker) checkTypeMatchStmt(n ast.NodeIndex, subjType Type, checkArm func(body ast.NodeIndex)) {
+	hasWildcard := false
+	var seen []Type
+
+	for _, arm := range c.tree.MatchArms(n) {
+		patterns := c.tree.MatchArmPatterns(arm)
+		body := c.tree.MatchArmBody(arm)
+
+		if c.tree.IsWildcardMatchArm(arm) {
+			if hasWildcard {
+				c.errorAt(patterns[0], "match has more than one wildcard (_) arm")
+			}
+			hasWildcard = true
+			checkArm(body)
+			continue
+		}
+
+		if len(patterns) > 1 {
+			c.errorAtNodes(patterns, arm, "an Any match arm may name only one type, got %d", len(patterns))
+			for _, pattern := range patterns {
+				c.checkMatchArmPatternBindingsFallback(pattern)
+			}
+			checkArm(body)
+			continue
+		}
+
+		t := c.checkTypeMatchArmPattern(patterns[0])
+		if !t.IsInvalid() {
+			if slices.ContainsFunc(seen, t.Equal) {
+				c.errorAt(patterns[0], "type %s already matched by an earlier arm", t)
+			}
+			seen = append(seen, t)
+		}
+		checkArm(body)
+	}
+
+	if !hasWildcard {
+		c.errorAt(n, "type match requires a wildcard _ arm (exhaustiveness cannot be checked for %s)", subjType)
+	}
+}
+
+// checkTypeMatchArmPattern resolves one type-match arm's own pattern to the
+// type it narrows to, seeding its fresh binding (if it has one) with that
+// type - the type-match counterpart to checkMatchArmPattern's own
+// per-variant binding seeding. Returns invalidType for a pattern that names
+// no usable type, having already reported why.
+func (c *checker) checkTypeMatchArmPattern(pattern ast.NodeIndex) Type {
+	name, typeNode := c.tree.TypePatternParts(pattern)
+	t := c.typeMatchArmType(typeNode)
+	if name == ast.InvalidNode {
+		return t
+	}
+	if t.IsInvalid() {
+		c.checkPatternBindingFallback(name)
+		return invalidType
+	}
+	c.seedPatternBinding(name, t)
+	return t
+}
+
+// typeMatchArmType resolves a type-match arm's own type node (TypePatternParts)
+// to a real, Any-boxable Type. Two shapes reach here: an ordinary named type
+// (namedTypeMatchArmType, isBoxability-checked as a whole), and `name *Type`
+// parsed as an ordinary `Ident * Ident` BinaryExpr (TypePatternParts returns
+// the whole pattern as typeNode for this shape, having nowhere else to point
+// - see its own doc comment) - recognized here by consulting Info.Refs[right]
+// rather than re-deriving the shape independently, so this can never
+// disagree with Resolve's own identical-in-spirit decision
+// (resolver.binaryPointerPatternParts) about which of the two ambiguous
+// readings applies. The pointee itself is never boxability-checked on its
+// own: a pointer is unconditionally boxable regardless of what it points to
+// (isBoxableIntoAny's TypePointer case), so checking the pointee instead of
+// the pointer would wrongly reject a pointer to an otherwise-unboxable type
+// (e.g. *func()). The result is recorded against typeNode either way
+// (typeFromNode does this itself for the ordinary shape; this function does
+// it by hand for the synthesized pointer shape), so codegen/LSP find it the
+// same way regardless of which shape produced it.
+func (c *checker) typeMatchArmType(typeNode ast.NodeIndex) Type {
+	if c.tree.Nodes[typeNode].Kind == enums.NodeKinds.BinaryExpr && c.tree.Nodes[typeNode].Tok.Lexeme == enums.Lexemes.Asterisk {
+		right := c.tree.Child(typeNode, 1)
+		if sym, ok := c.info.Refs[right]; ok && sym.Kind.IsType() {
+			elem, ok := c.namedTypeMatchArmType(right)
+			if !ok {
+				return invalidType
+			}
+			t := Type{Kind: TypePointer, Elem: &elem}
+			c.info.Types[typeNode] = t
+			return t
+		}
+	}
+
+	t, ok := c.namedTypeMatchArmType(typeNode)
+	if !ok {
+		return invalidType
+	}
+	if !c.isBoxableIntoAny(t) {
+		c.errorAt(typeNode, "match arm: %s can never have been boxed into Any", t)
+		return invalidType
+	}
+	return t
+}
+
+// namedTypeMatchArmType resolves typeNode to a real Type, reporting the two
+// ways it can fail that nothing else would: naming something that isn't a
+// type at all (a literal, or a real name that isn't a type - Resolve accepts
+// both, since it can't know the subject is an Any), or a name that doesn't
+// resolve to a type symbol. Boxability is the caller's own concern (see
+// typeMatchArmType).
+func (c *checker) namedTypeMatchArmType(typeNode ast.NodeIndex) (Type, bool) {
+	if !isTypePositionShape(c.tree.Nodes[typeNode].Kind) {
+		c.errorAt(typeNode, "an Any match arm must name a type (int, or v int to bind the narrowed value)")
+		return invalidType, false
+	}
+	if sym, ok := c.info.Refs[typeNode]; ok && !sym.Kind.IsType() {
+		c.errorAt(typeNode, "%s is not a type (declared as %s)", sym.Name, sym.Kind)
+		return invalidType, false
+	}
+	t := c.typeFromNode(typeNode)
+	return t, !t.IsInvalid() // already reported by Resolve/typeFromNode if invalid
 }
 
 // literalPatternKey is checkDuplicateValuePattern's own dedupe key - a
@@ -3515,6 +3692,9 @@ func (c *checker) checkMatchArmFallback(arm ast.NodeIndex, checkArm func(body as
 // into a second, unrelated "undefined" diagnostic).
 func (c *checker) checkMatchArmPatternBindingsFallback(pattern ast.NodeIndex) {
 	switch c.tree.Nodes[pattern].Kind {
+	case enums.NodeKinds.TypePattern:
+		name, _ := c.tree.TypePatternParts(pattern)
+		c.checkPatternBindingFallback(name)
 	case enums.NodeKinds.CallExpr:
 		for _, b := range c.tree.Children(pattern)[1:] {
 			c.checkPatternBindingFallback(b)
@@ -3541,6 +3721,9 @@ func (c *checker) checkMatchArmPatternBindingsFallback(pattern ast.NodeIndex) {
 // own g.info.Types lookup for each binding just works like any other checked
 // declaration.
 func (c *checker) checkMatchArmPattern(pattern ast.NodeIndex, info *EnumInfo) (*EnumVariant, bool) {
+	if c.rejectTypeOnlyPattern(pattern) {
+		return nil, false
+	}
 	switch c.tree.Nodes[pattern].Kind {
 	case enums.NodeKinds.MemberExpr:
 		variant, ok := c.checkedPatternVariant(pattern, info)
@@ -3672,6 +3855,21 @@ func (c *checker) seedPatternBinding(n ast.NodeIndex, t Type) {
 	c.declTypes[nodeRef{c.tree, n}] = t
 	c.info.Types[n] = t
 	c.recordLocalDeclLoopDepth(n)
+}
+
+// rejectTypeOnlyPattern reports (and returns true for) a type pattern used in
+// a match whose subject is an enum or a plain value rather than an Any - the
+// two non-Any match paths' shared guard. Only the unambiguously-type-shaped
+// patterns are caught here (ast.Tree.IsTypeOnlyPattern); one that merely
+// names a type is a perfectly ordinary value/enum pattern shape, handled by
+// those paths' own existing checks.
+func (c *checker) rejectTypeOnlyPattern(pattern ast.NodeIndex) bool {
+	if !c.tree.IsTypeOnlyPattern(pattern) {
+		return false
+	}
+	c.errorAt(pattern, "a type pattern is only legal when matching an Any value")
+	c.checkMatchArmPatternBindingsFallback(pattern)
+	return true
 }
 
 // checkPatternBindingFallback seeds n with invalidType when it's at least a

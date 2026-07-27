@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 
 	"llvm_lang/src/ast"
@@ -513,6 +514,181 @@ func (g *Generator) anyDescMatches(descPtr llvm.Value, target sema.Type) llvm.Va
 		matches = g.builder.CreateAnd(matches, anyVariant, "")
 	}
 	return matches
+}
+
+// typeMatchArm is one non-wildcard arm of a type match, paired with the type
+// its pattern names (sema's checkTypeMatchArmPattern already resolved it) and
+// the fresh binding Ident that type narrows to, if any.
+type typeMatchArm struct {
+	arm     ast.NodeIndex
+	binding ast.NodeIndex
+	typ     sema.Type
+}
+
+// typeMatchKindBucket groups every arm reporting the same sema.TypeKind, in
+// source order - one LLVM switch case per bucket (see genTypeMatchStmt).
+type typeMatchKindBucket struct {
+	kind sema.TypeKind
+	arms []typeMatchArm
+}
+
+// genTypeMatchStmt lowers a `match anyValue { v int => ..., _ => ... }` - a
+// match whose subject is an Any, so every arm names a type (LANGUAGE.md's
+// "Type matching" section), genMatchStmt's own dispatch target for a
+// TypeAny subject. The boxed descriptor's kind field is loaded once and fed
+// to a single real LLVM `switch`, one case per distinct kind any arm names,
+// defaulting to the wildcard arm (sema's checkTypeMatchStmt guarantees one
+// is present). A kind alone doesn't identify a type when several arms share
+// it - two different structs both report TypeStruct - so a bucket holding
+// more than one arm, or one whose kind carries descriptor identity at all
+// (struct/array/enum), instead runs a short-circuit chain of anyDescMatches
+// tests inside its own case, falling through to the wildcard when none
+// match. frame is genMatchStmt's own expression-mode frame, threaded
+// straight through (see its doc comment).
+func (g *Generator) genTypeMatchStmt(n ast.NodeIndex, frame *matchExprCodegenCtx) bool {
+	a := g.genExpr(g.tree.MatchSubject(n))
+	dataPtr := g.builder.CreateExtractValue(a, 0, "")
+	descPtr := g.builder.CreateExtractValue(a, 1, "")
+	kind := g.builder.CreateLoad(g.i32Ty, descPtr, "")
+
+	mergeBB := g.matchMergeBB(frame, "match.merge")
+	wildcardArm, buckets := g.typeMatchArms(n)
+	preMatch := g.snapshotDestructors()
+
+	wildcardBB := g.ctx.AddBasicBlock(g.curFn, "typematch.wildcard")
+	sw := g.builder.CreateSwitch(kind, wildcardBB, len(buckets))
+
+	branchResults := make([]branchDestructorResult, 0, len(buckets)+1)
+	allTerminated := true
+
+	for _, bucket := range buckets {
+		caseBB := g.ctx.AddBasicBlock(g.curFn, "typematch.kind")
+		sw.AddCase(llvm.ConstInt(g.i32Ty, uint64(bucket.kind), false), caseBB)
+		g.builder.SetInsertPointAtEnd(caseBB)
+
+		for i, arm := range bucket.arms {
+			bodyBB := caseBB
+			if len(bucket.arms) > 1 || typeMatchNeedsDescCheck(bucket.kind) {
+				bodyBB = g.ctx.AddBasicBlock(g.curFn, "typematch.case")
+				nextBB := wildcardBB
+				if i < len(bucket.arms)-1 {
+					nextBB = g.ctx.AddBasicBlock(g.curFn, "typematch.next")
+				}
+				g.builder.CreateCondBr(g.anyDescMatches(descPtr, arm.typ), bodyBB, nextBB)
+				g.builder.SetInsertPointAtEnd(nextBB)
+			}
+
+			terminated, result := g.genTypeMatchArm(arm, bodyBB, dataPtr, preMatch, mergeBB, frame)
+			branchResults = append(branchResults, result)
+			allTerminated = allTerminated && terminated
+		}
+	}
+
+	g.builder.SetInsertPointAtEnd(wildcardBB)
+	g.restoreDestructors(preMatch)
+	beforeIncoming := 0
+	if frame != nil {
+		beforeIncoming = len(frame.incomingVals)
+	}
+	wildcardTerminated := g.genBlock(g.tree.MatchArmBody(wildcardArm))
+	if !wildcardTerminated {
+		g.builder.CreateBr(mergeBB)
+	}
+	branchResults = append(branchResults, branchDestructorResult{
+		final:      g.snapshotDestructors(),
+		terminated: !armReachesMatchMerge(frame, beforeIncoming, wildcardTerminated),
+	})
+	allTerminated = allTerminated && wildcardTerminated
+
+	g.destructors = g.mergeBranchDestructors(preMatch, branchResults)
+
+	// Same frame != nil carve-out genMatchStmt's own enum path documents: an
+	// expression-position match's merge block is always genuinely reachable.
+	g.builder.SetInsertPointAtEnd(mergeBB)
+	if frame == nil && allTerminated {
+		g.builder.CreateUnreachable()
+	}
+	return allTerminated
+}
+
+// genTypeMatchArm lowers one type-match arm's own binding (if it has one)
+// and body into bodyBB, leaving the builder wherever the caller's own
+// pattern-test chain last positioned it. The bound value is loaded straight
+// out of the boxed data - safe only on the matching branch, since a
+// mismatched box may hold fewer bytes than the arm's own type (the identical
+// reasoning genAnyAsCall's own real control flow documents).
+func (g *Generator) genTypeMatchArm(arm typeMatchArm, bodyBB llvm.BasicBlock, dataPtr llvm.Value, preMatch []destructorEntry, mergeBB llvm.BasicBlock, frame *matchExprCodegenCtx) (bool, branchDestructorResult) {
+	resumeBB := g.builder.GetInsertBlock()
+
+	g.builder.SetInsertPointAtEnd(bodyBB)
+	g.restoreDestructors(preMatch)
+	if arm.binding != ast.InvalidNode {
+		g.bindPatternName(arm.binding, arm.typ, g.builder.CreateLoad(g.llvmType(arm.typ), dataPtr, ""))
+	}
+	beforeIncoming := 0
+	if frame != nil {
+		beforeIncoming = len(frame.incomingVals)
+	}
+	terminated := g.genBlock(g.tree.MatchArmBody(arm.arm))
+	if !terminated {
+		g.builder.CreateBr(mergeBB)
+	}
+	result := branchDestructorResult{
+		final:      g.snapshotDestructors(),
+		terminated: !armReachesMatchMerge(frame, beforeIncoming, terminated),
+	}
+
+	// The body moved the builder off the caller's own test chain (into
+	// bodyBB and wherever the body's nested control flow ended) - put it back
+	// so the next pattern test generates where it belongs.
+	g.builder.SetInsertPointAtEnd(resumeBB)
+	return terminated, result
+}
+
+// typeMatchArms splits n's arms into the wildcard arm and the typed arms,
+// the latter bucketed by the sema.TypeKind each names, preserving source
+// order both within and across buckets.
+func (g *Generator) typeMatchArms(n ast.NodeIndex) (ast.NodeIndex, []typeMatchKindBucket) {
+	wildcardArm := ast.InvalidNode
+	var buckets []typeMatchKindBucket
+
+	for _, arm := range g.tree.MatchArms(n) {
+		if g.tree.IsWildcardMatchArm(arm) {
+			wildcardArm = arm
+			continue
+		}
+		binding, typeNode := g.tree.TypePatternParts(g.tree.MatchArmPattern(arm))
+		entry := typeMatchArm{
+			arm:     arm,
+			binding: binding,
+			typ:     g.info.Types[typeNode],
+		}
+		if i := slices.IndexFunc(buckets, func(b typeMatchKindBucket) bool { return b.kind == entry.typ.Kind }); i >= 0 {
+			buckets[i].arms = append(buckets[i].arms, entry)
+			continue
+		}
+		buckets = append(buckets, typeMatchKindBucket{
+			kind: entry.typ.Kind,
+			arms: []typeMatchArm{entry},
+		})
+	}
+	return wildcardArm, buckets
+}
+
+// typeMatchNeedsDescCheck reports whether kind alone leaves a type
+// ambiguous, so a matching descriptor kind still needs anyDescMatches'
+// identity test - exactly the kinds anyDescMatches itself checks further
+// (see its own doc comment). Every other kind has one interned descriptor,
+// making the switch case itself the whole test.
+func typeMatchNeedsDescCheck(kind sema.TypeKind) bool {
+	switch kind {
+	case sema.TypeStruct,
+		sema.TypeArray,
+		sema.TypeEnum:
+		return true
+	default:
+		return false
+	}
 }
 
 // genAnyAsCall lowers `AnyAs[T](a Any) (T, bool)` (see checkAnyAsCall's own
