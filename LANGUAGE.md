@@ -2514,7 +2514,10 @@ Every scalar/primitive type (`i8`/`i16`/`i32`/`i64`/`u8`/`u16`/`u32`/`u64`/
 dynamic or fixed-size array can be boxed (collecting into a `...Any`
 variadic parameter boxes implicitly, no `Any(x)` needed - see "Variadic
 parameters" above). A struct or array is boxable only if every one of its
-own field/element types is, recursively. Boxing copies the value's own bytes
+own field/element types is, recursively - `Any` itself is one such
+unboxable nested type (`[]Any` and a struct field typed `Any` are both
+rejected), boxable only as the top-level value passed to `Any(x)` directly.
+Boxing copies the value's own bytes
 into a fresh, arena-allocated slot (see "Memory model" - the same allocator
 dynamic arrays and strings already use) - a boxed value stays valid
 regardless of whether it outlives the stack frame it was boxed in, at the

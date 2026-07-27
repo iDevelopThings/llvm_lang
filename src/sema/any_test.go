@@ -159,6 +159,25 @@ func TestAnyBoxArrayWithUnboxableElementRejected(t *testing.T) {
 	expectCheckErrors(t, "func f() {\n\ts := make([]map[string]int, 1)\n\ta := Any(s)\n}\n", 1)
 }
 
+// An array of Any is rejected the same way a struct field of Any is
+// (TestAnyBoxStructWithAnyFieldRejected below) - Any is boxable only as the
+// top-level boxed value itself (a no-op re-box), never as a nested
+// element/field, since typeDescriptorFor has no TypeAny case of its own.
+func TestAnyBoxDynamicArrayOfAnyRejected(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\ts := []Any{Any(1)}\n\ta := Any(s)\n}\n", 1)
+}
+
+func TestAnyBoxFixedArrayOfAnyRejected(t *testing.T) {
+	expectCheckErrors(t, "func f() {\n\ts := [1]Any{Any(1)}\n\ta := Any(s)\n}\n", 1)
+}
+
+// A struct field whose own type is an array of Any must transitively reject
+// too, not just a field directly typed Any.
+func TestAnyBoxStructWithArrayOfAnyFieldRejected(t *testing.T) {
+	expectCheckErrors(t, "struct Bag {\n\tItems []Any\n}\n"+
+		"func f() {\n\tb := Bag{Items: []Any{Any(1)}}\n\ta := Any(b)\n}\n", 1)
+}
+
 func TestAnyBoxMapRejected(t *testing.T) {
 	expectCheckErrors(t, "func f() {\n\tm := make(map[string]int)\n\ta := Any(m)\n}\n", 1)
 }

@@ -22,7 +22,8 @@ This is a quick list of deliberate limits, not a roadmap.
 - Boxing is limited to scalar types, pointers, structs, and arrays (fixed or
   dynamic) - an enum, a map, a function/cfunc value, or a non-copyable type
   cannot be boxed into `Any`. A struct or array is boxable only if every one
-  of its own field/element types is.
+  of its own field/element types is, recursively - `Any` itself is one such
+  unboxable nested type (see "Any" in `LANGUAGE.md`).
 - Boxing an `Any` into another `Any` is legal - a cheap no-op copy, not an
   error.
 - `Any` is neither comparable (`==`/`!=`) nor printable (`print`), and

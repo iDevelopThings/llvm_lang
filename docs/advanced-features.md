@@ -75,7 +75,9 @@ b := Any(somePoint)
 Every scalar type (`i8`...`i64`, `u8`...`u64`, `f32`, `f64`, `bool`,
 `string`, `cstring`, a pointer), any struct, and any array (fixed or
 dynamic) can be boxed - a struct/array only if every one of its own
-field/element types is. Boxing copies the value into a fresh allocation, so
+field/element types is, recursively (`Any` itself can't be nested this way -
+see [Any](LANGUAGE.md#any) in the language spec). Boxing copies the value
+into a fresh allocation, so
 a boxed value stays valid even after the code that boxed it returns.
 Collecting into a `...Any` variadic parameter boxes each argument
 automatically, no `Any(x)` needed - see

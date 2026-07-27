@@ -5872,21 +5872,22 @@ func (c *checker) checkConversionCall(n, callee ast.NodeIndex, args []ast.NodeIn
 // element type is - codegen's structDescriptor/arrayDescriptor both recurse
 // into their field/element type descriptor(s) unconditionally (any.go), so
 // an otherwise-unboxable nested type (e.g. a `map[...]...` field, `[]SomeEnum`,
-// or `Any` itself - typeDescriptorFor has no TypeAny case, only genAnyBox's
-// top-level short-circuit does) must be rejected here, at the one real
-// compile-time checkpoint, rather than surfacing as a runtime codegen panic
-// the first time that particular struct/array is ever boxed anywhere in the
-// program. A pointer field/element doesn't recurse into its own pointee
-// (TypePointer is unconditionally boxable above) - the same cycle-safety a
-// self-referential struct already relies on for typeIsComparable/
-// typeIsPrintable.
+// or `Any` itself) must be rejected here, at the one real compile-time
+// checkpoint, rather than surfacing as a runtime codegen panic the first
+// time that particular struct/array is ever boxed anywhere in the program -
+// both recursive cases go through isNestedBoxableIntoAny below, which is
+// what actually rejects a nested Any (typeDescriptorFor has no TypeAny case,
+// only genAnyBox's own top-level short-circuit does). A pointer
+// field/element doesn't recurse into its own pointee (TypePointer is
+// unconditionally boxable above) - the same cycle-safety a self-referential
+// struct already relies on for typeIsComparable/typeIsPrintable.
 func (c *checker) isBoxableIntoAny(t Type) bool {
 	switch t.Kind {
 	case TypeEnum, TypeMap, TypeFunc, TypeCFunc,
 		TypeMultiReturn, TypeGenerator, TypeCoroutine:
 		return false
 	case TypeArray:
-		return c.isBoxableIntoAny(*t.Elem)
+		return c.isNestedBoxableIntoAny(*t.Elem)
 	case TypeStruct:
 		if t.Struct == nil {
 			return true
@@ -5895,7 +5896,7 @@ func (c *checker) isBoxableIntoAny(t Type) bool {
 		defer restore()
 		for _, field := range c.tree.StructFields(t.Struct.Symbol.Decl) {
 			fieldType := c.typeFromNode(c.tree.Child(field, 1))
-			if fieldType.Kind == TypeAny || !c.isBoxableIntoAny(fieldType) {
+			if !c.isNestedBoxableIntoAny(fieldType) {
 				return false
 			}
 		}
@@ -5903,6 +5904,19 @@ func (c *checker) isBoxableIntoAny(t Type) bool {
 	default:
 		return true
 	}
+}
+
+// isNestedBoxableIntoAny is isBoxableIntoAny's own rule, but additionally
+// rejecting TypeAny - unlike every other kind, Any is boxable only at the
+// top level (Any(x) where x is already Any, a no-op re-box short-circuited
+// directly in genAnyBox before ever touching a type descriptor), never as a
+// struct field or array element, since typeDescriptorFor has no TypeAny
+// case of its own. Both of isBoxableIntoAny's own recursive call sites
+// (a struct field, an array element) go through this, not the top-level
+// function directly, so neither can accept a nested Any by relying on the
+// top-level default case's own more permissive answer.
+func (c *checker) isNestedBoxableIntoAny(t Type) bool {
+	return t.Kind != TypeAny && c.isBoxableIntoAny(t)
 }
 
 // checkNewExpr type-checks `new T(args)`/`new T{...}` (see LANGUAGE.md's
