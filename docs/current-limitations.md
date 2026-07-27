@@ -86,8 +86,17 @@ This is a quick list of deliberate limits, not a roadmap.
 - An enum-match arm can contain only one variant pattern.
 - Generators produce one value at a time and can only be consumed directly
   by a range loop.
-- Async functions cannot be methods, lambdas, or directly await another
-  coroutine; a coroutine-to-coroutine call/await is still out of scope.
+- Async functions cannot be methods, lambdas, or directly `await` another
+  coroutine (calling, `resume`ing, or reading another coroutine's own
+  `result` from inside an async function all work today - only `await`ing
+  one directly is out of scope).
+- A non-void async function's own bare reference (`f := SomeAsyncFunc`,
+  not calling it) is a clean diagnostic, not a crash - it can never mean
+  the same thing as a direct call, since a coroutine's own result is only
+  available later, through `result(h)`.
+- An async function's declared result type must be copyable - a
+  destructor-owning type is a clean diagnostic (the frame doesn't run one
+  on whatever was left in an unread result).
 - Coroutines require optimization and cannot be compiled with `-no-opt`.
 
 ## Packages, interop, and tools

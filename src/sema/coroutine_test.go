@@ -268,3 +268,55 @@ func TestCoroutineFieldOmittedInCompositeLitIsNilHandle(t *testing.T) {
 	src := "struct Entry {\n\th coroutine\n}\n\nfunc f() {\n\te := Entry{}\n\tdelete e.h\n}\n"
 	checkSrc(t, src)
 }
+
+// TestNonVoidCoroutineWidensToBareCoroutineVarDecl/FuncParam/StructField prove
+// a result-returning coroutine's own handle still fits a bare `coroutine`-
+// typed slot - driving one by hand (resume/done/delete) never needs to know
+// its result type, only result(h) does. Without this, a non-void async
+// function couldn't be used with std/scheduler's own Entry.Handle field at
+// all (Type.Equal now distinguishes TypeCoroutine by its own Elem).
+func TestNonVoidCoroutineWidensToBareCoroutineVarDecl(t *testing.T) {
+	src := "async func Coro() int {\n\tawait\n\treturn 1\n}\n\nfunc f() {\n\tvar h coroutine = Coro()\n\tdelete h\n}\n"
+	checkSrc(t, src)
+}
+
+func TestNonVoidCoroutineWidensToBareCoroutineFuncParam(t *testing.T) {
+	src := "async func Coro() int {\n\tawait\n\treturn 1\n}\n\nfunc take(h coroutine) {\n\tdelete h\n}\n\nfunc use() {\n\ttake(Coro())\n}\n"
+	checkSrc(t, src)
+}
+
+func TestNonVoidCoroutineWidensToBareCoroutineStructField(t *testing.T) {
+	src := "struct Entry {\n\th coroutine\n}\n\nasync func Coro() int {\n\tawait\n\treturn 1\n}\n\nfunc use() {\n\te := Entry{}\n\te.h = Coro()\n}\n"
+	checkSrc(t, src)
+}
+
+// TestBareCoroutineCannotWidenToNonVoidCoroutine proves the widening is
+// one-directional - a variable/field declared with a real result type still
+// requires an exact Elem match, since result(h) against it needs a real,
+// specific type to read back.
+func TestBareCoroutineCannotWidenToNonVoidCoroutine(t *testing.T) {
+	src := "async func Coro() int {\n\tawait\n\treturn 1\n}\n\nfunc take(h coroutine) {\n\tvar v coroutine = h\n\tdelete v\n}\n"
+	expectCheckErrors(t, src, 1)
+}
+
+// TestAsyncFuncNonCopyableResultTypeIsError proves a destructor-owning
+// result type is rejected at declaration time - the frame's own teardown
+// never runs a destructor on whatever was left in an unread promise slot.
+func TestAsyncFuncNonCopyableResultTypeIsError(t *testing.T) {
+	src := "struct Res {\n\tid int\n\tdestructor() {}\n}\n\nasync func Make() Res {\n\tawait\n\treturn Res{1}\n}\n"
+	expectCheckErrors(t, src, 1)
+}
+
+// TestAsyncFuncReferencedAsBareValueIsError proves referencing an async
+// function as a first-class value (not calling it) is a clean diagnostic -
+// calling one doesn't produce its own result the way an ordinary call does,
+// so it could never mean the same thing through a plain func(...) value.
+func TestAsyncFuncReferencedAsBareValueIsError(t *testing.T) {
+	src := "async func Coro() int {\n\tawait\n\treturn 1\n}\n\nfunc f() {\n\tg := Coro\n\tprint(g)\n}\n"
+	expectCheckErrors(t, src, 1)
+}
+
+func TestVoidAsyncFuncReferencedAsBareValueIsError(t *testing.T) {
+	src := "async func Coro() {\n\tawait\n}\n\nfunc f() {\n\tg := Coro\n\tprint(g)\n}\n"
+	expectCheckErrors(t, src, 1)
+}

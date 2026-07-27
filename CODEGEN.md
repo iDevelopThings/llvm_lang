@@ -1051,18 +1051,16 @@ elision check is emitted - every call always heap-allocates a real frame.
 `promise` is `coro.id`'s second argument - null for a void async function
 (unchanged from before this existed), or, for one declaring a real result
 type (see LANGUAGE.md's "Coroutines" section), an entry-block alloca of that
-type, explicitly aligned to `coroPromiseAlign` (a fixed 8-byte constant, not
-a `TargetData` query - `src/compiler`'s own `finishPipeline` only pins the
-module's real DataLayout right before `RunPasses`, after codegen has already
-finished, so a query here would see an incomplete one; 8 bytes safely covers
-every declared return type this language has). LLVM's coroutine-splitting
-passes place this alloca at a fixed offset within the heap frame, which is
-what makes reading it back after the frame's own local variables have gone
-out of scope (`genResultCall`, below) well-defined. Every `return expr`
-inside the body (`genReturnStmt`, `stmt.go`) stores into this same alloca
-(`Generator.curCoroPromise`) immediately before its own `finishCoroBody` call
-- mirroring the existing bare-return case, `finishCoroBody` unwinds
-destructors itself, so this must not unwind a second time first.
+type, aligned to `coroPromiseAlign` (see that constant's own doc comment,
+`coroutine.go`, for why it's a fixed literal rather than a real `TargetData`
+query). LLVM's coroutine-splitting passes place this alloca at a fixed
+offset within the heap frame, which is what makes reading it back after the
+frame's own local variables have gone out of scope (`genResultCall`, below)
+well-defined. Every `return expr` inside the body (`genReturnStmt`,
+`stmt.go`) stores into this same alloca (`Generator.curCoroPromise`)
+immediately before its own `finishCoroBody` call - mirroring the existing
+bare-return case, `finishCoroBody` unwinds destructors itself, so this must
+not unwind a second time first.
 
 `genResultCall` (`coroutine.go`) implements `result(h) T` - recovers the
 promise address via `llvm.coro.promise(handle, coroPromiseAlign, false)`
@@ -1072,7 +1070,10 @@ own align argument must be the literal same constant, which is exactly what
 `coroPromiseAlign` being one shared source guarantees), guarded by a real
 `done(h)` branch - mirroring `genAnyAsCall`'s own "never a blind load"
 convention: not yet done returns `T`'s zero value instead of reading a
-possibly-uninitialized slot.
+possibly-uninitialized slot. A nil handle (already `delete`d) is checked
+*before* that `done(h)` branch, not folded into it - `done(h)` itself
+reports a nil handle as done (see `genDoneCall`), which would otherwise
+route straight into `coro.promise` against a freed frame.
 
 ### The coro.suspend switch: three arms, not two - the one bug this took real empirical verification to catch
 

@@ -2140,8 +2140,9 @@ func main() {
 - **`result(h) T`** - reads `h`'s own declared result (`T`, its function's
   declared return type). Legal only against a coroutine that actually
   declares one - `result(h)` on an ordinary void coroutine is a clean
-  diagnostic. Calling it before `h` is `done` is safe and defined: it
-  returns `T`'s zero value rather than an unfinished or garbage result.
+  diagnostic. Calling it before `h` is `done`, or after `h` has been
+  `delete`d, is safe and defined either way: it returns `T`'s zero value
+  rather than an unfinished, garbage, or freed result.
 - **`delete h`** - reuses this language's existing `new`/`delete` vocabulary
   (see the "Pointers" section) to explicitly destroy a not-yet-finished
   coroutine early: every local still live at its current suspend point gets
@@ -2156,11 +2157,16 @@ func main() {
   directly, usable anywhere an ordinary type name is legal (a `var`
   declaration, a struct field, a function parameter) - the same non-copyable
   rules above apply identically regardless of spelling: only a fresh async
-  call may fill a `coroutine`-typed slot, never an existing handle. A struct
-  containing a `coroutine` field is non-copyable like any other destructor-
-  owning struct (see "Destructors"), so a dynamic array of such a struct is
-  rejected the same way; store it behind a pointer instead (see
-  `std/scheduler`'s own `Entry` for the idiom).
+  call may fill a `coroutine`-typed slot, never an existing handle. Bare
+  `coroutine` accepts a handle from an async function with ANY declared
+  result type (or none) - driving one by hand (`resume`/`done`/`delete`)
+  never needs to know its result type, only `result(h)` does, and that's
+  only ever called on a binding whose own inferred type still carries it (a
+  `:=` local straight from the call, never one already widened to bare
+  `coroutine`). A struct containing a `coroutine` field is non-copyable like
+  any other destructor-owning struct (see "Destructors"), so a dynamic array
+  of such a struct is rejected the same way; store it behind a pointer
+  instead (see `std/scheduler`'s own `Entry` for the idiom).
 
 ### Explicitly out of scope this round
 

@@ -117,10 +117,15 @@ func (g *Generator) buildCoroDestroyLocalFn() {
 // entry). A literal constant used on both sides, rather than querying the
 // module's own TargetData, sidesteps that query returning an incomplete
 // answer: src/compiler's own finishPipeline only pins the module's real
-// DataLayout right before RunPasses, after codegen has already finished. 8
-// bytes is a safe upper bound for every declared return type this language
-// has (nothing here is ever more than pointer/i64/f64-aligned), and
-// over-aligning an alloca beyond its natural requirement is always legal.
+// DataLayout right before RunPasses, after codegen has already finished.
+//
+// This is an upper bound, not a query - `SetAlignment` sets an alloca's own
+// alignment absolutely, so it UNDER-aligns, not over-aligns, a type whose
+// own real ABI alignment exceeds this constant. Safe today because nothing
+// a `retType` can be is ever more than pointer/i64/f64-aligned (8 bytes) -
+// this must be revisited (a real per-type ABI-alignment lookup, not a wider
+// literal) the moment any type wider than 8-byte alignment becomes
+// declarable at all (a 128-bit int, a SIMD vector, ...).
 const coroPromiseAlign = 8
 
 // genCoroPrologue emits an async function's own ramp prologue - the fixed
@@ -334,16 +339,30 @@ func (g *Generator) genDoneCall(handle llvm.Value) llvm.Value {
 // load (mirroring genAnyAsCall's own identical convention): result(h) before
 // the coroutine is actually done returns T's zero value instead of reading a
 // possibly-uninitialized slot.
+//
+// A nil handle (already `delete`d - see genCoroDeleteStmt) is checked
+// FIRST, separately from genDoneCall's own result: genDoneCall reports a nil
+// handle as done (matching `done(h)`'s own documented behavior), but there
+// is no promise slot left to read - the frame was already freed - so
+// reusing that same "done" answer here would take the load branch and read
+// through the null handle. result(h) on a deleted handle returns T's zero
+// value instead, matching this language's existing "resume/done after
+// delete are safe, defined no-ops" convention.
 func (g *Generator) genResultCall(argNode ast.NodeIndex) llvm.Value {
 	target := *g.info.Types[argNode].Elem
 	targetLLType := g.llvmType(target)
 
 	handle := g.genExpr(argNode)
-	isDone := g.genDoneCall(handle)
+	isNil := g.builder.CreateIsNull(handle, "")
 
-	doneBB := g.ctx.AddBasicBlock(g.curFn, "result.done")
+	liveBB := g.ctx.AddBasicBlock(g.curFn, "result.live")
 	notDoneBB := g.ctx.AddBasicBlock(g.curFn, "result.notdone")
+	doneBB := g.ctx.AddBasicBlock(g.curFn, "result.done")
 	contBB := g.ctx.AddBasicBlock(g.curFn, "result.cont")
+	g.builder.CreateCondBr(isNil, notDoneBB, liveBB)
+
+	g.builder.SetInsertPointAtEnd(liveBB)
+	isDone := g.builder.CreateCall(g.coroDoneType, g.coroDoneFn, []llvm.Value{handle}, "")
 	g.builder.CreateCondBr(isDone, doneBB, notDoneBB)
 
 	g.builder.SetInsertPointAtEnd(doneBB)
@@ -359,10 +378,11 @@ func (g *Generator) genResultCall(argNode ast.NodeIndex) llvm.Value {
 	g.builder.SetInsertPointAtEnd(notDoneBB)
 	zeroVal := llvm.ConstNull(targetLLType)
 	g.builder.CreateBr(contBB)
+	notDoneEndBB := g.builder.GetInsertBlock()
 
 	g.builder.SetInsertPointAtEnd(contBB)
 	phi := g.builder.CreatePHI(targetLLType, "")
-	phi.AddIncoming([]llvm.Value{doneVal, zeroVal}, []llvm.BasicBlock{doneEndBB, notDoneBB})
+	phi.AddIncoming([]llvm.Value{doneVal, zeroVal}, []llvm.BasicBlock{doneEndBB, notDoneEndBB})
 	return phi
 }
 

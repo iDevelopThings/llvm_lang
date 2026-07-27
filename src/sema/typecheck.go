@@ -788,6 +788,14 @@ func (c *checker) checkFuncDecl(decl ast.NodeIndex) {
 		// section) - the two return-type spellings are mutually exclusive.
 		c.errorAt(decl, "an async function cannot also be a generator function (yield return type)")
 	}
+	if isAsync && !isGenerator && c.typeIsNonCopyable(sig.Return) {
+		// A coroutine's own result lives in its frame's promise slot until
+		// result(h) copies it out - genCoroFreeFrame only frees the frame
+		// itself, it never runs a destructor on whatever was left in that
+		// slot, so a non-copyable result type would silently skip its own
+		// destructor. Rejected outright rather than half-supported.
+		c.errorAt(decl, "an async function cannot declare a non-copyable result type (%s)", sig.Return)
+	}
 
 	prevFunc := c.curFunc
 	c.curFunc = &enclosingFunc{
@@ -1554,6 +1562,17 @@ func (c *checker) checkAssignable(at ast.NodeIndex, want, got Type, context stri
 	}
 	if want.Kind == TypeCFunc && got.Kind == TypeFunc && sameFuncShape(want, got) {
 		return c.checkFuncToCFuncConversion(at, want)
+	}
+	if want.Kind == TypeCoroutine && got.Kind == TypeCoroutine && want.Elem.Kind == TypeVoid {
+		// A bare `coroutine`-typed slot (no declared result type - see
+		// LANGUAGE.md's "Coroutines" section) accepts a handle from ANY
+		// async function, result type or not: driving one by hand
+		// (resume/done/delete) never needs to know its result type, only
+		// `result(h)` does, and that's only ever called on a variable whose
+		// own inferred type still carries the real Elem. Without this, a
+		// result-returning coroutine couldn't be stored in a `coroutine`-typed
+		// var/param/field at all (e.g. std/scheduler's own Entry.Handle).
+		return true
 	}
 	if !want.Equal(got) {
 		c.errorAt(at, "cannot use %s as %s in %s", got, want, context)
@@ -3855,6 +3874,7 @@ func (c *checker) typeOfSymbolValue(n ast.NodeIndex, sym *Symbol) Type {
 		}
 		restore := c.pushTree(sym.Tree)
 		sig := c.funcSigForDecl(sym.Decl)
+		isAsync := c.tree.FuncIsAsync(sym.Decl)
 		restore()
 		if sig.Variadic {
 			// See LANGUAGE.md's "Variadic parameters" section: out of scope
@@ -3862,6 +3882,15 @@ func (c *checker) typeOfSymbolValue(n ast.NodeIndex, sym *Symbol) Type {
 			// (collect/spread) only exists for a direct call, never for an
 			// indirect one through a plain func(...)-typed value.
 			c.errorAt(n, "%s is a variadic function and cannot be used as a value, only called directly", c.tree.Text(n))
+			return invalidType
+		}
+		if isAsync {
+			// Calling an async function doesn't produce its own result the
+			// way an ordinary call does - it returns a coroutine handle that
+			// must be driven by hand (resume/done/result) - so a first-class
+			// reference to one, called indirectly through a plain func(...)
+			// value, could never mean the same thing a direct call does.
+			c.errorAt(n, "%s is an async function and cannot be used as a value, only called directly", c.tree.Text(n))
 			return invalidType
 		}
 		return funcType(sig)

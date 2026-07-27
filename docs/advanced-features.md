@@ -69,12 +69,14 @@ answer := result(h)
 delete h
 ```
 
-`result(h)` reads `h`'s own declared result once it's `done`; called earlier
-it returns the result type's zero value instead. `result` on a coroutine
-declaring no return type is a compile error.
+`result(h)` reads `h`'s own declared result once it's `done`; called before
+that, or after `h` has been `delete`d, it returns the result type's zero
+value instead. `result` on a coroutine declaring no return type is a
+compile error.
 
 Async functions still cannot be methods, lambdas, closures, or directly
-await other coroutines.
+await other coroutines - calling, resuming, or reading another coroutine's
+own result from inside one works today.
 
 Coroutines require the normal optimization pipeline. Do not compile them
 with `-no-opt`.

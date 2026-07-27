@@ -527,6 +527,30 @@ func run() int {
 	}
 }
 
+// TestCoroResult_AfterDeleteIsZeroValueNotCrash proves result(h) on an
+// already-deleted handle is a safe, defined no-op returning T's zero value -
+// genDoneCall reports a nil handle as done, so result(h) must check for nil
+// BEFORE trusting that "done" answer, or it would read through the freed
+// frame via coro.promise against a null handle.
+func TestCoroResult_AfterDeleteIsZeroValueNotCrash(t *testing.T) {
+	jm := compileAndJITOptimized(t, `
+async func ComputeAnswer() int {
+	await
+	return 42
+}
+
+func run() int {
+	h := ComputeAnswer()
+	resume(h)
+	delete h
+	return result(h)
+}
+`)
+	if got := jm.runInt32(t, "run"); got != 0 {
+		t.Errorf("result(h) after delete = %d, want 0", got)
+	}
+}
+
 // TestCoroResult_MultiAwaitReadsAfterLastSuspend proves the returned value is
 // read correctly after the LAST of several suspend/resume cycles, not just a
 // coroutine that returns immediately with no await at all.
