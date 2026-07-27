@@ -56,7 +56,11 @@ func (w *Workspace) Hover(path string, pos protocol.Position) *protocol.Hover {
 			}
 		}
 	}
-	if typ, ok := fa.Info.Types[n]; ok && !typ.IsInvalid() {
+	typeNode := n
+	if param := fa.Tree.ParamOf(n); param != ast.InvalidNode {
+		typeNode = param
+	}
+	if typ, ok := fa.Info.Types[typeNode]; ok && !typ.IsInvalid() {
 		lines = append(lines, "type:\n"+fenceGo(typ.String()))
 	}
 	if sym != nil && sym.Tree != nil && sym.Decl != ast.InvalidNode {
