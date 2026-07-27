@@ -2684,10 +2684,12 @@ exactly like an ordinary `var` declaration of that type would be, boxed as an
 `Any`. Works for a scalar, pointer, struct, dynamic or fixed array, and map;
 `ok` is `false` - no crash - for an out-of-range `id`, an enum's own id (a
 zero-initialized enum can hold a broken payload for a non-unit first variant
-- see `docs/current-limitations.md`), or a non-copyable struct/array's own
+- see `docs/current-limitations.md`), a non-copyable struct/array's own
 id (constructing one is sound on its own, but reading it back out via
 `AnyAs`/`AnySet` would then perform the implicit copy this language
-otherwise never allows for a non-copyable type).
+otherwise never allows for a non-copyable type), or `Any`'s own id
+(`TypeId[Any]()` is legal, but a zero-filled `Any` has no real descriptor to
+reflect on, unlike every other type's zero value).
 
 `AnySet[T]` is `AnyAs[T]`'s write-side mirror: if `field`'s own boxed kind
 matches `T` (the identical check `AnyAs[T]` uses), `value` is written into

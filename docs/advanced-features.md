@@ -155,8 +155,8 @@ ok2 := AnySet[int](field, 99) // write into a field obtained via AnyFields
 ```
 
 An enum's id is always the enum type's own id, never a specific variant's.
-`AnyNew` rejects an out-of-range id, an enum's own id, and a non-copyable
-struct/array's own id (`ok = false`, never a crash). `AnySet[T]` is
+`AnyNew` rejects an out-of-range id, an enum's own id, a non-copyable
+struct/array's own id, and `Any`'s own id (`ok = false`, never a crash). `AnySet[T]` is
 `AnyAs[T]`'s write-side mirror - it's what makes a struct field from
 `AnyFields` actually mutable. See
 [Type registry](../LANGUAGE.md#type-registry) in the language spec for the

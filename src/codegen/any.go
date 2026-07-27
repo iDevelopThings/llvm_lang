@@ -133,7 +133,12 @@ func (g *Generator) setupAnyRuntime() {
 		size := llvm.SizeOf(g.llvmType(sema.Type{Kind: k}))
 		desc := g.buildTypeDescriptorGlobal(k, name, 0, llvm.ConstNull(g.ptrTy), noElemDesc, noArrayLen, noElemSize, size, ".any.desc."+name)
 		g.anyPrimitiveDescs[k] = desc
-		g.internDescriptor(desc, true)
+		// TypeAny gets an id (TypeId[Any]() needs one) but is excluded from
+		// AnyNew's constructible set: a zero-filled Any is {data: nil, desc:
+		// nil}, which breaks every reflection builtin's "descPtr is never
+		// null" invariant, unlike every other primitive's all-zero-bytes
+		// zero value.
+		g.internDescriptor(desc, k != sema.TypeAny)
 	}
 }
 

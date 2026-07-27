@@ -416,3 +416,22 @@ func f() bool {
 		t.Errorf("f() = %v, want false (a non-copyable struct's own id is never constructible via AnyNew)", got)
 	}
 }
+
+// TestAnyNewAnyIdRejected proves AnyNew rejects TypeId[Any]()'s own id -
+// TypeAny is legally boxable (isBoxableIntoAny's no-op re-box rule), so it
+// has a real descriptor and TypeId[Any]() succeeds, but a zero-filled Any is
+// {data: nil, desc: nil}, unlike every other primitive's valid all-zero-bytes
+// zero value. Every reflection builtin (AnyKind/AnyAs/...) loads unconditionally
+// off the descriptor pointer, so constructing one would crash on first use.
+func TestAnyNewAnyIdRejected(t *testing.T) {
+	jm := compileAndJIT(t, `
+func f() bool {
+	id := TypeId[Any]()
+	_, ok := AnyNew(id)
+	return ok
+}
+`)
+	if got := jm.runBool(t, "f"); got {
+		t.Errorf("f() = %v, want false (Any's own id is never constructible via AnyNew)", got)
+	}
+}
